@@ -73,7 +73,7 @@ for the local HAPI FHIR server.
 
 ```bash
 uv sync                  # creates .venv with locked dependencies
-uv run pytest -m "not fhir"   # 131 tests, no external services needed
+uv run pytest -m "not fhir"   # full local suite, no external services needed
 ```
 
 ## Demo (one command)
@@ -91,7 +91,10 @@ reports, 47 labeled defects), replays it over real MLLP sockets, then prints:
 2. the report delivery report (DELIVERED / ERRORED / REJECTED / NO_ACK,
    duplicate ACKs, ACKs for unknown control IDs),
 3. the quarantine summary (exactly the seeded defects),
-4. FHIR sync results plus server-side resource counts.
+4. lint findings over the raw corpus (exactly the seeded message defects),
+5. the monthly turnaround-time report (median, P90, breach counts per
+   hospital, modality, and priority, with missing timestamps counted),
+6. FHIR sync results plus server-side resource counts.
 
 Manual steps and the full CLI are in `scripts/demo.sh`; every subcommand is
 `uv run hl7bridge <cmd> --help`.
@@ -132,13 +135,17 @@ same bytes (tested).
 
 ## Tests and CI
 
-- `tests/unit/`: 124 tests across timestamps (DST boundaries included),
-  config strictness, parsing, MLLP framing, the full ACK decision table,
-  store invariants, generator determinism and manifest verification,
+- `tests/unit/`: timestamps (DST boundaries included), config strictness,
+  parsing, MLLP framing, the full ACK decision table, store invariants,
+  generator determinism, manifest verification plus tamper tests, loaders,
   reconciliation (including the clean-fixture zero-flag guard), ACK
-  tracking, FHIR mappers and client, and the PHI-in-logs gate.
+  tracking, TAT statistics against hand-computed values (including a DST
+  interval and full-precision checks), every lint rule's fires and
+  does-not-fire cases, FHIR mappers and client, and the PHI-in-logs gate.
 - `tests/system/test_mllp_end_to_end.py`: generated corpus over real
-  sockets, asserted against the manifest.
+  sockets, asserted against the manifest, including TAT outcomes.
+- `tests/system/test_lint_corpus.py`: lint findings over the whole corpus
+  equal the seeded defects as an exact set (precision and recall at once).
 - `tests/system/test_fhir_hapi.py`: against live HAPI; posts everything
   twice and proves idempotency and corrected-report update-in-place.
 
@@ -160,6 +167,8 @@ src/hl7bridge/
   synth/     # project 9: generator, manifest, dicomgen, patients
   reconcile/ # project 2
   acks/      # project 3
+  tat/       # project 4: turnaround-time engine and report
+  lint/      # project 5: rule catalog and runner
   fhir/      # project 1: mapper, client, sync
 tests/unit/  tests/system/
 ```
@@ -167,7 +176,7 @@ tests/unit/  tests/system/
 ## Roadmap (specs in the project brief)
 
 Built here: projects 9 (generator), 2 (reconciliation), 3 (ACK tracking),
-1 (v2-to-FHIR), plus the shared ingest foundation. Specified next: 4
-(turnaround-time reporting), 5 (per-hospital message linting), 6 (procedure
+1 (v2-to-FHIR), 4 (turnaround-time reporting), and 5 (per-hospital message
+linting), plus the shared ingest foundation. Specified next: 6 (procedure
 code normalization), 7 (report text NLP), 8 (patient merge watcher; merge
 recording and the duplicate-pair seed already exist).

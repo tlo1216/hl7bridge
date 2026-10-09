@@ -13,3 +13,9 @@ reconcile:
   order_without_image_hours: 4
   order_lag_minutes: 60
 ack_timeout_minutes: 30
+tat:
+  exam_to_final_target_hours: 2
+  exam_to_final_target_hours_by_priority:
+    S: 1
+lint:
+  disabled_rules: []

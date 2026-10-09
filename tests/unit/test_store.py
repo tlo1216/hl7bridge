@@ -64,6 +64,7 @@ def _order(**overrides) -> OrderRow:
         "procedure_description": "CT CHEST WO CONTRAST",
         "code_system": "local",
         "modality": "CT",
+        "priority": None,
         "patient_mrn": "M1",
         "ordered_at_utc": NOW,
         "status": "new",

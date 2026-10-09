@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS orders (
     procedure_description TEXT,
     code_system           TEXT,
     modality              TEXT,
+    priority              TEXT,
     patient_mrn           TEXT,
     ordered_at_utc        TEXT NOT NULL,
     status                TEXT NOT NULL CHECK (status IN ('new', 'cancelled')),
@@ -67,6 +68,20 @@ CREATE TABLE IF NOT EXISTS reports (
     result_at_utc   TEXT,
     received_at_utc TEXT NOT NULL,
     PRIMARY KEY (hospital_id, accession)
+);
+
+-- Every accepted ORU, one row per message (project 4 input). Unlike the
+-- reports table, nothing here is ever overwritten: turnaround times need
+-- the P and the F event, not just the latest status.
+CREATE TABLE IF NOT EXISTS report_events (
+    id              INTEGER PRIMARY KEY,
+    hospital_id     TEXT NOT NULL,
+    accession       TEXT NOT NULL,
+    control_id      TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('P', 'F', 'C')),
+    observed_at_utc TEXT,
+    result_at_utc   TEXT,
+    received_at_utc TEXT NOT NULL
 );
 
 -- Reports we (the radiology group) sent to hospital EHRs (project 3 input).
@@ -109,5 +124,7 @@ CREATE TABLE IF NOT EXISTS merges (
 );
 
 CREATE INDEX IF NOT EXISTS idx_studies_hospital_accession ON studies (hospital_id, accession);
+CREATE INDEX IF NOT EXISTS idx_report_events_accession
+    ON report_events (hospital_id, accession, status);
 CREATE INDEX IF NOT EXISTS idx_acks_in_control ON acks_in (hospital_id, msa_control_id);
 CREATE INDEX IF NOT EXISTS idx_quarantine_reason ON quarantine (reason);

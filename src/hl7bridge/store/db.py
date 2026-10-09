@@ -7,7 +7,9 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+# v2: orders.priority, report_events table. No migration path by design for
+# the demo: a mismatched database fails loudly and is recreated.
+SCHEMA_VERSION = 2
 
 
 def utc_iso(dt: datetime) -> str:

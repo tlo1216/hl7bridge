@@ -39,9 +39,11 @@ from ..store.repo import (
     AckInRow,
     OrderRow,
     PatientRow,
+    ReportEventRow,
     ReportRow,
     insert_ack_in,
     insert_quarantine,
+    insert_report_event,
     record_merge,
     record_message,
     upsert_order,
@@ -387,6 +389,7 @@ class IngestPipeline:
                         procedure_description=get_field(message, "OBR-4", component=2) or None,
                         code_system=hospital.procedure_code_system,
                         modality=get_field(message, "OBR-24") or None,
+                        priority=get_field(message, "OBR-5") or None,
                         patient_mrn=patient.mrn,
                         ordered_at_utc=ordered_at,
                         status="cancelled",
@@ -404,6 +407,7 @@ class IngestPipeline:
                 procedure_description=get_field(message, "OBR-4", component=2) or None,
                 code_system=hospital.procedure_code_system,
                 modality=get_field(message, "OBR-24") or None,
+                priority=get_field(message, "OBR-5") or None,
                 patient_mrn=patient.mrn,
                 ordered_at_utc=ordered_at,
                 status="new",
@@ -425,7 +429,21 @@ class IngestPipeline:
 
         result_raw = get_field(message, "OBR-22")
         result_at = self._parse_ts(hospital, result_raw, "OBR-22") if result_raw else None
+        observed_raw = get_field(message, "OBR-7")
+        observed_at = self._parse_ts(hospital, observed_raw, "OBR-7") if observed_raw else None
 
+        insert_report_event(
+            self.conn,
+            ReportEventRow(
+                hospital_id=hospital.hospital_id,
+                accession=accession,
+                control_id=control_id,
+                status=status,  # type: ignore[arg-type]
+                observed_at_utc=observed_at,
+                result_at_utc=result_at,
+                received_at_utc=received,
+            ),
+        )
         upsert_report(
             self.conn,
             ReportRow(

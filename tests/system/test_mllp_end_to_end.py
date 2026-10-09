@@ -123,3 +123,30 @@ def test_merges_applied(flow):
         " WHERE merged_into_mrn IS NOT NULL ORDER BY hospital_id"
     ).fetchall()
     assert [(r["hospital_id"]) for r in merged] == ["HOSPA", "HOSPC"]
+
+
+def test_tat_matches_manifest(flow):
+    from hl7bridge.synth.generator import REPORT_MONTH
+    from hl7bridge.tat import tat_report
+
+    conn, registry, manifest, _acks = flow
+    reports = tat_report(conn, registry, REPORT_MONTH)
+    for hosp, expected in manifest.expected["tat"].items():
+        r = reports[hosp]
+        got = {
+            "finals": r.finals,
+            "measured": len(r.measured),
+            "missing_exam_time": r.missing_exam_time,
+            "missing_final_time": r.missing_final_time,
+            "missing_order": r.missing_order,
+            "prelims": r.prelims,
+            "corrected": r.corrected,
+            "breaches": r.breaches,
+        }
+        assert got == expected, hosp
+        # Stat exams measure against the stat target, not the default.
+        stat_exams = [m for m in r.measured if m.priority == "S"]
+        assert stat_exams, hosp
+        assert all(
+            m.target_hours == registry.by_id[hosp].tat.target_hours("S") for m in stat_exams
+        ), hosp

@@ -63,6 +63,12 @@ run ack-report --db "$DB" --config config/hospitals --now "$REPORT_NOW"
 echo "== 7. Ingest summary (quarantine counts are the seeded defects) =="
 run summary --db "$DB"
 
+echo "== 7b. Lint the raw message corpus (findings are the seeded defects) =="
+run lint --dir "$DATA_DIR/synth/messages" --config config/hospitals || true
+
+echo "== 7c. Turnaround-time report for 2026-10 =="
+run tat --db "$DB" --config config/hospitals --month 2026-10
+
 echo "== 8. Sync to FHIR at $FHIR_BASE =="
 run fhir-sync --db "$DB" --config config/hospitals --fhir-base "$FHIR_BASE"
 

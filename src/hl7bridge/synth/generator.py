@@ -57,6 +57,15 @@ REPORT_LINES = (
 IMPRESSION = "IMPRESSION: No acute findings."
 CORRECTED_LINE = "ADDENDUM: Corrected report; measurement value revised."
 BAD_CLOCK_LINE = "FINDINGS: duplicate transmission with corrupt clock."
+STAT_PRIORITY = "S"
+PRELIM_DELAY_MINUTES = 30
+MISSING_OBR7_ORDER = 9  # this order's final ORU omits OBR-7 (exam time)
+REPORT_MONTH = "2026-10"
+
+
+def final_delay_minutes(i: int) -> int:
+    """Exam-to-final delay for order i: 90 + 10*i minutes, a real spread."""
+    return 90 + 10 * i
 
 
 @dataclass(slots=True)
@@ -88,6 +97,7 @@ class _HospitalDay:
         }
         self.ack_expect: dict[str, int] = {}
         self.fhir_expect: dict[str, int] = {}
+        self.tat_expect: dict[str, int] = {}
 
     # -- small helpers -------------------------------------------------------
 
@@ -179,6 +189,7 @@ class _HospitalDay:
         modality: str,
         at: datetime,
         *,
+        priority: str = "R",
         order_control: str = "NW",
         omit_accession: bool = False,
     ) -> str:
@@ -197,6 +208,7 @@ class _HospitalDay:
                 procedure_code=code,
                 procedure_desc=desc,
                 code_system=self.cfg.procedure_code_system,
+                priority=priority,
                 observed=self.ts(at),
                 modality=modality,
             ),
@@ -216,6 +228,8 @@ class _HospitalDay:
         status: str,
         lines: list[str],
         *,
+        priority: str = "R",
+        include_observed: bool = True,
         result_ts_override: str | None = None,
     ) -> str:
         code, desc = PROCEDURES[modality]
@@ -231,7 +245,8 @@ class _HospitalDay:
                 procedure_code=code,
                 procedure_desc=desc,
                 code_system=self.cfg.procedure_code_system,
-                observed=self.ts(observed_at),
+                priority=priority,
+                observed=self.ts(observed_at) if include_observed else "",
                 result_ts=result_ts,
                 modality=modality,
                 status=status,
@@ -292,13 +307,20 @@ class _HospitalDay:
         orderable = [i for i in range(N_PATIENTS) if i != SKIP_ORDER_PATIENT_IDX]
         completed: list[tuple[int, str, PatientSpec, str, datetime]] = []
 
+        tat_breaches = 0
+        tat_prelims = 0
         for i in range(N_ORDERS):
             p = self.pool[self.rng.choice(orderable)]
             modality = MODALITY_CYCLE[i % len(MODALITY_CYCLE)]
             accession = self.accession(i)
+            priority = STAT_PRIORITY if i % 5 == 2 else "R"
             order_at = self.local(7, 0) + timedelta(minutes=30 + 25 * i)
             orm_ctl = f"ORM{tag}{i:04d}"
-            self.emit(order_at, orm_ctl, self.build_orm(orm_ctl, p, accession, modality, order_at))
+            self.emit(
+                order_at,
+                orm_ctl,
+                self.build_orm(orm_ctl, p, accession, modality, order_at, priority=priority),
+            )
 
             if i == 0:
                 self.reconcile_expect["ORDER_WITHOUT_IMAGE"].append(accession)
@@ -317,7 +339,15 @@ class _HospitalDay:
                 self.emit(
                     cancel_at,
                     ctl,
-                    self.build_orm(ctl, p, accession, modality, cancel_at, order_control="CA"),
+                    self.build_orm(
+                        ctl,
+                        p,
+                        accession,
+                        modality,
+                        cancel_at,
+                        priority=priority,
+                        order_control="CA",
+                    ),
                 )
                 self.manifest.add(
                     Defect(
@@ -378,19 +408,51 @@ class _HospitalDay:
 
             lines = [self.rng.choice(REPORT_LINES), IMPRESSION]
             if i % 2 == 0:
-                prelim_at = study_at + timedelta(minutes=30)
+                tat_prelims += 1
+                prelim_at = study_at + timedelta(minutes=PRELIM_DELAY_MINUTES)
                 ctl = f"ORUP{tag}{i:04d}"
                 self.emit(
                     prelim_at,
                     ctl,
-                    self.build_oru(ctl, p, accession, modality, study_at, prelim_at, "P", lines),
+                    self.build_oru(
+                        ctl,
+                        p,
+                        accession,
+                        modality,
+                        study_at,
+                        prelim_at,
+                        "P",
+                        lines,
+                        priority=priority,
+                    ),
                 )
-            final_at = study_at + timedelta(minutes=110)
+            # Varied exam-to-final delays give the TAT report a real spread;
+            # order i=9's final omits OBR-7 to seed a missing exam time.
+            final_delay = timedelta(minutes=final_delay_minutes(i))
+            final_at = study_at + final_delay
+            include_observed = i != MISSING_OBR7_ORDER
+            if include_observed:
+                delay_hours = final_delay.total_seconds() / 3600.0
+                if delay_hours > cfg.tat.target_hours(
+                    priority if priority == STAT_PRIORITY else None
+                ):
+                    tat_breaches += 1
             ctl = f"ORUF{tag}{i:04d}"
             self.emit(
                 final_at,
                 ctl,
-                self.build_oru(ctl, p, accession, modality, study_at, final_at, "F", lines),
+                self.build_oru(
+                    ctl,
+                    p,
+                    accession,
+                    modality,
+                    study_at,
+                    final_at,
+                    "F",
+                    lines,
+                    priority=priority,
+                    include_observed=include_observed,
+                ),
             )
             if i == 2:
                 corrected_at = final_at + timedelta(minutes=90)
@@ -407,6 +469,7 @@ class _HospitalDay:
                         corrected_at,
                         "C",
                         [*lines, CORRECTED_LINE],
+                        priority=priority,
                     ),
                 )
                 self.manifest.add(
@@ -447,6 +510,17 @@ class _HospitalDay:
 
         self._outbound_and_acks(completed)
         self._message_defects()
+
+        self.tat_expect = {
+            "finals": len(completed),
+            "measured": len(completed) - 1,  # MISSING_OBR7_ORDER's final has no OBR-7
+            "missing_exam_time": 1,
+            "missing_final_time": 0,
+            "missing_order": 0,
+            "prelims": tat_prelims,
+            "corrected": 1,
+            "breaches": tat_breaches,
+        }
 
         merged_away = 1 if "ADT^A40" in cfg.expected_message_types else 0
         self.fhir_expect = {
@@ -681,6 +755,7 @@ def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
     quarantine_total: Counter[str] = Counter()
     reconcile_expect: dict[str, Any] = {}
     ack_expect: dict[str, Any] = {}
+    tat_expect: dict[str, Any] = {}
     fhir_total: Counter[str] = Counter()
     aa_total = 0
     outbound_lines: list[dict[str, str]] = []
@@ -703,6 +778,7 @@ def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
         quarantine_total.update(day.quarantine)
         reconcile_expect[hosp_id] = day.reconcile_expect
         ack_expect[hosp_id] = day.ack_expect
+        tat_expect[hosp_id] = day.tat_expect
         fhir_total.update(day.fhir_expect)
 
     outbound_path = out_dir / "outbound_reports.jsonl"
@@ -715,6 +791,7 @@ def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
         "quarantine": dict(sorted(quarantine_total.items())),
         "reconcile": reconcile_expect,
         "acks": ack_expect,
+        "tat": tat_expect,
         "fhir": dict(sorted(fhir_total.items())),
         "messages_aa_total": aa_total,
     }

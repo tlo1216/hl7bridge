@@ -31,6 +31,8 @@ _KNOWN_KEYS = {
     "z_segment",
     "reconcile",
     "ack_timeout_minutes",
+    "tat",
+    "lint",
 }
 
 _KNOWN_RECONCILE_KEYS = {
@@ -38,6 +40,17 @@ _KNOWN_RECONCILE_KEYS = {
     "order_without_image_hours_by_modality",
     "order_lag_minutes",
 }
+
+_KNOWN_TAT_KEYS = {
+    "exam_to_final_target_hours",
+    "exam_to_final_target_hours_by_priority",
+}
+
+_KNOWN_LINT_KEYS = {"disabled_rules"}
+
+# Lint rule ids look like HL7-010; the lint runner validates that each
+# disabled id actually exists (config stays import-cycle-free of lint).
+_LINT_RULE_ID_SHAPE = ("HL7-", 7)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +70,27 @@ class ReconcileConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TatConfig:
+    """Turnaround-time targets (project 4). The breach comparison is strict:
+    a report exactly on target is not a breach."""
+
+    exam_to_final_target_hours: float = 2.0
+    exam_to_final_target_hours_by_priority: dict[str, float] = field(default_factory=dict)
+
+    def target_hours(self, priority: str | None) -> float:
+        if priority is not None and priority in self.exam_to_final_target_hours_by_priority:
+            return self.exam_to_final_target_hours_by_priority[priority]
+        return self.exam_to_final_target_hours
+
+
+@dataclass(frozen=True, slots=True)
+class LintConfig:
+    """Per-hospital lint profile (project 5)."""
+
+    disabled_rules: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class HospitalConfig:
     hospital_id: str
     display_name: str
@@ -70,6 +104,8 @@ class HospitalConfig:
     z_segment: str | None = None
     reconcile: ReconcileConfig = field(default_factory=ReconcileConfig)
     ack_timeout_minutes: float = 30.0
+    tat: TatConfig = field(default_factory=TatConfig)
+    lint: LintConfig = field(default_factory=LintConfig)
 
     @property
     def tzinfo(self) -> ZoneInfo:
@@ -140,6 +176,40 @@ def load_hospital_config(path: Path) -> HospitalConfig:
         order_lag_minutes=float(reconcile_raw.get("order_lag_minutes", 60.0)),
     )
 
+    tat_raw = data.get("tat", {})
+    if not isinstance(tat_raw, dict):
+        raise ConfigError(f"{source}: 'tat' must be a mapping")
+    unknown_tat = set(tat_raw) - _KNOWN_TAT_KEYS
+    if unknown_tat:
+        raise ConfigError(f"{source}: unknown tat keys {sorted(unknown_tat)}")
+    by_priority_raw = tat_raw.get("exam_to_final_target_hours_by_priority", {})
+    if not isinstance(by_priority_raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, (int, float)) for k, v in by_priority_raw.items()
+    ):
+        raise ConfigError(
+            f"{source}: exam_to_final_target_hours_by_priority must map priority to hours"
+        )
+    tat = TatConfig(
+        exam_to_final_target_hours=float(tat_raw.get("exam_to_final_target_hours", 2.0)),
+        exam_to_final_target_hours_by_priority={k: float(v) for k, v in by_priority_raw.items()},
+    )
+
+    lint_raw = data.get("lint", {})
+    if not isinstance(lint_raw, dict):
+        raise ConfigError(f"{source}: 'lint' must be a mapping")
+    unknown_lint = set(lint_raw) - _KNOWN_LINT_KEYS
+    if unknown_lint:
+        raise ConfigError(f"{source}: unknown lint keys {sorted(unknown_lint)}")
+    disabled_raw = lint_raw.get("disabled_rules", [])
+    prefix, id_len = _LINT_RULE_ID_SHAPE
+    if not isinstance(disabled_raw, list) or not all(
+        isinstance(r, str) and r.startswith(prefix) and len(r) == id_len for r in disabled_raw
+    ):
+        raise ConfigError(
+            f"{source}: lint.disabled_rules must be a list of rule ids like 'HL7-010'"
+        )
+    lint = LintConfig(disabled_rules=tuple(disabled_raw))
+
     z_segment_raw = data.get("z_segment")
     if z_segment_raw is not None and not isinstance(z_segment_raw, str):
         raise ConfigError(f"{source}: 'z_segment' must be a string if present")
@@ -165,6 +235,8 @@ def load_hospital_config(path: Path) -> HospitalConfig:
         z_segment=z_segment_raw,
         reconcile=reconcile,
         ack_timeout_minutes=float(ack_timeout_raw),
+        tat=tat,
+        lint=lint,
     )
 
 

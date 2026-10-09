@@ -22,9 +22,11 @@ from .fhir import HapiClient, render_sync_text, sync_to_fhir
 from .ingest import IngestPipeline, send_messages, serve
 from .ingest.loaders import load_outbound, load_studies
 from .ingest.parser import get_field, parse_hl7
+from .lint import lint_directory, render_lint_text
 from .reconcile import reconcile, render_reconcile_text
 from .store import connect, message_counts, quarantine_summary
 from .synth import generate, verify_manifest
+from .tat import render_tat_text, tat_report
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +127,20 @@ def cmd_ack_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tat(args: argparse.Namespace) -> int:
+    conn = connect(args.db)
+    reports = tat_report(conn, _registry(args), args.month)
+    print(render_tat_text(reports))
+    return 0
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    report = lint_directory(Path(args.dir), _registry(args))
+    print(render_lint_text(report))
+    # Linter convention: errors fail the invocation (warnings do not).
+    return 1 if report.error_count else 0
+
+
 def cmd_fhir_sync(args: argparse.Namespace) -> int:
     conn = connect(args.db)
     with HapiClient(args.fhir_base) as client:
@@ -193,6 +209,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", required=True)
     p.add_argument("--config", required=True)
     p.add_argument("--now", default=None, help="aware ISO timestamp; defaults to current time")
+
+    p = add("tat", cmd_tat, help="monthly turnaround-time report")
+    p.add_argument("--db", required=True)
+    p.add_argument("--config", required=True)
+    p.add_argument("--month", required=True, help="YYYY-MM, in hospital local time")
+
+    p = add("lint", cmd_lint, help="lint *.hl7 files against hospital profiles")
+    p.add_argument("--dir", required=True)
+    p.add_argument("--config", required=True)
 
     p = add("fhir-sync", cmd_fhir_sync, help="post store contents to a FHIR server")
     p.add_argument("--db", required=True)

@@ -63,6 +63,7 @@ def obr(
     procedure_code: str = "",
     procedure_desc: str = "",
     code_system: str = "",
+    priority: str = "",
     observed: str = "",
     result_ts: str = "",
     modality: str = "",
@@ -74,6 +75,7 @@ def obr(
     fields[2] = placer
     fields[3] = filler
     fields[4] = f"{procedure_code}^{procedure_desc}^{code_system}".rstrip("^")
+    fields[5] = priority
     fields[7] = observed
     fields[22] = result_ts
     fields[24] = modality

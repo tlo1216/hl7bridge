@@ -37,6 +37,7 @@ class OrderRow:
     procedure_description: str | None
     code_system: str | None
     modality: str | None
+    priority: str | None
     patient_mrn: str | None
     ordered_at_utc: str
     status: Literal["new", "cancelled"]
@@ -50,6 +51,17 @@ class ReportRow:
     status: Literal["P", "F", "C"]
     report_text: str
     patient_mrn: str | None
+    result_at_utc: str | None
+    received_at_utc: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReportEventRow:
+    hospital_id: str
+    accession: str
+    control_id: str
+    status: Literal["P", "F", "C"]
+    observed_at_utc: str | None
     result_at_utc: str | None
     received_at_utc: str
 
@@ -144,15 +156,16 @@ def upsert_order(conn: sqlite3.Connection, o: OrderRow) -> Literal["inserted", "
     conn.execute(
         """
         INSERT INTO orders (hospital_id, accession, placer_order_id, procedure_code,
-                            procedure_description, code_system, modality, patient_mrn,
-                            ordered_at_utc, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            procedure_description, code_system, modality, priority,
+                            patient_mrn, ordered_at_utc, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (hospital_id, accession) DO UPDATE SET
             placer_order_id = excluded.placer_order_id,
             procedure_code = excluded.procedure_code,
             procedure_description = excluded.procedure_description,
             code_system = excluded.code_system,
             modality = excluded.modality,
+            priority = excluded.priority,
             patient_mrn = excluded.patient_mrn,
             ordered_at_utc = excluded.ordered_at_utc,
             status = excluded.status
@@ -165,6 +178,7 @@ def upsert_order(conn: sqlite3.Connection, o: OrderRow) -> Literal["inserted", "
             o.procedure_description,
             o.code_system,
             o.modality,
+            o.priority,
             o.patient_mrn,
             o.ordered_at_utc,
             o.status,
@@ -238,6 +252,26 @@ def insert_study(conn: sqlite3.Connection, s: StudyRow) -> Literal["inserted", "
         ),
     )
     return "replaced" if existing else "inserted"
+
+
+def insert_report_event(conn: sqlite3.Connection, e: ReportEventRow) -> None:
+    """Append-only: every accepted ORU is one event, never overwritten."""
+    conn.execute(
+        """
+        INSERT INTO report_events (hospital_id, accession, control_id, status,
+                                   observed_at_utc, result_at_utc, received_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            e.hospital_id,
+            e.accession,
+            e.control_id,
+            e.status,
+            e.observed_at_utc,
+            e.result_at_utc,
+            e.received_at_utc,
+        ),
+    )
 
 
 def record_outbound_report(

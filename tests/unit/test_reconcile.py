@@ -37,6 +37,7 @@ def order(acc, *, modality="CT", mrn="M1", status="new", at=MORNING, hosp="HOSPA
         procedure_description="CT CHEST",
         code_system="local",
         modality=modality,
+        priority=None,
         patient_mrn=mrn,
         ordered_at_utc=at,
         status=status,
