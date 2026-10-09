@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from pydicom import dcmread
@@ -102,12 +103,23 @@ def load_outbound(conn: sqlite3.Connection, path: Path) -> int:
             missing = required - set(entry)
             if missing:
                 raise BridgeError(f"{path}:{lineno}: missing keys {sorted(missing)}")
+            # The store's UTC invariant is enforced at this admission gate too:
+            # an unvalidated value here would only explode later at read time.
+            raw_sent = entry["sent_at_utc"]
+            try:
+                sent_at = datetime.fromisoformat(raw_sent)
+            except (TypeError, ValueError) as exc:
+                raise BridgeError(f"{path}:{lineno}: bad sent_at_utc {raw_sent!r}: {exc}") from exc
+            if sent_at.tzinfo is None or sent_at.utcoffset() is None:
+                raise BridgeError(
+                    f"{path}:{lineno}: sent_at_utc {raw_sent!r} is naive; must carry a UTC offset"
+                )
             record_outbound_report(
                 conn,
                 hospital_id=entry["hospital_id"],
                 control_id=entry["control_id"],
                 accession=entry["accession"],
-                sent_at_utc=entry["sent_at_utc"],
+                sent_at_utc=utc_iso(sent_at),
             )
             count += 1
     if count == 0:

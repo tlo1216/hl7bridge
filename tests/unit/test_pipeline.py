@@ -271,3 +271,58 @@ def test_internal_error_boundary_is_loud_ar(pipeline, caplog):
     assert ack_fields(ack_bytes.decode())[0] == "AR"
     assert "internal error" in caplog.text
     assert quarantine_summary(pipeline.conn) == {"internal_error": 1}
+
+
+# -- branch coverage added after review finding C2 ---------------------------
+
+
+def test_missing_mrn_is_ae(pipeline):
+    pid_no_mrn = "PID|1||||ZZZTEST^ALPHA||19700101|F"
+    ack = pipeline.handle_bytes(msg(pid_no_mrn, ORC_NW, OBR))
+    assert ack_fields(ack) == ("AE", "C1")
+    assert quarantine_summary(pipeline.conn) == {"missing_mrn": 1}
+
+
+def test_invalid_msa_code_is_ae(pipeline):
+    ack = pipeline.handle_bytes(msg("MSA|XX|ORU0001", msg_type="ACK^R01", control_id="CA3"))
+    assert ack_fields(ack) == ("AE", "CA3")
+    assert quarantine_summary(pipeline.conn) == {"missing_msa": 1}
+    assert pipeline.conn.execute("SELECT COUNT(*) AS n FROM acks_in").fetchone()["n"] == 0
+
+
+def test_malformed_birthdate_is_ae(pipeline):
+    pid_bad_dob = "PID|1||M1001^^^HOSPA^MR||ZZZTEST^ALPHA||banana|F"
+    ack = pipeline.handle_bytes(msg(pid_bad_dob, msg_type="ADT^A04"))
+    assert ack_fields(ack) == ("AE", "C1")
+    assert quarantine_summary(pipeline.conn) == {"bad_timestamp": 1}
+
+
+def test_orm_with_no_timestamp_anywhere_is_ae(pipeline):
+    orc_no_ts = "ORC|NW|PL1|FIL1"
+    ack = pipeline.handle_bytes(msg(PID, orc_no_ts, OBR, ts=""))
+    assert ack_fields(ack) == ("AE", "C1")
+    assert quarantine_summary(pipeline.conn) == {"bad_timestamp": 1}
+
+
+def test_cancel_for_unknown_order_creates_tombstone(pipeline):
+    orc_ca = "ORC|CA|PL1|FIL1||||||20261007110000"
+    ack = pipeline.handle_bytes(msg(PID, orc_ca, OBR))
+    assert ack_fields(ack) == ("AA", "C1")
+    row = pipeline.conn.execute("SELECT status, accession FROM orders").fetchone()
+    assert (row["status"], row["accession"]) == ("cancelled", "ACC123")
+
+
+def test_expected_type_without_handler_is_ae(pipeline, tmp_path):
+    """Config lists a type the code has no handler for: loud config/code
+    mismatch, not a silent accept."""
+    cfg_text = (CONFIG_DIR / "hospa.yaml").read_text(encoding="utf-8")
+    needle = "expected_message_types: [ADT^A04, ADT^A08, ADT^A40, ORM^O01, ORU^R01]"
+    assert needle in cfg_text
+    (tmp_path / "h.yaml").write_text(
+        cfg_text.replace(needle, "expected_message_types: [SIU^S12]"), encoding="utf-8"
+    )
+    registry = HospitalRegistry.load_dir(tmp_path)
+    p2 = IngestPipeline(registry, pipeline.conn, clock=lambda: FIXED_NOW)
+    ack = p2.handle_bytes(msg(PID, msg_type="SIU^S12"))
+    assert ack_fields(ack) == ("AE", "C1")
+    assert quarantine_summary(pipeline.conn) == {"no_handler_for_type": 1}

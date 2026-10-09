@@ -248,16 +248,35 @@ def verify_manifest(out_dir: Path, registry: HospitalRegistry) -> list[str]:
             info = idx.parsed.get((hosp, d.control_id or ""))
             check(info is not None, d, "seeded message not found")
             if info is not None:
-                check(info.get("accession", "") == "", d, "accession unexpectedly present")
+                check(
+                    info.get("type") == "ORM^O01",
+                    d,
+                    f"expected ORM^O01, got {info.get('type')!r}",
+                )
+                check(
+                    "accession" in info,
+                    d,
+                    "message not indexed against a configured hospital",
+                )
+                check(
+                    info.get("accession", "unset") == "",
+                    d,
+                    "accession unexpectedly present",
+                )
         elif d.category == "bad_timestamp":
             info = idx.parsed.get((hosp, d.control_id or ""))
             check(info is not None, d, "seeded message not found")
             if info is not None:
-                try:
-                    parse_hl7_ts(info.get("obr22", ""), default_tz=registry.by_id[hosp].tzinfo)
-                    check(False, d, "OBR-22 unexpectedly parseable")
-                except TimestampError:
-                    pass
+                obr22 = info.get("obr22", "")
+                # An empty OBR-22 would be ACCEPTED by the pipeline, so it is
+                # not a malformed-timestamp seed; require a present-but-bad value.
+                check(bool(obr22), d, "OBR-22 empty or absent")
+                if obr22:
+                    try:
+                        parse_hl7_ts(obr22, default_tz=registry.by_id[hosp].tzinfo)
+                        check(False, d, "OBR-22 unexpectedly parseable")
+                    except TimestampError:
+                        pass
         elif d.category == "parse_error":
             check(
                 any(h == hosp for h, _ in idx.unparseable),

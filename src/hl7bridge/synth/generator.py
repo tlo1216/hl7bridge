@@ -56,6 +56,7 @@ REPORT_LINES = (
 )
 IMPRESSION = "IMPRESSION: No acute findings."
 CORRECTED_LINE = "ADDENDUM: Corrected report; measurement value revised."
+BAD_CLOCK_LINE = "FINDINGS: duplicate transmission with corrupt clock."
 
 
 @dataclass(slots=True)
@@ -652,7 +653,7 @@ class _HospitalDay:
                 at,
                 at,
                 "F",
-                ["FINDINGS: duplicate transmission with corrupt clock."],
+                [BAD_CLOCK_LINE],
                 result_ts_override="2026131599",
             ),
             expect_aa=False,

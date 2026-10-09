@@ -51,8 +51,8 @@ def get_field(
 ) -> str:
     """Return the (unescaped) component value, or '' when absent.
 
-    Absence is a normal outcome callers must decide about explicitly;
-    require_field() is the raising variant.
+    Absence is a normal outcome; callers that require the field raise
+    MessageValidationError themselves with a reason code.
     """
     segment_name, field_num = split_field_ref(ref)
     try:

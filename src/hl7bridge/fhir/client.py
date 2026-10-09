@@ -8,12 +8,15 @@ surface as an error instead of papering over.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 from fhir.resources.R4B.resource import Resource
 
 from ..errors import FhirPostError
+
+log = logging.getLogger(__name__)
 
 FHIR_JSON = "application/fhir+json"
 
@@ -97,6 +100,8 @@ class HapiClient:
     def metadata_ok(self) -> bool:
         try:
             response = self._client.get(f"{self.base_url}/metadata")
-        except httpx.TransportError:
+        except httpx.TransportError as exc:
+            # Probe failure is an expected outcome, but never a silent one.
+            log.warning("FHIR /metadata probe failed for %s: %s", self.base_url, exc)
             return False
         return response.status_code == 200

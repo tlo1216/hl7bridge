@@ -53,10 +53,6 @@ async def decode_frames(reader: asyncio.StreamReader) -> AsyncIterator[Frame | J
                 yield JunkBytes(buffer)
             return
         buffer += chunk
-        if len(buffer) > MAX_FRAME_BYTES:
-            yield JunkBytes(buffer)
-            buffer = b""
-            continue
         while True:
             start = buffer.find(START_BLOCK)
             if start == -1:
@@ -69,6 +65,12 @@ async def decode_frames(reader: asyncio.StreamReader) -> AsyncIterator[Frame | J
                 break  # incomplete frame; wait for more bytes
             yield Frame(buffer[1:end])
             buffer = buffer[end + len(END_BLOCK) :]
+        # Size guard AFTER extraction: at this point the residual buffer holds
+        # only an incomplete frame or start-block-less junk, so complete valid
+        # frames can never be dumped by the guard (regression-tested).
+        if len(buffer) > MAX_FRAME_BYTES:
+            yield JunkBytes(buffer)
+            buffer = b""
 
 
 Handler = Callable[[bytes], Awaitable[bytes]]

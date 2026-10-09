@@ -25,6 +25,7 @@ REASON_MISSING_ACCESSION = "missing_accession"
 REASON_BAD_TIMESTAMP = "bad_timestamp"
 REASON_UNKNOWN_REPORT_STATUS = "unknown_report_status"
 REASON_UNSUPPORTED_ORDER_CONTROL = "unsupported_order_control"
+REASON_NO_HANDLER = "no_handler_for_type"
 REASON_MISSING_MSA = "missing_msa"
 REASON_INTERNAL_ERROR = "internal_error"
 

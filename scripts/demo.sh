@@ -23,6 +23,7 @@ echo "== 0. HAPI FHIR =="
 if curl -fsS "$FHIR_BASE/metadata" >/dev/null 2>&1; then
     echo "FHIR server already answering at $FHIR_BASE"
 else
+    docker rm -f hl7bridge-hapi >/dev/null 2>&1 || true  # stale container from a previous run
     docker run -d --name hl7bridge-hapi -p 8080:8080 "$HAPI_IMAGE"
     echo -n "waiting for HAPI to boot"
     for _ in $(seq 1 90); do
@@ -38,12 +39,12 @@ echo "== 1. Generate synthetic day (seed=$SEED) =="
 rm -rf "$DATA_DIR"
 mkdir -p "$DATA_DIR"
 run synth --out "$DATA_DIR/synth" --config config/hospitals --seed "$SEED"
-REPORT_NOW="$(uv run python -c "import json;print(json.load(open('$DATA_DIR/synth/manifest.json'))['report_now_utc'])")"
+REPORT_NOW="$(MANIFEST="$DATA_DIR/synth/manifest.json" uv run python -c 'import json,os;print(json.load(open(os.environ["MANIFEST"]))["report_now_utc"])')"
 
 echo "== 2. Start MLLP listener =="
-run serve --db "$DB" --config config/hospitals --port "$MLLP_PORT" &
+uv run hl7bridge serve --db "$DB" --config config/hospitals --port "$MLLP_PORT" &
 LISTENER_PID=$!
-trap 'kill "$LISTENER_PID" 2>/dev/null || true' EXIT
+trap 'kill "$LISTENER_PID" 2>/dev/null || true; wait "$LISTENER_PID" 2>/dev/null || true' EXIT
 sleep 1
 
 echo "== 3. Replay the day over MLLP =="
@@ -71,4 +72,4 @@ for resource in Patient ServiceRequest DiagnosticReport ImagingStudy; do
     echo "  $resource on server: $total"
 done
 
-echo "Demo complete. MLLP listener still writing to $DB; Ctrl+C handlers will stop it."
+echo "Demo complete. Stopping the MLLP listener; data remains in $DB."

@@ -10,6 +10,7 @@ ACK decision table (engineering rule 2; tested row by row):
 | MSH-4/MSH-6 match no configured hospital         | AR  | quarantine unknown_hospital |
 | Message type not expected for the hospital       | AR  | quarantine unexpected_message_type |
 | Type-specific validation failed (see REASON_*)   | AE  | quarantine <reason>      |
+| Expected type but no handler (config/code bug)   | AE  | quarantine no_handler_for_type |
 | Internal error (server boundary)                 | AR  | quarantine internal_error |
 | Valid                                            | AA  | messages + domain tables |
 | Valid, duplicate (hospital_id, control_id)       | AA  | duplicate_count bump only |
@@ -297,7 +298,7 @@ class IngestPipeline:
             # expected_message_types allowed a type we have no handler for:
             # that is a config/code mismatch and must be loud, not ignored.
             raise MessageValidationError(
-                ackmod.REASON_UNEXPECTED_TYPE,
+                ackmod.REASON_NO_HANDLER,
                 f"no handler implemented for expected type {msg_type!r}",
             )
 

@@ -19,11 +19,29 @@ from hl7bridge.ingest import IngestPipeline
 from hl7bridge.ingest.loaders import load_outbound, load_studies
 from hl7bridge.store import connect
 from hl7bridge.synth import generate
-from hl7bridge.synth.generator import CORRECTED_LINE, IMPRESSION, REPORT_LINES
-from hl7bridge.synth.patients import FAMILY_NAMES, GIVEN_NAMES
+from hl7bridge.synth.generator import (
+    BAD_CLOCK_LINE,
+    CORRECTED_LINE,
+    IMPRESSION,
+    N_PATIENTS,
+    REPORT_LINES,
+)
+from hl7bridge.synth.patients import FAMILY_NAMES, GIVEN_NAMES, make_pool
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
 MRN_PATTERN = re.compile(r"\bM[ABC]1\d{3}\b")  # matches the synthetic MRN pool
+ACCESSION_PATTERN = re.compile(r"\bACCX?[ABC]\d{4}\b")  # synthetic accessions
+
+
+def _birth_dates() -> set[str]:
+    """Every DOB the generator can emit, in raw HL7 and ISO forms."""
+    dates: set[str] = set()
+    for hosp in ("HOSPA", "HOSPB", "HOSPC"):
+        for p in make_pool(hosp, N_PATIENTS):
+            dates.add(p.birth_date)
+            iso = f"{p.birth_date[0:4]}-{p.birth_date[4:6]}-{p.birth_date[6:8]}"
+            dates.add(iso)
+    return dates
 
 
 @pytest.fixture(scope="module")
@@ -56,7 +74,12 @@ def test_no_phi_reaches_logs(corpus, caplog):
             leaks.append(f"patient name {name!r} found in logs")
     mrn_hits = sorted(set(MRN_PATTERN.findall(log_text)))
     leaks.extend(f"MRN {m!r} found in logs" for m in mrn_hits)
-    for fragment in (*REPORT_LINES, IMPRESSION, CORRECTED_LINE):
+    for dob in sorted(_birth_dates()):
+        if dob in log_text:
+            leaks.append(f"birth date {dob!r} found in logs")
+    accession_hits = sorted(set(ACCESSION_PATTERN.findall(log_text)))
+    leaks.extend(f"accession {a!r} found in logs" for a in accession_hits)
+    for fragment in (*REPORT_LINES, IMPRESSION, CORRECTED_LINE, BAD_CLOCK_LINE):
         if fragment in log_text:
             leaks.append(f"report text {fragment!r} found in logs")
     assert leaks == []
