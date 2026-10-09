@@ -73,3 +73,59 @@ def test_search_total_missing_total_raises():
 
     with make_client(handler) as client, pytest.raises(FhirPostError, match="no integer total"):
         client.search_total("Patient")
+
+
+def test_extra_headers_sent_on_every_request():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["apikey"] = request.headers.get("apikey")
+        return httpx.Response(200, json={"resourceType": "Bundle", "total": 0})
+
+    client = HapiClient(
+        "http://fhir.test/fhir",
+        transport=httpx.MockTransport(handler),
+        extra_headers={"apikey": "synthetic-test-key"},
+    )
+    with client:
+        client.search_total("Patient")
+    assert seen["apikey"] == "synthetic-test-key"
+
+
+def test_capability_summary_reads_versions():
+    def handler(_request):
+        return httpx.Response(
+            200,
+            json={
+                "resourceType": "CapabilityStatement",
+                "fhirVersion": "4.0.1",
+                "software": {"name": "HAPI FHIR Server", "version": "8.2.0"},
+            },
+        )
+
+    with make_client(handler) as client:
+        summary = client.capability_summary()
+    assert summary == {
+        "status_code": 200,
+        "software": "HAPI FHIR Server",
+        "software_version": "8.2.0",
+        "fhir_version": "4.0.1",
+    }
+
+
+def test_capability_summary_unauthorized_is_loud_not_crash():
+    def handler(_request):
+        return httpx.Response(401, text="Missing api key")
+
+    with make_client(handler) as client:
+        summary = client.capability_summary()
+    assert summary["status_code"] == 401
+    assert "Missing api key" in summary["body"]
+
+
+def test_capability_summary_transport_error_raises():
+    def handler(_request):
+        raise httpx.ConnectError("refused")
+
+    with make_client(handler) as client, pytest.raises(FhirPostError, match="refused"):
+        client.capability_summary()

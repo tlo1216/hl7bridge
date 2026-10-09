@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from collections import Counter
 from collections.abc import Callable
@@ -141,9 +142,32 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return 1 if report.error_count else 0
 
 
+def _fhir_headers() -> dict[str, str]:
+    """Auth headers from the environment, never from argv (argv leaks into
+    process listings). HL7B_FHIR_APIKEY feeds the 'apikey' header (as some hosted sandboxes use)."""
+    api_key = os.environ.get("HL7B_FHIR_APIKEY")
+    return {"apikey": api_key} if api_key else {}
+
+
+def cmd_fhir_probe(args: argparse.Namespace) -> int:
+    with HapiClient(args.fhir_base, extra_headers=_fhir_headers()) as client:
+        summary = client.capability_summary()
+        print(f"server: {args.fhir_base}")
+        print(f"  HTTP {summary['status_code']}")
+        if summary["status_code"] != 200:
+            print(f"  body: {summary.get('body', '')}")
+            return 1
+        print(f"  software: {summary.get('software')} {summary.get('software_version')}")
+        print(f"  fhirVersion: {summary.get('fhir_version')}")
+        for resource in ("Patient", "ServiceRequest", "DiagnosticReport", "ImagingStudy"):
+            total = client.search_total(resource)
+            print(f"  {resource} on server: {total}")
+    return 0
+
+
 def cmd_fhir_sync(args: argparse.Namespace) -> int:
     conn = connect(args.db)
-    with HapiClient(args.fhir_base) as client:
+    with HapiClient(args.fhir_base, extra_headers=_fhir_headers()) as client:
         if not client.metadata_ok():
             raise SystemExit(f"FHIR server at {args.fhir_base} is not answering /metadata")
         report = sync_to_fhir(conn, _registry(args), client)
@@ -223,6 +247,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", required=True)
     p.add_argument("--config", required=True)
     p.add_argument("--fhir-base", default="http://localhost:8080/fhir")
+
+    p = add(
+        "fhir-probe",
+        cmd_fhir_probe,
+        help="read-only server check: capability statement and resource counts"
+        " (set HL7B_FHIR_APIKEY for servers that need an apikey header)",
+    )
+    p.add_argument("--fhir-base", required=True)
 
     p = add("summary", cmd_summary, help="message and quarantine counters")
     p.add_argument("--db", required=True)

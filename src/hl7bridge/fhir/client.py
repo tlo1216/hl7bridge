@@ -28,11 +28,14 @@ class HapiClient:
         *,
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
+        """extra_headers carries auth such as a hosted sandbox 'apikey'
+        header; values never appear in logs or error messages."""
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(
             timeout=timeout,
-            headers={"Accept": FHIR_JSON},
+            headers={"Accept": FHIR_JSON, **(extra_headers or {})},
             transport=transport,
         )
 
@@ -105,3 +108,22 @@ class HapiClient:
             log.warning("FHIR /metadata probe failed for %s: %s", self.base_url, exc)
             return False
         return response.status_code == 200
+
+    def capability_summary(self) -> dict[str, Any]:
+        """Read-only probe: software name/version and FHIR version from the
+        CapabilityStatement, plus the HTTP status. Raises FhirPostError on
+        transport failure so callers see exactly what broke."""
+        try:
+            response = self._client.get(f"{self.base_url}/metadata")
+        except httpx.TransportError as exc:
+            raise FhirPostError(0, f"{self.base_url}/metadata", str(exc)) from exc
+        summary: dict[str, Any] = {"status_code": response.status_code}
+        if response.status_code == 200:
+            body = response.json()
+            software = body.get("software", {})
+            summary["software"] = software.get("name")
+            summary["software_version"] = software.get("version")
+            summary["fhir_version"] = body.get("fhirVersion")
+        else:
+            summary["body"] = response.text[:300]
+        return summary

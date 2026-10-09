@@ -40,7 +40,8 @@ def synced(tmp_path_factory, fhir_base):
     tmp = tmp_path_factory.mktemp("fhir")
     out, registry, manifest = build_corpus(tmp)
     conn, _pipeline, _acks = ingest_corpus(out, registry, tmp / "fhir.db")
-    client = HapiClient(fhir_base)
+    api_key = os.environ.get("HL7B_FHIR_APIKEY")
+    client = HapiClient(fhir_base, extra_headers={"apikey": api_key} if api_key else None)
     if not client.metadata_ok():
         if REQUIRED:
             pytest.fail(f"FHIR server at {fhir_base} did not answer /metadata")
