@@ -1,0 +1,17 @@
+# Hospital A (synthetic). Baseline v2.3 dialect: accession in OBR-3,
+# local times with no UTC offset.
+hospital_id: HOSPA
+display_name: Hospital A (synthetic)
+facility_codes: [HOSPA, HOSPA_RIS]
+accession_field: OBR-3
+timezone: America/Los_Angeles
+hl7_version: "2.3"
+timestamps_include_offset: false
+expected_message_types: [ADT^A04, ADT^A08, ADT^A40, ORM^O01, ORU^R01]
+procedure_code_system: local
+reconcile:
+  order_without_image_hours: 4
+  order_without_image_hours_by_modality:
+    US: 2
+  order_lag_minutes: 60
+ack_timeout_minutes: 30

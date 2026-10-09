@@ -1,0 +1,15 @@
+# Hospital C (synthetic). v2.5 dialect: accession in OBR-3, Eastern time,
+# and timestamps carry explicit UTC offsets.
+hospital_id: HOSPC
+display_name: Hospital C (synthetic)
+facility_codes: [HOSPC, HOSPC_HIS]
+accession_field: OBR-3
+timezone: America/New_York
+hl7_version: "2.5"
+timestamps_include_offset: true
+expected_message_types: [ADT^A04, ADT^A08, ADT^A40, ORM^O01, ORU^R01]
+procedure_code_system: local
+reconcile:
+  order_without_image_hours: 4
+  order_lag_minutes: 60
+ack_timeout_minutes: 30

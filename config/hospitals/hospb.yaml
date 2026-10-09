@@ -1,0 +1,16 @@
+# Hospital B (synthetic). v2.4 dialect: accession in ORC-3, a Z-segment
+# appended to orders, Central time without offsets.
+hospital_id: HOSPB
+display_name: Hospital B (synthetic)
+facility_codes: [HOSPB]
+accession_field: ORC-3
+timezone: America/Chicago
+hl7_version: "2.4"
+timestamps_include_offset: false
+expected_message_types: [ADT^A04, ADT^A08, ORM^O01, ORU^R01]
+procedure_code_system: local
+z_segment: ZBI|1|SYNTHBILL42
+reconcile:
+  order_without_image_hours: 6
+  order_lag_minutes: 90
+ack_timeout_minutes: 45

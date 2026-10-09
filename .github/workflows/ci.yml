@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    name: lint + types + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync dependencies (locked)
+        run: uv sync --locked
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Mypy (strict on src)
+        run: uv run mypy
+      - name: Unit and system tests (no FHIR server)
+        run: uv run pytest -m "not fhir" -q
+
+  fhir-system:
+    name: FHIR system tests against HAPI
+    runs-on: ubuntu-latest
+    services:
+      hapi:
+        image: hapiproject/hapi:v8.12.0-2
+        ports:
+          - 8080:8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync dependencies (locked)
+        run: uv sync --locked
+      - name: Wait for HAPI to answer /metadata
+        run: |
+          for i in $(seq 1 120); do
+            if curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; then
+              echo "HAPI ready after ~$((i * 3))s"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "HAPI never became ready" >&2
+          exit 1
+      # HL7B_FHIR_REQUIRED=1 turns a missing/unreachable server into a FAILURE,
+      # so this job can never silently skip the tests it exists to run.
+      - name: FHIR system tests
+        env:
+          HL7B_FHIR_BASE: http://localhost:8080/fhir
+          HL7B_FHIR_REQUIRED: "1"
+        run: uv run pytest tests/system/test_fhir_hapi.py -m fhir -q
