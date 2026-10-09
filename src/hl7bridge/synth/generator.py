@@ -433,9 +433,9 @@ class _HospitalDay:
             include_observed = i != MISSING_OBR7_ORDER
             if include_observed:
                 delay_hours = final_delay.total_seconds() / 3600.0
-                if delay_hours > cfg.tat.target_hours(
-                    priority if priority == STAT_PRIORITY else None
-                ):
+                # Same target resolution as tat.engine: pass the priority
+                # through so any future per-priority override stays in sync.
+                if delay_hours > cfg.tat.target_hours(priority):
                     tat_breaches += 1
             ctl = f"ORUF{tag}{i:04d}"
             self.emit(

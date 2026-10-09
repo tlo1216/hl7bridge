@@ -208,3 +208,43 @@ def test_render_contains_summary_sentence(conn, registry):
     assert "HOSPA, 2026-10: 1 finalized exams measured" in text
     assert "median exam-to-final 3.00h" in text
     assert "1 target breach(es)" in text
+
+
+# -- regressions from review findings T2, T3, T4 -----------------------------
+
+
+def test_null_result_final_does_not_displace_dated_final(conn, registry):
+    """T2: a timestamp-less F retransmission must not hide the dated final."""
+    add_order(conn, "T2")
+    add_event(conn, "T2", "F", observed=BASE, result=BASE + timedelta(hours=1))
+    # Later event, no OBR-22; previously SQLite's NULLs-first ordering made
+    # this the 'first' final and the accession read as missing_final_time.
+    add_event(conn, "T2", "F", observed=BASE, result=None, control="C2")
+    r = run(conn, registry)["HOSPA"]
+    assert (r.finals, len(r.measured), r.missing_final_time) == (1, 1, 0)
+    assert r.measured[0].exam_to_final_hours == pytest.approx(1.0)
+
+
+def test_unplaceable_final_lands_in_exactly_one_month(conn, registry):
+    """T4: a final with no result time is attributed by received time, once."""
+    add_order(conn, "T4")
+    add_event(conn, "T4", "F", observed=BASE, result=None)  # received at BASE (Oct)
+    for month, finals, missing in (("2026-10", 1, 1), ("2026-09", 0, 0), ("2026-11", 0, 0)):
+        r = run(conn, registry, month=month)["HOSPA"]
+        assert (r.finals, r.missing_final_time) == (finals, missing), month
+
+
+def test_routine_priority_honors_by_priority_override(conn, registry, tmp_path):
+    """T3: an 'R' entry in the by-priority map must apply to routine exams."""
+    cfg_text = (CONFIG_DIR / "hospa.yaml").read_text(encoding="utf-8")
+    needle = "  exam_to_final_target_hours_by_priority:\n    S: 1"
+    assert needle in cfg_text
+    (tmp_path / "h.yaml").write_text(
+        cfg_text.replace(needle, needle + "\n    R: 4"), encoding="utf-8"
+    )
+    custom = HospitalRegistry.load_dir(tmp_path)
+    add_order(conn, "T3", priority="R")
+    add_event(conn, "T3", "F", observed=BASE, result=BASE + timedelta(hours=3))
+    r = tat_report(conn, custom, "2026-10")["HOSPA"]
+    assert r.measured[0].target_hours == 4.0
+    assert r.breaches == 0  # 3h < 4h override; default 2h would have breached

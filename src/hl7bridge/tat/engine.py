@@ -4,8 +4,9 @@ Interval definitions (all arithmetic on aware datetimes, full precision;
 rounding happens only in the renderer):
 
 - exam time      = OBR-7 of the FIRST final (F) report event per accession
-- final time     = OBR-22 of that first F event (first by result time,
-                   ties broken by event insertion order)
+- final time     = OBR-22 of that first F event (first by result time with
+                   timestamp-less events sorting last, ties broken by
+                   event insertion order)
 - prelim time    = OBR-22 of the first preliminary (P) event, if any
 - order time     = orders.ordered_at_utc for the same accession
 - exam_to_final  = final time - exam time      (the headline metric)
@@ -30,7 +31,9 @@ sorted data, the same convention as numpy's default percentile). For a
 single data point both equal that point.
 
 Month selection: an accession belongs to the report month if its final
-time falls inside that calendar month in the HOSPITAL'S timezone.
+time falls inside that calendar month in the HOSPITAL'S timezone; a final
+with no result time is attributed by its received time instead, so it is
+counted in exactly one month.
 """
 
 from __future__ import annotations
@@ -107,7 +110,8 @@ def _tat_hospital(conn: sqlite3.Connection, cfg: HospitalConfig, month: str) -> 
     tz = cfg.tzinfo
 
     events = conn.execute(
-        "SELECT * FROM report_events WHERE hospital_id = ? ORDER BY result_at_utc, id",
+        "SELECT * FROM report_events WHERE hospital_id = ?"
+        " ORDER BY result_at_utc IS NULL, result_at_utc, id",
         (cfg.hospital_id,),
     ).fetchall()
     orders = {
@@ -128,17 +132,21 @@ def _tat_hospital(conn: sqlite3.Connection, cfg: HospitalConfig, month: str) -> 
         corrected = [e for e in acc_events if e["status"] == "C"]
         if not finals:
             continue
-        first_final = finals[0]  # ordered by result_at_utc, id in the query
+        # Query order puts NULL result times last, so a dated final always
+        # wins over a timestamp-less retransmission.
+        first_final = finals[0]
 
         final_iso = first_final["result_at_utc"]
-        if not final_iso:
-            # Cannot even place it in a month; counted, excluded.
-            result.finals += 1
-            result.missing_final_time += 1
-            continue
-        if parse_utc_iso(final_iso).astimezone(tz).strftime("%Y-%m") != month:
+        # Month attribution: the final's result time; when that is missing,
+        # its (NOT NULL) received time, so every final lands in exactly one
+        # month instead of polluting all of them.
+        anchor_iso = final_iso or first_final["received_at_utc"]
+        if parse_utc_iso(anchor_iso).astimezone(tz).strftime("%Y-%m") != month:
             continue
         result.finals += 1
+        if not final_iso:
+            result.missing_final_time += 1
+            continue
         result.prelims += 1 if prelims else 0
         result.corrected += len(corrected)
 
