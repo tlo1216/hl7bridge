@@ -5,6 +5,18 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+
+- `to-fhir` and `fhir sync` map ADT^A40 (patient merge). The surviving
+  Patient (PID) is merged as for any ADT; the merged-away Patient (MRG-1) is
+  set inactive with a `replaced-by` link to the survivor, keeping what the
+  server already holds for it, or written bare when the server has none.
+  An MRG-1 that is empty, repeated, not typed MR or the same as PID-3 is
+  refused. `listen --target fhir` still answers A40 with AR
+  `patient_read_only`.
+
 ## [0.5.0] - 2026-11-20
 
 ### Added

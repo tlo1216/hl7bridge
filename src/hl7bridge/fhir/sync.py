@@ -6,7 +6,7 @@ the same post as ``to-fhir --post`` (``hl7bridge.v2fhir`` and
 ``fhir/post.py``), so the two paths write identical content and never undo
 each other:
 
-every accepted ADT^A01, A04, A08, ORM^O01 and ORU^R01, in one pass in the
+every accepted ADT^A01, A04, A08, A40, ORM^O01 and ORU^R01, in one pass in the
 order they were received (``messages.id``), as ``to-fhir --post`` would post
 them. Only ADT changes a Patient, and ORM and ORU create it when it is
 missing, so the order across message types decides which message creates
@@ -20,7 +20,9 @@ ImagingStudy has no message; it is still built from the ``studies`` rows,
 and refers to the Patient and ServiceRequest posted above.
 
 A message whose patient was merged into another (ADT^A40) is left out, as
-the merged patient is. A message that cannot be mapped (a code not in its
+the merged patient is. The A40 itself is posted: the surviving Patient is
+updated and the merged-away one is set inactive with a ``replaced-by``
+link (a bare stub when the server has none). A message that cannot be mapped (a code not in its
 table, say) is SKIPPED LOUDLY: counted, listed with the field and reason,
 and surfaced in the rendered report. A sync that skipped anything never
 looks like a clean one. Identifier systems come from each hospital's
@@ -37,7 +39,7 @@ from dataclasses import dataclass, field
 from ..config import HospitalRegistry, IdentifierSystems
 from ..errors import FhirMappingError, MappingError
 from ..v2fhir import message_to_bundle
-from ..v2fhir.bundle import ADT_EVENTS, MappedMessage, patient_only
+from ..v2fhir.bundle import ADT_EVENTS, MERGE_EVENT, MappedMessage, patient_only
 from .client import HapiClient
 from .mapper import imaging_study_resource
 from .post import StaleResultError, post_mapped
@@ -90,7 +92,7 @@ def sync_to_fhir(
     patient_ids: dict[tuple[str, str], str] = {}
     order_ids: dict[tuple[str, str], str] = {}
 
-    types = (*ADT_EVENTS, ORDER_TYPE, REPORT_TYPE)
+    types = (*ADT_EVENTS, MERGE_EVENT, ORDER_TYPE, REPORT_TYPE)
     marks = ", ".join("?" for _ in types)
     rows = conn.execute(
         f"SELECT id, hospital_id, message_type, raw FROM messages"  # the marks are fixed "?" only

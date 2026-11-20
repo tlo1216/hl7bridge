@@ -19,6 +19,7 @@ Identifier systems come from the hospital profile (`fhir.identifier_systems`).
 | ADT^A01 | Patient, Encounter (when PV1-19 is valued) |
 | ADT^A04 | Patient, Encounter (when PV1-19 is valued) |
 | ADT^A08 | Patient, Encounter (when PV1-19 is valued) |
+| ADT^A40 | Patient (survivor), Patient (merged away: inactive, linked replaced-by) |
 | ORM^O01 | Patient (created when missing), ServiceRequest |
 | ORU^R01 | Patient (created when missing), Observation per structured OBX, DiagnosticReport |
 
@@ -48,6 +49,12 @@ writes the Patient. Anything not listed is refused.
 | PID-8 | Patient.gender | [ConceptMap-segment-pid-to-patient](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pid-to-patient.html) | Through table 0001. |
 | PID-11 | Patient.address | [ConceptMap-segment-pid-to-patient](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pid-to-patient.html) | First repetition, components 1 to 6 (lines, city, state, postal code, country). |
 | PID-13 | Patient.telecom | [ConceptMap-segment-pid-to-patient](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pid-to-patient.html) | First repetition. Component 4 as email when component 3 is Internet, else component 1 as phone. Use is home, as the IG says for PID-13. |
+
+## `mrg_to_patient`
+
+| v2 | FHIR | IG map | Notes |
+| --- | --- | --- | --- |
+| MRG-1 | Patient.identifier (MR), Patient.active, Patient.link | none | ADT^A40 only. Component 1 is the prior MRN, with the profile's MRN system (component 5, when valued, must be MR). One repetition; the same MRN as PID-3 is refused. The Patient is set inactive and linked replaced-by to the survivor (PID). The IG has no MRG map. A post merges it into the current Patient, or writes a bare inactive one when the server has none. The survivor gets no link. |
 
 ## `pv1_to_encounter`
 

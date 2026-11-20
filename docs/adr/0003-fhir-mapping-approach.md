@@ -46,8 +46,10 @@ real deployment:
 - OBX segments collapse into `DiagnosticReport.conclusion` instead of
   Observation resources (`presentedForm` would be the next step).
 - No Provenance, Encounter, or practitioner resources.
-- Patients merged away (A40) are simply not posted; nothing resolves merge
-  chains onto resources yet (planned with the A40 merge work). Rows whose subject
+- Patients merged away (A40): `to-fhir` and `fhir sync` set the merged-away
+  Patient inactive with a `replaced-by` link to the survivor. Nothing moves
+  earlier resources onto the survivor and chains are not followed; `fhir sync`
+  still leaves out the merged-away patient's own messages. Rows whose subject
   cannot be resolved are skipped loudly and reported, never dropped.
 
 ## Update, 0.4.0

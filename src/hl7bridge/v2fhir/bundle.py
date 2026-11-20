@@ -23,11 +23,12 @@ Supported messages, by MSH-9:
 | Message | Entries |
 | --- | --- |
 | ADT^A01, ADT^A04, ADT^A08 | Patient, and Encounter when PV1-19 holds a visit number |
+| ADT^A40 | Patient (survivor), Patient (merged away: inactive, linked `replaced-by`) |
 | ORM^O01 | Patient, ServiceRequest |
 | ORU^R01 | Patient, one Observation per structured OBX, DiagnosticReport |
 
-Anything else raises ``MappingError``: ADT^A40 (merges wait for the A40
-work), ACKs, and every type the hospital profile does not list.
+Anything else raises ``MappingError``: ACKs, and every type the hospital
+profile does not list.
 """
 
 from __future__ import annotations
@@ -53,11 +54,12 @@ from .fields import FieldReader
 from .jsontext import resource_dict
 from .observation import KEY_JOIN, notes_after, obx_to_observation
 from .order import accession_value, orc_obr_to_service_request
-from .patient import mrn_authority, pid_to_patient
+from .patient import merged_patient, mrn_authority, mrn_value, pid_to_patient
 from .report import is_narrative, obr_to_diagnostic_report, report_text
 
 ADT_EVENTS = ("ADT^A01", "ADT^A04", "ADT^A08")
-SUPPORTED = (*ADT_EVENTS, "ORM^O01", "ORU^R01")
+MERGE_EVENT = "ADT^A40"
+SUPPORTED = (*ADT_EVENTS, MERGE_EVENT, "ORM^O01", "ORU^R01")
 REPLACE, MERGE, CREATE = "replace", "merge", "create"
 # A fixed namespace for the uuid5 full URLs, so they are stable across runs.
 _NAMESPACE = uuid.UUID("6f1c2b0e-3a52-5a7e-9d0c-6c1f6a0b8e41")
@@ -162,11 +164,15 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
     with _mapping(reader, "pid_to_patient", "PID"):
         patient = pid_to_patient(ctx)
         authority = mrn_authority(ctx)
+        survivor_mrn = mrn_value(ctx)
     patient_ref = _full_url(patient)
-    is_adt = msg_type in ADT_EVENTS
+    is_adt = msg_type in ADT_EVENTS or msg_type == MERGE_EVENT
     planned: list[tuple[Resource, str]] = [(patient, MERGE if is_adt else CREATE)]
 
-    if is_adt:
+    if msg_type == MERGE_EVENT:
+        with _mapping(reader, "mrg_to_patient", "MRG"):
+            planned.append((merged_patient(ctx, patient_ref, survivor_mrn), MERGE))
+    elif is_adt:
         with _mapping(reader, "pv1_to_encounter", "PV1"):
             encounter = pv1_to_encounter(ctx, patient_ref)
         if encounter is not None:

@@ -28,7 +28,6 @@ UPDATE = os.environ.get("HL7BRIDGE_UPDATE_GOLDEN") == "1"
 V2FHIR_SRC = REPO / "src" / "hl7bridge" / "v2fhir"
 
 REFUSED_SAMPLES = {
-    "08_hospc_adt_a40_merge.hl7": "MSH-9: message type is not mapped to FHIR by hl7bridge",
     "10_hospc_ack_r01.hl7": "MSH-9: message type is not mapped to FHIR by hl7bridge",
     "11_broken_missing_accession.hl7": (
         "ORC-3: no accession in the field the hospital profile names"
@@ -931,3 +930,49 @@ def test_every_table_value_is_written_as_its_ig_map_says():
     assert "N" not in tables.OBSERVATION_STATUS.codes
     assert tables.REPORT_STATUS.codes["R"] == "partial"
     assert "TOX" not in tables.INTERPRETATION.codes
+
+
+# -- ADT^A40 merge ------------------------------------------------------------------
+
+
+def _a40(
+    mrg: str = "MRG|SC1002^^^HOSPC^MR", pid: str = "PID|1||SC1001^^^HOSPC^MR||ZZZSAMPLE^THREE"
+) -> str:
+    head = "MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007083000||ADT^A40|TA40|T|2.5"
+    return "\r".join([head, "EVN|A40|20261007083000", pid, mrg]) + "\r"
+
+
+def test_a40_maps_survivor_and_an_inactive_linked_merged_patient(registry):
+    mapped = message_to_bundle(_a40(), registry)
+    assert mapped.message_type == "ADT^A40"
+    survivor, gone = (e.resource for e in mapped.bundle.entry)
+    assert survivor.identifier[0].value == "SC1001"
+    assert survivor.link is None and survivor.active is None
+    assert gone.identifier[0].value == "SC1002"
+    assert gone.active is False
+    assert gone.link[0].type == "replaced-by"
+    assert gone.link[0].other.reference == mapped.bundle.entry[0].fullUrl
+    assert set(mapped.policies.values()) == {"merge"}
+
+
+@pytest.mark.parametrize(
+    ("mrg", "pid", "reason"),
+    [
+        ("MRG|", None, "MRG-1: no prior patient identifier; a merge needs one"),
+        ("MRG|SC1001^^^HOSPC^MR", None, "MRG-1: is the same patient identifier as PID-3"),
+        ("MRG|SC1002~SC1003", None, "MRG-1: more than one merged identifier; not mapped"),
+        ("MRG|SC1002^^^HOSPC^PI", None, "MRG-1: identifier type (MRG-1.5) is not MR"),
+        ("MRG|SC1$2", None, "MRG-1: holds a character that cannot be part of a FHIR search key"),
+    ],
+)
+def test_a40_refusals_name_the_field_and_never_the_value(mrg, pid, reason, registry):
+    text = _a40(mrg) if pid is None else _a40(mrg, pid)
+    with pytest.raises(MappingError) as info:
+        message_to_bundle(text, registry)
+    assert str(info.value) == reason
+
+
+def test_a40_without_an_mrg_segment_is_refused(registry):
+    text = _a40().replace("MRG|SC1002^^^HOSPC^MR\r", "")
+    with pytest.raises(MappingError, match="MRG-1: the message has no MRG segment"):
+        message_to_bundle(text, registry)

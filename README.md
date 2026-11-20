@@ -202,7 +202,10 @@ order or a result creates it when it is missing and otherwise only refers
 to it. In HL7 v2 an empty field means "no change", so `--post` merges the
 Patient, Encounter and ServiceRequest into the server's current version
 (read, then written back with `If-Match`): a thin A08 never erases the
-address an A01 wrote. A corrected report that drops a result sets that
+address an A01 wrote. An ADT^A40 merge updates the surviving Patient (PID)
+and sets the merged-away one (MRG-1) inactive with a `replaced-by` link to
+the survivor; the merged-away Patient's other data stays, and a bare one is
+written when the server has none. A corrected report that drops a result sets that
 Observation to `entered-in-error`. Narrative report lines (OBX-2 TX or FT)
 are the report's text, not Observations.
 `--out DIR` writes one Bundle per message (never over an existing file),

@@ -615,3 +615,82 @@ def test_a_merge_create_that_another_writer_won_is_refused_not_overwritten(regis
         post_mapped(client, message_to_bundle(_sample("13_hospc_adt_a01_inpatient.hl7"), registry))
     assert server.data["Encounter"]["theirs"]["status"] == "planned"
     assert server.data["Encounter"]["theirs"]["meta"]["versionId"] == "1"
+
+
+# -- ADT^A40 posted to the server ----------------------------------------------------
+
+_HOSPC_MRN = "urn:hl7bridge:hospc:mrn"
+
+
+def _a40(pid_mrn: str = "SC1001", gone: str = "SC1002") -> str:
+    return (
+        "\r".join(
+            [
+                "MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007083000||ADT^A40|TA40|T|2.5",
+                "EVN|A40|20261007083000",
+                f"PID|1||{pid_mrn}^^^HOSPC^MR||ZZZSAMPLE^THREE|||F",
+                f"MRG|{gone}^^^HOSPC^MR",
+            ]
+        )
+        + "\r"
+    )
+
+
+def _a08(mrn: str, family: str) -> str:
+    return (
+        "\r".join(
+            [
+                "MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007070000||ADT^A08|TA08|T|2.5",
+                f"PID|1||{mrn}^^^HOSPC^MR||{family}^ONE",
+                "PV1|1|O",
+            ]
+        )
+        + "\r"
+    )
+
+
+def test_a40_marks_the_merged_patient_inactive_and_keeps_its_demographics(registry):
+    server = FakeFhir()
+    _post(server, registry, _a08("SC1002", "OLDNAME"), _a08("SC1001", "KEEPER"), _a40())
+    gone = server.by_key("Patient", f"{_HOSPC_MRN}|SC1002")
+    survivor = server.by_key("Patient", f"{_HOSPC_MRN}|SC1001")
+    assert gone["active"] is False
+    assert gone["name"][0]["family"] == "OLDNAME"  # the merge read it first
+    assert gone["link"] == [
+        {"other": {"reference": f"Patient/{survivor['id']}"}, "type": "replaced-by"}
+    ]
+    assert survivor["name"][0]["family"] == "ZZZSAMPLE"
+    assert "link" not in survivor
+
+
+def test_a40_with_no_merged_patient_on_the_server_writes_a_bare_inactive_one(registry):
+    server = FakeFhir()
+    _post(server, registry, _a40())
+    gone = server.by_key("Patient", f"{_HOSPC_MRN}|SC1002")
+    assert gone["active"] is False and "name" not in gone
+    assert gone["link"][0]["type"] == "replaced-by"
+
+
+def test_a40_resend_and_a_late_a08_change_nothing_about_the_link(registry):
+    server = FakeFhir()
+    _post(server, registry, _a40())
+    before = server.by_key("Patient", f"{_HOSPC_MRN}|SC1002")
+    _post(server, registry, _a40())
+    assert server.by_key("Patient", f"{_HOSPC_MRN}|SC1002")["link"] == before["link"]
+    _post(server, registry, _a08("SC1002", "LATE"))
+    after = server.by_key("Patient", f"{_HOSPC_MRN}|SC1002")
+    assert after["active"] is False and after["link"] == before["link"]
+    assert after["name"][0]["family"] == "LATE"
+    assert len(server.all("Patient")) == 2
+
+
+def test_sync_posts_the_stored_a40(store, registry):
+    # The sample A40 (hospc) is in the store: SC1001 survives, SC1002 is merged away.
+    report, server = _sync(store, registry)
+    gone = server.by_key("Patient", f"{_HOSPC_MRN}|SC1002")
+    survivor = server.by_key("Patient", f"{_HOSPC_MRN}|SC1001")
+    assert gone["active"] is False
+    assert gone["link"] == [
+        {"other": {"reference": f"Patient/{survivor['id']}"}, "type": "replaced-by"}
+    ]
+    assert not any(kind == "ADT^A40" for kind, _, _ in report.skipped)

@@ -540,11 +540,10 @@ def test_to_fhir_out_writes_each_bundle_and_never_overwrites(tmp_path, capsys):
     out = tmp_path / "bundles"
     assert cli.main(["to-fhir", str(SAMPLES_DIR), "--out", str(out)]) == EXIT_FINDINGS
     err = capsys.readouterr().err
-    assert "wrote 11 Bundle(s)" in err
-    assert "4 of 15 message(s) could not be mapped" in err
-    assert "error: 08_hospc_adt_a40_merge.hl7: MSH-9: message type is not mapped" in err
+    assert "wrote 12 Bundle(s)" in err
+    assert "3 of 15 message(s) could not be mapped" in err
     names = sorted(p.name for p in out.glob("*.json"))
-    assert names[0] == "01_hospa_adt_a04.json" and len(names) == 11
+    assert names[0] == "01_hospa_adt_a04.json" and len(names) == 12
     first = (out / names[0]).read_bytes()
     assert cli.main(["to-fhir", str(A04), "--out", str(out)]) == EXIT_USAGE
     assert "already exists; to-fhir never overwrites a file" in capsys.readouterr().err

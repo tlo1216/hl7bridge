@@ -5,7 +5,8 @@ Each message is one transaction Bundle from ``hl7bridge.v2fhir``. Before it
 is sent, two things are read from the server and folded into it:
 
 1. **Merge** (entries with the ``merge`` policy: Patient from ADT,
-   Encounter, ServiceRequest). In HL7 v2 an empty field means "no
+   Encounter, ServiceRequest; ADT^A40 adds the merged-away Patient). In
+   HL7 v2 an empty field means "no
    change", so a thin A08 must not erase the address an A01 wrote. The
    current resource is read by its identifier and the message's elements
    are laid over it: each element the mapper owns replaces the current one
@@ -54,7 +55,7 @@ from .client import EntryResult, HapiClient
 # The elements each mapper writes and so owns in a merge. Everything else
 # on the current resource (meta, tags, other identifiers, extensions) stays.
 OWNED: dict[str, tuple[str, ...]] = {
-    "Patient": ("name", "gender", "birthDate", "address", "telecom"),
+    "Patient": ("name", "gender", "birthDate", "address", "telecom", "active", "link"),
     "Encounter": ("status", "class", "subject", "period"),
     "ServiceRequest": ("status", "intent", "code", "authoredOn", "subject"),
 }
