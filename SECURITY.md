@@ -23,10 +23,10 @@ fixes.
 - **Synthetic data only.** hl7bridge has not had a security review for real
   patient data and is not a certified medical device.
 - **MLLP has no authentication and no encryption.** Anyone who can reach the
-  listener's port can send it messages. `hl7bridge serve` binds to
+  listener's port can send it messages. `hl7bridge listen` binds to
   `127.0.0.1` by default. Do not expose it on a network. A real deployment
   would put MLLP behind a VPN or TLS tunnel.
-- **The FHIR client sends what it is given.** `fhir-sync` writes to the
+- **The FHIR client sends what it is given.** `fhir sync` writes to the
   server you name. Use a test server.
 - **Secrets come from the environment**, never from the command line, so
   they do not show in process listings. `HL7BRIDGE_FHIR_APIKEY` is never

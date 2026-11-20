@@ -14,10 +14,11 @@ result can be checked against known answers.
 > security review for real patient data. Do not point it at real PHI
 > without your own review. MLLP has no encryption or authentication.
 
-## Quickstart
+## Install
 
 You need Python 3.12 or newer and Git. hl7bridge is not on PyPI yet, so
-install it from a clone.
+install it from a clone. The hospital profiles and sample messages ship
+inside the package, so nothing else needs to be in place.
 
 ### With uv (Windows, macOS, Linux)
 
@@ -62,94 +63,137 @@ python -m pip install -e .
 hl7bridge --version
 ```
 
-## Five minutes, no Docker
+## Five minutes: the demo
 
-These commands are the same on every OS. They write to `data/quick`, which
-Git ignores. Run them from the repo root.
+One command runs the whole pipeline on a synthetic day for three hospitals,
+in one process, on every OS:
 
-1. Generate a synthetic day for three hospitals (139 messages, 27 DICOM
-   studies, 24 outbound reports, 47 labeled defects):
-
-   ```
-   hl7bridge synth --out data/quick/synth --config config/hospitals
-   ```
-
-2. Lint the raw messages. The findings are exactly the seeded message
-   defects, so the command exits with status 1 on purpose:
-
-   ```
-   hl7bridge lint --dir data/quick/synth/messages --config config/hospitals
-   ```
-
-3. Start the listener in one terminal (it binds to 127.0.0.1 only):
-
-   ```
-   hl7bridge serve --db data/quick/bridge.db --config config/hospitals
-   ```
-
-   In a second terminal, replay the day over real MLLP sockets:
-
-   ```
-   hl7bridge send --dir data/quick/synth/messages
-   ```
-
-   Stop the listener with Ctrl+C.
-
-4. Load the DICOM metadata and the outbound report log, then read the
-   reports. `--now` is the fixed report time the generator uses, so the
-   output is the same every run:
-
-   ```
-   hl7bridge load-studies --db data/quick/bridge.db --config config/hospitals --dicom data/quick/synth/dicom
-   hl7bridge load-outbound --db data/quick/bridge.db --config config/hospitals --path data/quick/synth/outbound_reports.jsonl
-   hl7bridge summary --db data/quick/bridge.db
-   hl7bridge reconcile --db data/quick/bridge.db --config config/hospitals --now 2026-10-08T12:00:00+00:00
-   hl7bridge ack-report --db data/quick/bridge.db --config config/hospitals --now 2026-10-08T12:00:00+00:00
-   hl7bridge tat --db data/quick/bridge.db --config config/hospitals --month 2026-10
-   ```
-
-Every command has `--help`.
-
-## Full demo with HAPI FHIR
-
-`scripts/demo.sh` runs all of the above plus a FHIR sync into a local HAPI
-FHIR server. It needs bash (on Windows, Git Bash), Docker and uv.
-
+<!-- readme-test -->
 ```
-./scripts/demo.sh
+hl7bridge demo
 ```
 
-It prints:
+It generates the day (139 messages, 27 DICOM studies, 24 outbound reports,
+47 labeled defects), starts a listener on a free port on 127.0.0.1, replays
+the day over real MLLP sockets, loads the DICOM metadata and the outbound
+report log, then prints:
 
-1. the reconciliation report: orders without images, images without
+1. the ACK counts and the quarantine summary, which is exactly the seeded
+   defects,
+2. the reconciliation report: orders without images, images without
    orders, patient and modality mismatches,
-2. the report delivery report: DELIVERED, ERRORED, REJECTED and NO_ACK,
+3. the report delivery report: DELIVERED, ERRORED, REJECTED and NO_ACK,
    duplicate ACKs, ACKs for unknown control IDs,
-3. the quarantine summary, which is exactly the seeded defects,
 4. lint findings over the raw corpus, again exactly the seeded defects,
 5. the monthly turnaround-time report: median, P90 and breach counts per
    hospital, modality and priority, with missing timestamps counted,
-6. FHIR sync results and the resource counts on the server.
+6. a check of every count against the manifest. The demo exits 0 only when
+   they all match.
 
-Safety notes for the demo script:
+The demo owns its data folder. By default it makes a fresh temporary
+folder, prints its path and removes it at the end; `--keep` leaves it.
+`--data-dir PATH` is accepted only for a path that does not exist yet, an
+empty folder, or a folder an earlier demo marked as its own. The demo
+deletes only the files it listed in its marker, never follows a link, and
+refuses your home folder, the current folder, the repository root and any
+folder that holds one of them. See `src/hl7bridge/demo.py`.
 
-- It publishes HAPI on `127.0.0.1:8080` only, never on other interfaces.
-- It stops before sending anything if another program already listens on
-  the MLLP port (`MLLP_PORT`, default 2575), and if its own listener does
-  not come up.
-- It reuses a FHIR server that already answers only when that server is
-  its own `hl7bridge-hapi` container or you set `FHIR_BASE` yourself.
-  Otherwise it stops rather than write synthetic patients into someone
-  else's server.
-- Its data folder (`DATA_DIR`, default `data/demo`) is disposable and owned
-  by the script. The script creates the folder itself, which fails if
-  anything is already there, writes a `.hl7bridge-demo` marker file in it,
-  and deletes the folder on a later run only if that marker is there. It
-  refuses paths with a `..` component, symlinks (with or without a trailing
-  slash), drive roots, and your home folder, the repo root, the current
-  folder or any folder that holds one of them, compared by file identity
-  so another spelling of the same folder is refused too. If you ran an
-  older version of the script, delete `data/demo` yourself once.
+To include the FHIR step, name a server: `hl7bridge demo --fhir-base
+http://localhost:8080/fhir`. The demo never writes into a server you did
+not name and never starts Docker itself.
+
+## Your own folder: init, doctor, lint, send
+
+`init` copies the bundled profiles and twelve hand-made sample messages
+(one per type and dialect, plus two broken ones) into `./hl7bridge`. Every
+command then finds those profiles on its own:
+
+<!-- readme-test -->
+```
+hl7bridge init
+hl7bridge doctor
+hl7bridge profile check
+hl7bridge lint hl7bridge/samples
+```
+
+`doctor` checks Python, the package version, the profile folder, time
+zones, the database, the listen port and the FHIR server, and says how to
+fix anything that fails. `lint` exits 1 here on purpose: two samples are
+broken.
+
+Run the listener in one terminal (it binds 127.0.0.1 only):
+
+```
+hl7bridge listen
+```
+
+and send the samples from a second one:
+
+```
+hl7bridge send hl7bridge/samples
+```
+
+For each message that is not accepted, `send` shows the ACK code in words,
+MSA-3, the quarantine reason and the command to run next. Stop the
+listener with Ctrl+C.
+
+## Step by step on a synthetic day
+
+The same steps the demo runs, one command each. They write to `data/quick`
+and `./hl7bridge.db`, which Git ignores. `--now` is the fixed report time
+the generator uses, so the output is the same every run.
+
+<!-- readme-test -->
+```
+hl7bridge synth --out data/quick/synth
+hl7bridge load studies --dicom data/quick/synth/dicom
+hl7bridge load outbound --path data/quick/synth/outbound_reports.jsonl
+hl7bridge summary
+hl7bridge reconcile --now 2026-10-08T12:00:00+00:00
+hl7bridge ack-report --now 2026-10-08T12:00:00+00:00
+hl7bridge tat --month 2026-10
+hl7bridge tat --month 2026-10 --json
+```
+
+Every report command takes `--json`. Every command has examples in
+`--help`, and `hl7bridge --help` lists them by group. The command
+reference, the exit codes and the error messages are in
+[docs/cli.md](docs/cli.md).
+
+## Docker
+
+The compose demo runs HAPI FHIR, the listener and the demo in containers,
+and exits 0 when every count matches:
+
+```
+docker compose -f compose.demo.yaml up --build --exit-code-from demo
+```
+
+HAPI has no host port by default; add `-f compose.hapi-port.yaml` to browse
+it at `http://127.0.0.1:8080/fhir`. The listener is published on
+`127.0.0.1:2575` only. Every published port in this repository is bound to
+127.0.0.1, and a check in CI (`tools/check_ports.py`) fails on any that is
+not. Data lives in named volumes; `docker compose -f compose.demo.yaml down
+-v` removes them.
+
+The image alone:
+
+```
+docker build -t hl7bridge:local .
+docker run --rm -p 127.0.0.1:2575:2575 hl7bridge:local
+```
+
+It runs as a non-root user, its base images are pinned by digest, and its
+dependencies are installed from `uv.lock` with hashes.
+
+### The bash demo script
+
+`scripts/demo.sh` predates `hl7bridge demo` and does the same steps with a
+HAPI container it starts itself. It needs bash (on Windows, Git Bash),
+Docker and uv. It publishes HAPI on 127.0.0.1 only, stops before sending
+if the MLLP port is taken or an unknown FHIR server answers, deletes its
+`DATA_DIR` only when the folder holds the marker the script wrote, and on
+Windows ends the listener's whole process tree when it exits.
 
 ## Architecture: the boundaries data crosses
 
@@ -203,17 +247,17 @@ Where PHI does and does not go:
 | Hospital to MLLP listener | Yes | VPN or TLS in any real deployment |
 | Store (SQLite) and quarantine | Yes | Quarantine keeps raw bytes for diagnosis |
 | ACKs back to hospitals | No new PHI | The sender's own routing fields (MSH-3, MSH-4, MSH-10) echoed back, the ACK code, and MSA-3 text that is a reason code plus a field name (`bad_timestamp: PID-7`), never the rejected value |
-| Reports on stdout | Yes | Reports are the product: they name accessions, MRNs and study UIDs |
-| Log output and error text | **Never** | Store row ids, hospital ids, configured message types, counts and reason codes. MSH-10 is not logged, not even as a hash. HTTP client records are rebuilt from safe fields (method, URL with no query or user info, version, status); pydicom's own messages are captured and replaced; the CLI prints one sanitized line per error and no chained causes. Enforced by `tests/unit/test_phi_logging.py` |
+| Reports on stdout | Yes | Reports are the product: they name accessions, MRNs and study UIDs. `send` lists message file names and the receiver's MSA-3 text here too |
+| Log output and error text | **Never** | Store row ids, hospital ids, configured message types, counts and reason codes. MSH-10 is not logged, not even as a hash. HTTP client records are rebuilt from safe fields (method, URL with no query or user info, version, status); pydicom's own messages are captured and replaced; the CLI prints one sanitized line per error and no chained causes, and `--debug` adds only stack frames (code, not data). Enforced by `tests/unit/test_phi_logging.py` |
 | FHIR server | Yes | BAA-covered, access-controlled target in production |
 
 The PHI test captures the root logger at DEBUG, so third-party loggers
 count too, and checks ingest, the loaders, FHIR sync, FHIR failures (4xx
 bodies that echo the identifier, 412, transport errors, timeouts), a real
 HTTP server whose reason phrase and `Location` header echo the identifier,
-invalid DICOM values, `fhir-probe`, hostile MSH-10 and MSH-9 values, parse
-errors, internal errors, ACK text and the CLI's own logging and error
-handling. Error text is checked as the full traceback. It shows paths you
+invalid DICOM values, `fhir probe`, hostile MSH-10 and MSH-9 values, parse
+errors, internal errors, ACK text, a whole `demo` run at DEBUG, `send`
+failures, and the CLI's own logging and error handling. Error text is checked as the full traceback. It shows paths you
 passed in, never values read from a message, a DICOM file name or a server
 response. User names and passwords in a `--fhir-base` URL are never
 printed.
@@ -242,9 +286,11 @@ quarantined as `mllp_junk`.
 
 ## Configuration
 
-Each hospital is one YAML profile in `config/hospitals/`. The profile holds
-everything that differs between sites, so the code never hard-codes a
-field position:
+Each hospital is one YAML profile. The profile holds everything that
+differs between sites, so the code never hard-codes a field position. The
+three bundled profiles live in `src/hl7bridge/profiles/`; `hl7bridge init`
+copies them for editing. Every key, its type, its default and why a site
+needs it is in [docs/profiles.md](docs/profiles.md).
 
 ```yaml
 hospital_id: HOSPA
@@ -272,9 +318,15 @@ Environment variables:
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |
-| `HL7BRIDGE_FHIR_APIKEY` | `fhir-sync`, `fhir-probe` | Sent as an `apikey` header, for servers that expect one. Read from the environment so it never shows in process listings |
-| `HL7BRIDGE_FHIR_BASE` | FHIR system tests | Base URL of a HAPI server to test against |
+| `HL7BRIDGE_CONFIG` | every command that reads profiles | Profile folder when `--config` is not given |
+| `HL7BRIDGE_DB` | every command that reads the store | Database file when `--db` is not given |
+| `HL7BRIDGE_FHIR_BASE` | `fhir sync`, `fhir probe`, `doctor`, FHIR system tests | FHIR base URL when `--fhir-base` is not given |
+| `HL7BRIDGE_FHIR_APIKEY` | FHIR commands | Sent as an `apikey` header, for servers that expect one |
+| `HL7BRIDGE_FHIR_TOKEN` | FHIR commands | Sent as `Authorization: Bearer ...` |
 | `HL7BRIDGE_FHIR_REQUIRED` | FHIR system tests | `1` turns a missing server into a failure instead of a skip |
+
+Secrets come from the environment only, never from the command line, so
+they never show in process listings. They are never printed or logged.
 
 ## Synthetic generator and defect manifest
 
@@ -289,6 +341,7 @@ missing and duplicate ACKs, an ACK for a control ID never sent, and an
 unmerged duplicate patient pair. Same seed, same bytes (tested). Files are
 written as bytes, so HL7 segments keep their bare CR on every OS.
 
+
 ## Development
 
 ```
@@ -298,18 +351,24 @@ uv run ruff format --check .
 uv run ruff check .
 uv run mypy
 uv run python tools/check_references.py
+uv run python tools/check_licenses.py
+uv run python tools/check_ports.py
 ```
 
 Without uv, `python -m pip install -e . pytest ruff mypy types-pyyaml`
-gives the same tools. In CI, format, lint, type and reference checks run on
-Ubuntu. The test suite runs on Ubuntu and Windows (Python 3.12 and 3.13) for
-every push and pull request, and on macOS too for pushes to `main` and
-manual runs. The wheel install check runs on Ubuntu and Windows. The FHIR
-system tests run against a HAPI container on Ubuntu; locally they skip
-unless `HL7BRIDGE_FHIR_BASE` is set. What each test covers is in
-[docs/testing.md](docs/testing.md), and the design rules the tests enforce
-are in [docs/principles.md](docs/principles.md). Decisions are recorded in
-[docs/adr/](docs/adr/).
+gives the same tools. CI runs on pushes to `main` and on pull requests,
+once per change. Format, lint, type, reference, license and port checks
+run on Ubuntu. The test suite runs on Ubuntu and Windows (Python 3.12 and
+3.13), and on macOS too for pushes to `main` and manual runs. The wheel is
+built with pinned, hashed tools and installed in a clean venv on Ubuntu
+and Windows, where `init`, `doctor` and `demo` run from it. The README
+commands marked for testing run as written. The Docker job builds the
+image, checks it runs as non-root and runs the compose demo against HAPI.
+The FHIR system tests run against a HAPI container pinned by digest;
+locally they skip unless `HL7BRIDGE_FHIR_BASE` is set. What each test
+covers is in [docs/testing.md](docs/testing.md), and the design rules the
+tests enforce are in [docs/principles.md](docs/principles.md). Decisions
+are recorded in [docs/adr/](docs/adr/).
 
 Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Security
 reports: see [SECURITY.md](SECURITY.md). Changes: see
@@ -318,11 +377,15 @@ reports: see [SECURITY.md](SECURITY.md). Changes: see
 ## Repository layout
 
 ```
-config/hospitals/        # per-hospital dialect profiles (accession field, tz, ...)
-docs/                    # principles, testing, ADRs
-scripts/demo.sh          # end-to-end demo with HAPI FHIR (bash)
+Dockerfile  compose.demo.yaml  compose.hapi-port.yaml
+docs/                    # cli, profiles, principles, testing, ADRs
+scripts/demo.sh          # the bash demo with a HAPI container
 src/hl7bridge/
   cli.py  config.py  errors.py  hl7time.py  logsafety.py
+  demo.py    # hl7bridge demo and the one function that deletes
+  doctor.py  scaffold.py (init)  jsonout.py  msgfiles.py
+  profiles/  # bundled hospital profiles (in the wheel)
+  samples/   # bundled sample messages (in the wheel)
   ingest/    # MLLP, parser, ACK, pipeline, loaders
   store/     # schema.sql, db, repo
   synth/     # generator, manifest, DICOM, patient pools
@@ -332,7 +395,7 @@ src/hl7bridge/
   lint/      # rule catalog and runner
   fhir/      # mapper, client, sync
 tests/unit/  tests/system/
-tools/check_references.py
+tools/       # check_references.py  check_licenses.py  check_ports.py
 ```
 
 ## License

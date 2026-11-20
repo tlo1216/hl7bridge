@@ -5,6 +5,101 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
+## [0.3.0] - Unreleased
+
+### Breaking changes
+
+- Commands are renamed and grouped: `serve` is `listen`, `fhir-sync` is
+  `fhir sync`, `fhir-probe` is `fhir probe`, `load-studies` is
+  `load studies`, `load-outbound` is `load outbound`. The old names still
+  work in 0.3.x with a warning and go away in 0.4.0.
+- `lint` and `send` take the file or folder as an argument
+  (`hl7bridge lint msgs`). `--dir` is still accepted.
+- The profiles moved from `config/hospitals/` to `src/hl7bridge/profiles/`
+  and ship inside the wheel. `--config` is no longer required: the lookup
+  is `--config`, `HL7BRIDGE_CONFIG`, `./hl7bridge/profiles`, then the
+  bundled profiles. Scripts that passed `--config config/hospitals` must
+  drop the option or point at the new folder.
+- `--db` is no longer required: `--db`, `HL7BRIDGE_DB`, then
+  `./hl7bridge.db`.
+- Exit codes are fixed and documented in `docs/cli.md`: 0 success, 1
+  findings or rejected messages, 2 usage or configuration error, 3
+  connection error, 4 internal error, 130 Ctrl+C. Before, a configuration
+  error exited 1 and an internal error 2.
+- `send` exits 1 when any message gets AE or AR, and 3 when no ACK comes
+  in time or the listener does not answer. It exited 0 before.
+- `fhir sync` and `fhir probe` exit 3 when the server never answered.
+- Error lines start with `error:` instead of `hl7bridge: error:`, and end
+  with a hint. Errors whose text could quote input no longer print stack
+  frames unless `--debug` is given.
+- Log output is quieter by default: WARNING for every command except
+  `listen`, which logs at INFO. `-v` and `-vv` bring INFO and DEBUG back.
+- A database with another schema version, or a file that is not a
+  database, raises a clear error instead of a `RuntimeError`.
+- `scripts/demo.sh` accepts only the marker it wrote itself, so it never
+  deletes a folder `hl7bridge demo` owns.
+
+### Added
+
+- `hl7bridge demo`: the whole pipeline in one process on every OS, with a
+  listener on a free loopback port, a check of every count against the
+  manifest, and an optional FHIR step against a server named with
+  `--fhir-base` (`--fhir-wait` polls a server that is still starting). The
+  demo owns its data folder: a fresh temporary folder by default, removed
+  at the end unless `--keep`; `--data-dir` only for a new, empty or earlier
+  demo folder. `remove_demo_dir` is the only code that deletes, and it
+  deletes only the files its marker lists, without following links.
+- `hl7bridge init [FOLDER]`: copies the bundled profiles and twelve
+  hand-made sample messages (one per type and dialect, two broken). Never
+  overwrites without `--force`.
+- `hl7bridge doctor`: Python, version, profiles, time zones, database
+  (read-only), listen port and FHIR server, each with a fix.
+- `hl7bridge profile show` and `profile check`, and `docs/profiles.md`
+  with every key, its type, default and purpose.
+- `--json` on `reconcile`, `ack-report`, `tat`, `summary`, `lint`,
+  `doctor` and the `profile` commands.
+- `-v`, `-q`, `--debug`, accepted before or after the command; grouped
+  `--help` and examples for every command; every command says which
+  profile folder and database it used.
+- `HL7BRIDGE_FHIR_TOKEN` (bearer token) and `HL7BRIDGE_FHIR_BASE` as the
+  default FHIR server.
+- Clear messages for a taken port, a port that needs admin rights, an
+  address not on this machine, a FHIR server that does not answer, no
+  `.hl7` files, LF line ends (converted, with a note), AE and AR ACKs
+  (code in words, MSA-3, ERR, quarantine reason, next command), no ACK in
+  time, a refused connection, and an old database schema.
+- `Dockerfile` (multi-stage, wheel built with uv, dependencies installed
+  from `uv.lock` with hashes, non-root user, health check, base images
+  pinned by digest) and `compose.demo.yaml` (HAPI with no host port, the
+  listener on 127.0.0.1 only, the demo against HAPI, named volumes), plus
+  `compose.hapi-port.yaml` to browse HAPI on 127.0.0.1.
+- `tools/check_ports.py`: fails on any published port in a compose file or
+  `docker run` line that is not bound to 127.0.0.1.
+- `tools/check_licenses.py`: checks every runtime dependency's license
+  against an allow list.
+- `docs/cli.md`: commands, defaults, exit codes and error messages.
+
+### Changed
+
+- CI runs once per change: pushes to `main` and pull requests, not both.
+- CI pins uv by version, pip, build and hatchling by hash, and the HAPI
+  image by digest. The wheel job no longer checks a hard-coded file count;
+  it compares lint's JSON with the files the generator wrote, and runs
+  `init`, `doctor` and `demo` from the installed wheel.
+- New CI jobs: license and port checks, the reference check on commit
+  messages, the README quickstart, and a Docker job that builds the image,
+  checks the user is not root and runs the compose demo.
+
+### Fixed
+
+- `listen` prints its banner only after the socket is bound, names the
+  real cause of a bind failure, and no longer labels a later error as a
+  bind failure.
+- `scripts/demo.sh` ends the listener's whole process tree on Windows.
+  Killing only the launcher could leave the Python listener running and
+  holding the port; reproduced when the listener is started through a
+  subshell.
+
 ## [0.2.0] - Unreleased
 
 ### Security
