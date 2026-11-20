@@ -163,7 +163,8 @@ def run_steps(owned: OwnedFiles, opts: DemoOptions, out: TextIO) -> int:
     db_path = owned.root / "bridge.db"
     # The demo creates the file itself, so it is recorded; the rollback
     # journal (no WAL) leaves no side files once the connection closes.
-    owned.write_bytes(db_path, b"")
+    # SQLite changes it afterwards, so it carries no size and time stamp.
+    owned.write_bytes(db_path, b"", stamp=False)
     conn = connect(db_path, wal=False)
     try:
         return _run_store_steps(opts, out, registry, conn, synth_dir, manifest)

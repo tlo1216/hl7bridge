@@ -143,7 +143,9 @@ class OwnedFiles:
             self._dirs[prefix] = identity
             self.entries.append(Entry(prefix, True, identity))
 
-    def write_bytes(self, path: Path, data: bytes) -> None:
+    def write_bytes(self, path: Path, data: bytes, *, stamp: bool = True) -> None:
+        """``stamp=False`` for a file the demo keeps writing to (the SQLite
+        store); it is then matched by identity alone."""
         parts = self._parts(path)
         if not parts:
             raise DemoDirError(f"{path} is the demo folder itself, not a file in it")
@@ -160,7 +162,7 @@ class OwnedFiles:
         with open(fd, "wb", closefd=True) as fh:
             fh.write(data)
             fh.flush()
-            if sys.platform != "win32":
+            if stamp and sys.platform != "win32":
                 st = os.fstat(fh.fileno())
                 self.entries[index] = self.entries[index]._replace(
                     stamp=(st.st_size, st.st_mtime_ns)
