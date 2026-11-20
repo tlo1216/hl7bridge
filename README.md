@@ -101,12 +101,17 @@ Where the demo writes, and what it deletes:
   one is created exclusively (an existing name is never reused) and
   recorded with its file identity as it is created. A file is deleted only
   if its name still leads to a regular file with that identity, and a
-  folder only if it is still that folder and is empty. Links are not
-  followed: on Windows each item is opened as itself (a junction or symlink
-  is not entered) and deleted through the handle that was checked; on
-  Linux and macOS each folder on the way down is opened without following
-  links and checked. If anything else is in the folder, or something it
-  created was changed, it leaves it, keeps the folder and prints its path.
+  folder only if it is still that folder and is empty. Nothing is deleted
+  through a link: on Windows each item is opened as itself, never as a
+  link's target, its identity is checked on that handle and the delete goes
+  through the same handle (a junction swapped in on the way leads to a
+  file with another identity, which is left alone); on Linux and macOS
+  each folder on the way down is opened without following links and must
+  have its recorded identity. On Linux and macOS a program running as you
+  could still swap a file in the instant between the last check and the
+  delete; no other user can, since the folder is yours alone. If anything
+  else is in the folder, or something it created was changed, it leaves
+  it, keeps the folder and prints its path.
 - `--data-dir PATH` takes a folder that does not exist yet or is empty. The
   demo writes there and leaves everything in place: hl7bridge never deletes
   anything in a folder you name. A folder that is not empty is refused, so

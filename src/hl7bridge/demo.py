@@ -8,8 +8,8 @@ system temp folder and writes everything there. Only at the end of a clean
 run, and without ``--keep``, does it remove that folder, through
 ``hl7bridge.demofiles.remove_owned``: it deletes exactly the files and
 folders it created in this run, checked against the identities recorded
-when it created them, never follows a link, and leaves anything else in
-place. If anything is left, the folder is kept and its path is printed.
+when it created them, never deletes through a link, and leaves anything
+else in place. If anything is left, the folder is kept and its path is printed.
 After a failed or interrupted run the folder is kept too.
 
 ``--data-dir PATH`` writes into a new or empty folder and leaves everything

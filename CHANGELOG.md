@@ -70,8 +70,7 @@ profile format may still change between minor versions.
   a clean run, unless `--keep`. It removes only what it created in that
   run: each file and folder is created exclusively and recorded with its
   file identity, and is deleted only while it still has that identity,
-  without following links (on Windows through the handle that was
-  checked). Anything else is left and the folder is kept.
+  never through a link (on Windows through the handle that was checked). Anything else is left and the folder is kept.
   `hl7bridge.demofiles` is the only code in hl7bridge that deletes.
 - `hl7bridge init [FOLDER]`: copies the bundled profiles and twelve
   hand-made sample messages (one per type and dialect, two broken). Never

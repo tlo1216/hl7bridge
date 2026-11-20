@@ -1285,6 +1285,7 @@ def socket_closed_port() -> Iterator[int]:
         "//alice:s3cr3t@host/fhir",
         "http://alice:s3cr3t@host/fhir",
         "http://alice:s3cr3t@host:notaport/fhir",
+        "alice@s3cr3t-host/fhir",
     ],
 )
 def test_safe_url_and_error_paths_never_return_user_info(url):

@@ -1410,3 +1410,55 @@ def test_lint_reports_a_file_that_is_not_utf8(tmp_path, capsys):
 @pytest.mark.parametrize("command", [["listen"], ["send", "x"], ["doctor"]])
 def test_network_defaults_are_loopback(command):
     assert cli.build_parser().parse_args(command).host == "127.0.0.1"
+
+
+def test_report_json_never_grows_with_the_report_dataclasses(tmp_path, capsys, monkeypatch):
+    """A field added to a report later must not reach --json by accident."""
+    from dataclasses import dataclass, field
+
+    from hl7bridge.acks.tracker import AckReport
+
+    @dataclass
+    class Finding:
+        category: str = "order_without_image"
+        hospital_id: str = "HOSPA"
+        accession: str | None = "ACC1"
+        study_uid: str | None = None
+        detail: str = "d"
+        raw_message: str = "LEAK-CANARY"
+
+    @dataclass
+    class Reconcile:
+        hospital_id: str = "HOSPA"
+        display_name: str = "A"
+        matched: int = 0
+        pending_orders: int = 0
+        pending_studies: int = 0
+        findings: list[Finding] = field(default_factory=lambda: [Finding()])
+        raw_rows: str = "LEAK-CANARY"
+
+    @dataclass
+    class Outcome:
+        hospital_id: str = "HOSPA"
+        control_id: str = "C1"
+        accession: str = "ACC1"
+        state: str = "DELIVERED"
+        sent_at_utc: str = REPORT_NOW
+        acked_at_utc: str | None = None
+        reason: str | None = None
+        duplicate_acks: int = 0
+        conflicting_codes: tuple[str, ...] = ()
+        raw_ack: str = "LEAK-CANARY"
+
+    db = str(_empty_db(tmp_path / "j.db"))
+    monkeypatch.setattr(cli, "reconcile", lambda conn, reg, now: {"HOSPA": Reconcile()})
+    cli.main(["reconcile", "--db", db, "--now", REPORT_NOW, "--json"])
+    monkeypatch.setattr(
+        cli,
+        "track_acks",
+        lambda conn, reg, now: AckReport(outcomes=[Outcome()]),  # type: ignore[list-item]
+    )
+    cli.main(["ack-report", "--db", db, "--now", REPORT_NOW, "--json"])
+    out = capsys.readouterr().out
+    assert '"matched"' in out and '"control_id"' in out
+    assert "LEAK-CANARY" not in out

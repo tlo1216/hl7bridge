@@ -207,6 +207,10 @@ def test_a_named_folder_is_never_deleted_from(tmp_path):
     files.write_bytes(files.root / "a.txt", b"x")
     with pytest.raises(DemoDirError, match="deletes only a temporary folder"):
         remove_owned(files)
+    # The temporary flag alone decides, even when the folder's identity is known.
+    files.root_identity = demofiles.dir_identity(files.root)
+    with pytest.raises(DemoDirError, match="deletes only a temporary folder"):
+        remove_owned(files)
     assert (files.root / "a.txt").exists()
 
 
@@ -607,3 +611,14 @@ def test_free_port_helper_is_loopback():
     assert demo_module.LISTEN_HOST == "127.0.0.1"
     with socket.create_server((demo_module.LISTEN_HOST, 0)) as s:
         assert s.getsockname()[0] == "127.0.0.1"
+
+
+def test_demo_never_prints_the_password_when_the_server_answers(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "HapiClient", _factory(_fhir_ok()))
+    base = "http://alice:s3cret-PW@fhir.test/fhir"
+    rc = cli.main(["demo", "--data-dir", str(tmp_path / "d"), "--fhir-base", base])
+    captured = capsys.readouterr()
+    assert rc == EXIT_OK
+    assert "syncing to http://fhir.test/fhir" in captured.out
+    assert "s3cret-PW" not in captured.out + captured.err
+    assert "alice" not in captured.out + captured.err

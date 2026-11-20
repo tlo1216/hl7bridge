@@ -13,12 +13,14 @@ goes through the record newest first and removes an entry only when its
 name still leads to the same kind of object with the recorded identity; a
 folder must also be empty, since removal is never recursive. Then it
 removes the temporary folder itself, if it is empty and still has its
-recorded identity. Links are never followed:
+recorded identity. Nothing is ever deleted through a link:
 
 - On Windows each entry is opened with ``FILE_FLAG_OPEN_REPARSE_POINT``,
-  so a junction or symlink is opened as itself. Kind and identity are read
-  from that handle and the delete goes through the same handle, so what was
-  checked is what is deleted.
+  so an entry that is itself a junction or symlink is opened as the link,
+  not its target. A link on the way to an entry does lead the open
+  elsewhere, but then the identity does not match and nothing is deleted.
+  Kind and identity are read from that handle and the delete goes through
+  the same handle, so what was checked is what is deleted.
 - On Linux and macOS each folder on the way down is opened with
   ``O_NOFOLLOW`` and must have its recorded identity. The last name is
   checked with ``stat(..., dir_fd=..., follow_symlinks=False)`` and removed
