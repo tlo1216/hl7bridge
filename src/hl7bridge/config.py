@@ -7,6 +7,7 @@ and duplicate facility codes all fail at load time with the offending file named
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -50,7 +51,14 @@ KNOWN_TAT_KEYS = {
 
 KNOWN_LINT_KEYS = {"disabled_rules"}
 
-KNOWN_FHIR_KEYS = {"identifier_systems"}
+KNOWN_FHIR_KEYS = {"identifier_systems", "patient_policy", "tag", "allowed_processing_ids"}
+PATIENT_POLICIES = ("create", "match_only")
+# MSH-11 values the direct-to-FHIR listener takes when a profile names none:
+# training and debugging traffic only, never production (P).
+DEFAULT_PROCESSING_IDS = ("T", "D")
+# An HL7 table 0103 processing id, and a FHIR tag code: short plain tokens.
+_PROCESSING_ID = re.compile(r"[A-Z]")
+_TAG_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # The identifier kinds the v2-to-FHIR mapping writes. Each defaults to
 # urn:hl7bridge:<hospital id, lower case>:<kind>.
 IDENTIFIER_KINDS = ("mrn", "accession", "placer", "visit", "observation")
@@ -138,6 +146,29 @@ class IdentifierSystems:
 
 
 @dataclass(frozen=True, slots=True)
+class FhirSettings:
+    """The rest of the profile's ``fhir`` block, read by the direct-to-FHIR
+    listener (``listen --target fhir``).
+
+    ``patient_policy``: ``create`` (the default, what ``to-fhir --post``
+    and ``fhir sync`` do) or ``match_only`` (find the Patient by MRN, never
+    write it; the direct listener takes only this). ``mrn_by_authority``
+    maps a PID-3.4 assigning authority to the MRN identifier system. ``tag``
+    is the lab tag (system, code) every direct write carries.
+    ``allowed_processing_ids`` are the MSH-11 values direct mode accepts
+    (default T and D).
+    """
+
+    patient_policy: str = "create"
+    mrn_by_authority: tuple[tuple[str, str], ...] = ()
+    tag: tuple[str, str] | None = None
+    allowed_processing_ids: tuple[str, ...] = DEFAULT_PROCESSING_IDS
+
+    def mrn_system(self, authority: str, fallback: str) -> str:
+        return dict(self.mrn_by_authority).get(authority, fallback)
+
+
+@dataclass(frozen=True, slots=True)
 class HospitalConfig:
     hospital_id: str
     display_name: str
@@ -154,6 +185,7 @@ class HospitalConfig:
     tat: TatConfig = field(default_factory=TatConfig)
     lint: LintConfig = field(default_factory=LintConfig)
     identifier_systems: IdentifierSystems | None = None
+    fhir: FhirSettings = field(default_factory=FhirSettings)
 
     @property
     def systems(self) -> IdentifierSystems:
@@ -266,7 +298,7 @@ def load_hospital_config(path: Path) -> HospitalConfig:
     lint = LintConfig(disabled_rules=tuple(disabled_raw))
 
     hospital_id = _require_str(data, "hospital_id", source)
-    systems = _load_fhir_block(data.get("fhir", {}), hospital_id, source)
+    systems, fhir_settings = _load_fhir_block(data.get("fhir", {}), hospital_id, source)
 
     z_segment_raw = data.get("z_segment")
     if z_segment_raw is not None and not isinstance(z_segment_raw, str):
@@ -296,10 +328,24 @@ def load_hospital_config(path: Path) -> HospitalConfig:
         tat=tat,
         lint=lint,
         identifier_systems=systems,
+        fhir=fhir_settings,
     )
 
 
-def _load_fhir_block(raw: object, hospital_id: str, source: str) -> IdentifierSystems:
+def _is_system(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith(("urn:", "http://", "https://"))
+        and not any(ch in value for ch in _TOKEN_SPECIAL)
+    )
+
+
+_SYSTEM_RULE = "must be a urn: or http(s) URI with no '|', ',', '$', backslash or space"
+
+
+def _load_fhir_block(
+    raw: object, hospital_id: str, source: str
+) -> tuple[IdentifierSystems, FhirSettings]:
     if not isinstance(raw, dict):
         raise ConfigError(f"{source}: 'fhir' must be a mapping")
     unknown = set(raw) - KNOWN_FHIR_KEYS
@@ -308,26 +354,73 @@ def _load_fhir_block(raw: object, hospital_id: str, source: str) -> IdentifierSy
     given = raw.get("identifier_systems", {})
     if not isinstance(given, dict):
         raise ConfigError(f"{source}: 'fhir.identifier_systems' must be a mapping")
-    unknown = set(given) - set(IDENTIFIER_KINDS)
+    allowed_keys = {*IDENTIFIER_KINDS, "mrn_by_authority"}
+    unknown = set(given) - allowed_keys
     if unknown:
         raise ConfigError(
-            _unknown_keys_message(source, unknown, set(IDENTIFIER_KINDS), "fhir.identifier_systems")
+            _unknown_keys_message(source, unknown, allowed_keys, "fhir.identifier_systems")
         )
     values = {
         kind: getattr(IdentifierSystems.defaults(hospital_id), kind) for kind in IDENTIFIER_KINDS
     }
     for kind, value in given.items():
+        if kind == "mrn_by_authority":
+            continue
+        if not _is_system(value):
+            raise ConfigError(f"{source}: fhir.identifier_systems.{kind} {_SYSTEM_RULE}")
+        values[kind] = value
+    by_authority = given.get("mrn_by_authority", {})
+    if not isinstance(by_authority, dict) or not all(
+        isinstance(k, str) and k and _is_system(v) for k, v in by_authority.items()
+    ):
+        raise ConfigError(
+            f"{source}: fhir.identifier_systems.mrn_by_authority must map an assigning"
+            f" authority (PID-3.4) to a system that {_SYSTEM_RULE}"
+        )
+
+    policy = raw.get("patient_policy", "create")
+    if policy not in PATIENT_POLICIES:
+        raise ConfigError(
+            f"{source}: fhir.patient_policy must be one of {', '.join(PATIENT_POLICIES)}"
+        )
+
+    tag_raw = raw.get("tag")
+    tag: tuple[str, str] | None = None
+    if tag_raw is not None:
         if (
-            not isinstance(value, str)
-            or not value.startswith(("urn:", "http://", "https://"))
-            or any(ch in value for ch in _TOKEN_SPECIAL)
+            not isinstance(tag_raw, dict)
+            or set(tag_raw) != {"system", "code"}
+            or not _is_system(tag_raw["system"])
+            or not isinstance(tag_raw["code"], str)
+            or not _TAG_CODE.fullmatch(tag_raw["code"])
         ):
             raise ConfigError(
-                f"{source}: fhir.identifier_systems.{kind} must be a urn: or http(s) URI"
-                " with no '|', ',', '$', backslash or space"
+                f"{source}: fhir.tag must be a mapping with a system and a code; the"
+                f" system {_SYSTEM_RULE}, the code is letters, digits, '.', '_' or '-'"
             )
-        values[kind] = value
-    return IdentifierSystems(**values)
+        tag = (str(tag_raw["system"]).rstrip("/"), str(tag_raw["code"]))
+
+    ids_raw = raw.get("allowed_processing_ids")
+    processing = DEFAULT_PROCESSING_IDS
+    if ids_raw is not None:
+        if (
+            not isinstance(ids_raw, list)
+            or not ids_raw
+            or not all(isinstance(i, str) and _PROCESSING_ID.fullmatch(i) for i in ids_raw)
+        ):
+            raise ConfigError(
+                f"{source}: fhir.allowed_processing_ids must be a list of MSH-11 codes"
+                " such as [T, D]"
+            )
+        processing = tuple(ids_raw)
+
+    settings = FhirSettings(
+        patient_policy=str(policy),
+        mrn_by_authority=tuple(sorted((str(k), str(v)) for k, v in by_authority.items())),
+        tag=tag,
+        allowed_processing_ids=processing,
+    )
+    return IdentifierSystems(**values), settings
 
 
 class HospitalRegistry:
@@ -410,7 +503,13 @@ def profile_as_dict(cfg: HospitalConfig) -> dict[str, object]:
         },
         "lint": {"disabled_rules": list(cfg.lint.disabled_rules)},
         "fhir": {
-            "identifier_systems": {kind: getattr(cfg.systems, kind) for kind in IDENTIFIER_KINDS}
+            "identifier_systems": {
+                **{kind: getattr(cfg.systems, kind) for kind in IDENTIFIER_KINDS},
+                "mrn_by_authority": dict(cfg.fhir.mrn_by_authority),
+            },
+            "patient_policy": cfg.fhir.patient_policy,
+            "tag": {"system": cfg.fhir.tag[0], "code": cfg.fhir.tag[1]} if cfg.fhir.tag else None,
+            "allowed_processing_ids": list(cfg.fhir.allowed_processing_ids),
         },
     }
 

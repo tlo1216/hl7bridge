@@ -19,7 +19,7 @@ import sqlite3
 import sys
 import traceback
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +41,7 @@ from .errors import (
     EXIT_OK,
     EXIT_USAGE,
     BridgeError,
+    ConfigError,
     FhirPostError,
     HL7ParseError,
     ListenError,
@@ -51,8 +52,12 @@ from .errors import (
 from .explain import as_json, explain_message, render_text, split_messages
 from .fhir import HapiClient, render_sync_text, sync_to_fhir
 from .fhir.post import check_run_order, post_mapped
+from .fhir.reset import execute_reset, plan_reset
+from .fhir.runscope import DEFAULT_LAB_TAG, RunScope, check_run_id
+from .fromfhir import patient_messages, report_message
 from .ingest import IngestPipeline, send_messages, serve
 from .ingest.ack import ALL_REASONS
+from .ingest.direct import DirectHandler, DirectLog, check_profiles_for_direct
 from .ingest.loaders import load_outbound, load_studies
 from .ingest.parser import get_field, parse_hl7
 from .jsonout import dumps, to_jsonable
@@ -66,7 +71,7 @@ from .store import connect, message_counts, quarantine_summary, utc_iso
 from .store.db import inspect_db, schema_mismatch_message
 from .synth import generate, verify_manifest
 from .tat import render_tat_text, tat_report
-from .v2fhir import MappedMessage, bundle_json, json_text, message_to_bundle
+from .v2fhir import MappedMessage, bundle_json, hooks, json_text, message_to_bundle
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +79,8 @@ DEFAULT_FHIR_BASE = "http://localhost:8080/fhir"
 FHIR_BASE_ENV = "HL7BRIDGE_FHIR_BASE"
 FHIR_APIKEY_ENV = "HL7BRIDGE_FHIR_APIKEY"
 FHIR_TOKEN_ENV = "HL7BRIDGE_FHIR_TOKEN"
+RUN_ID_ENV = "HL7BRIDGE_RUN_ID"
+DEFAULT_DIRECT_DB = "hl7bridge-direct.db"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 ACK_CODE_WORDS = {
@@ -416,8 +423,22 @@ def _bundle_name(label: str) -> str:
     return f"{stem}-{number}.json" if number else f"{stem}.json"
 
 
+def _load_hooks(args: argparse.Namespace) -> None:
+    """Install the mapping hooks from --mapping-module, loudly."""
+    path = getattr(args, "mapping_module", None)
+    if not path:
+        return
+    names = hooks.load_mapping_module(Path(path))
+    print(
+        f"warning: loaded mapping hooks ({', '.join(names) or 'none'}) from a Python file."
+        " It runs as code inside hl7bridge; use it for a loopback teaching lab only.",
+        file=sys.stderr,
+    )
+
+
 def cmd_to_fhir(args: argparse.Namespace) -> int:
     registry = _registry(args)
+    _load_hooks(args)
     if args.skip_failures and not args.post:
         raise UsageError("--skip-failures applies to --post only.")
     jobs: list[tuple[str, str]] = []
@@ -862,20 +883,76 @@ def _listen_error(host: str, port: int, exc: OSError) -> ListenError:
     return ListenError(f"{where}: {reason}.")
 
 
-def cmd_listen(args: argparse.Namespace) -> int:
-    registry = _registry(args)
-    db_path = _db_path(args)
-    conn = connect(db_path)
-    pipeline = IngestPipeline(registry, conn)
+def _run_id(args: argparse.Namespace) -> str:
+    """--run-id, then HL7BRIDGE_RUN_ID. Required: no run, no start."""
+    if getattr(args, "run_id", None):
+        return check_run_id(str(args.run_id), "--run-id")
+    env = os.environ.get(RUN_ID_ENV)
+    if env is not None:
+        return check_run_id(env, RUN_ID_ENV)
+    raise UsageError(
+        "a run id is required: every write and every reset belongs to one run.",
+        hint=f"Pass --run-id NAME or set {RUN_ID_ENV}.",
+    )
 
+
+def _lab_tag(registry: HospitalRegistry) -> tuple[str, str]:
+    """The lab tag the loaded profiles share (the default when none sets one)."""
+    tags = {h.fhir.tag or DEFAULT_LAB_TAG for h in registry.by_id.values()}
+    if len(tags) > 1:
+        raise ConfigError(
+            "the loaded profiles name different fhir.tag values; one run needs one lab tag.",
+            hint="Load only the lab's profiles with --config.",
+        )
+    return tags.pop() if tags else DEFAULT_LAB_TAG
+
+
+def _named_fhir_base(args: argparse.Namespace, command: str) -> str:
+    base, named = _fhir_base(args)
+    if not named:
+        raise UsageError(
+            f"{command} writes to a FHIR server, so it needs one named.",
+            hint=f"Pass --fhir-base URL or set {FHIR_BASE_ENV}.",
+        )
+    return base
+
+
+def _listen_direct(args: argparse.Namespace) -> int:
+    base = _named_fhir_base(args, "listen --target fhir")
+    run_id = _run_id(args)
+    registry = _registry(args)
+    check_profiles_for_direct(registry)
+    _load_hooks(args)
+    db_path = Path(args.db) if args.db else Path(DEFAULT_DIRECT_DB)
+    _note(args, f"using direct-mode log: {db_path}")
+    scope = RunScope(run_id, _lab_tag(registry))
+    headers = _fhir_headers()
+    _warn_plain_http(base, headers)
+    direct_log = DirectLog(db_path)
+    try:
+        with HapiClient(base, timeout=args.fhir_timeout, extra_headers=headers) as client:
+            _require_metadata(client, base)
+            handler = DirectHandler(registry, client, scope, direct_log)
+            where = f"FHIR {safe_url(base)}, run {run_id}, log {db_path}"
+            return _serve_forever(args, handler.handle_frame, handler.handle_junk, where)
+    finally:
+        direct_log.close()
+
+
+def _serve_forever(
+    args: argparse.Namespace,
+    handle_frame: Callable[[bytes], Awaitable[bytes]],
+    handle_junk: Callable[[bytes], Awaitable[None]],
+    where: str,
+) -> int:
     async def run() -> None:
         try:
-            server = await serve(args.host, args.port, pipeline.handle_frame, pipeline.handle_junk)
+            server = await serve(args.host, args.port, handle_frame, handle_junk)
         except OSError as exc:
             raise _listen_error(args.host, args.port, exc) from None
         bound = server.sockets[0].getsockname()[1] if server.sockets else args.port
         # Printed only once the socket is bound, so it is never a false claim.
-        print(f"MLLP listener on {args.host}:{bound}, db {db_path} (Ctrl+C to stop)", flush=True)
+        print(f"MLLP listener on {args.host}:{bound}, {where} (Ctrl+C to stop)", flush=True)
         if args.host not in LOOPBACK_HOSTS:
             print(
                 f"warning: {args.host} is not loopback. MLLP has no encryption or"
@@ -895,9 +972,23 @@ def cmd_listen(args: argparse.Namespace) -> int:
         asyncio.run(run())
     except KeyboardInterrupt:
         print("listener stopped")
+    return EXIT_OK
+
+
+def cmd_listen(args: argparse.Namespace) -> int:
+    if args.target == "fhir":
+        return _listen_direct(args)
+    for flag in ("run_id", "mapping_module", "fhir_base"):
+        if getattr(args, flag, None):
+            raise UsageError(f"--{flag.replace('_', '-')} applies to --target fhir only.")
+    registry = _registry(args)
+    db_path = _db_path(args)
+    conn = connect(db_path)
+    pipeline = IngestPipeline(registry, conn)
+    try:
+        return _serve_forever(args, pipeline.handle_frame, pipeline.handle_junk, f"db {db_path}")
     finally:
         conn.close()
-    return EXIT_OK
 
 
 # -- Reports ---------------------------------------------------------------------------
@@ -1077,6 +1168,71 @@ def cmd_fhir_probe(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_fhir_reset(args: argparse.Namespace) -> int:
+    base = _named_fhir_base(args, "fhir reset")
+    run_id = _run_id(args)
+    registry = _registry(args)
+    scope = RunScope(run_id, _lab_tag(registry))
+    headers = _fhir_headers()
+    _warn_plain_http(base, headers)
+    with HapiClient(base, extra_headers=headers) as client:
+        _require_metadata(client, base)
+        plan = plan_reset(client, scope)
+        print(f"run {run_id} on {safe_url(base)}:")
+        for kind, ids in plan.ids.items():
+            print(f"  {kind}: {len(ids)}")
+        print("  Patient: never deleted")
+        if plan.total == 0:
+            print("nothing to delete")
+            return EXIT_OK
+        if not args.yes:
+            print("dry run: nothing deleted. Pass --yes to delete these resources.")
+            return EXIT_OK
+        print(f"type the run id to delete these {plan.total} resources: ", end="", flush=True)
+        try:
+            typed = input()
+        except EOFError:
+            typed = ""
+        if typed.strip() != run_id:
+            print("not confirmed: nothing deleted.", file=sys.stderr)
+            return EXIT_FINDINGS
+        deleted = execute_reset(client, plan)
+    print(f"deleted {deleted} resources of run {run_id}")
+    return EXIT_OK
+
+
+def cmd_from_fhir(args: argparse.Namespace) -> int:
+    base, named = _fhir_base(args)
+    headers = _fhir_headers() if named else {}
+    registry = _registry(args)
+    hospital = registry.by_id.get(args.hospital)
+    if hospital is None:
+        raise UsageError(
+            "--hospital names no loaded profile.",
+            hint=f"Known: {', '.join(sorted(registry.by_id))}.",
+        )
+    now = _now_arg(args.now)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    with HapiClient(base, extra_headers=headers) as client:
+        _require_metadata(client, base)
+        if args.report:
+            text, mrn, skipped = report_message(client, args.report, hospital, now)
+            files = {"oru_r01_from_report.hl7": text}
+        else:
+            files, mrn = patient_messages(client, args.patient, hospital, now)
+            skipped = 0
+    for name, text in files.items():
+        with open(out / name, "x", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    chosen = "the identifier typed MR" if mrn.typed_mr else "the first identifier (none typed MR)"
+    print(f"PID-3 holds {chosen} of the Patient.")
+    if skipped:
+        print(f"{skipped} result(s) left out: a value type the renderer does not write.")
+    print(f"wrote {len(files)} message(s) to {out}")
+    return EXIT_OK
+
+
 def cmd_fhir_sync(args: argparse.Namespace) -> int:
     base, named = _fhir_base(args)
     if not named:
@@ -1249,7 +1405,12 @@ COMMANDS: tuple[Command, ...] = (
         "Listener",
         "run the MLLP listener",
         cmd_listen,
-        ("hl7bridge listen", "hl7bridge listen --port 2576 --db data/bridge.db"),
+        (
+            "hl7bridge listen",
+            "hl7bridge listen --port 2576 --db data/bridge.db",
+            "hl7bridge listen --target fhir --fhir-base http://localhost:8080/fhir"
+            " --run-id lab-a --config lab-profiles",
+        ),
     ),
     Command(
         "reconcile",
@@ -1298,6 +1459,26 @@ COMMANDS: tuple[Command, ...] = (
         ("hl7bridge fhir sync --fhir-base http://localhost:8080/fhir",),
     ),
     Command(
+        "fhir reset",
+        "FHIR",
+        "delete one lab run's resources (dry run unless --yes)",
+        cmd_fhir_reset,
+        (
+            "hl7bridge fhir reset --run-id lab-a --fhir-base http://localhost:8080/fhir",
+            "hl7bridge fhir reset --run-id lab-a --yes",
+        ),
+    ),
+    Command(
+        "from-fhir",
+        "FHIR",
+        "write sample HL7 v2 messages for a Patient or a report on a FHIR server",
+        cmd_from_fhir,
+        (
+            "hl7bridge from-fhir --patient 123 --hospital WINTEHR --out msgs",
+            "hl7bridge from-fhir --report 456 --hospital WINTEHR --out msgs",
+        ),
+    ),
+    Command(
         "fhir probe",
         "FHIR",
         "read-only server check: capability statement and resource counts",
@@ -1336,7 +1517,7 @@ COMMANDS: tuple[Command, ...] = (
 
 GROUPS = ("Try it", "Messages", "Listener", "Reports", "FHIR", "Data")
 PARENT_SUMMARIES = {
-    "fhir": "FHIR server commands: sync, probe",
+    "fhir": "FHIR server commands: sync, reset, probe",
     "load": "load DICOM metadata or the outbound report log: studies, outbound",
     "profile": "profile commands: show, check",
 }
@@ -1418,6 +1599,21 @@ def _add_fhir_base(p: argparse.ArgumentParser) -> None:
         "--fhir-base",
         metavar="URL",
         help=f"FHIR base URL (default: {FHIR_BASE_ENV}, then {DEFAULT_FHIR_BASE})",
+    )
+
+
+def _add_run_id(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--run-id", metavar="NAME", help=f"the lab run (default: {RUN_ID_ENV}; required)"
+    )
+
+
+def _add_mapping_module(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--mapping-module",
+        metavar="FILE",
+        help="a .py file of mapping hooks (sex_code, abnormal_flag, observation_time);"
+        " teaching labs only",
     )
 
 
@@ -1574,15 +1770,41 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--fhir-base", metavar="URL", help=f"the server for --post (default: {FHIR_BASE_ENV})"
         )
+        _add_mapping_module(p)
     elif name == "synth":
         p.add_argument("--out", required=True, metavar="DIR", help="output folder")
         _add_config(p)
         p.add_argument("--seed", type=int, default=42, help="generator seed (default: 42)")
     elif name == "listen":
-        _add_db(p)
+        p.add_argument(
+            "--db",
+            metavar="FILE",
+            help="database file (default: HL7BRIDGE_DB, ./hl7bridge.db; with --target fhir"
+            f" the direct-mode log, default ./{DEFAULT_DIRECT_DB})",
+        )
         _add_config(p)
         p.add_argument("--host", default="127.0.0.1", help="address to bind (default: 127.0.0.1)")
         p.add_argument("--port", type=_port, default=2575, help="port to bind (default: 2575)")
+        p.add_argument(
+            "--target",
+            choices=("store", "fhir"),
+            default="store",
+            help="store: the SQLite store (default); fhir: one FHIR transaction per message,"
+            " ACK after commit",
+        )
+        p.add_argument(
+            "--fhir-base", metavar="URL", help=f"with --target fhir (default: {FHIR_BASE_ENV})"
+        )
+        _add_run_id(p)
+        p.add_argument(
+            "--fhir-timeout",
+            type=float,
+            default=10.0,
+            metavar="SECONDS",
+            help="with --target fhir, give up on a FHIR request after this long, then AE"
+            " (default: 10)",
+        )
+        _add_mapping_module(p)
     elif name in ("reconcile", "ack-report"):
         _add_db(p)
         _add_config(p)
@@ -1602,6 +1824,22 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         _add_db(p)
         _add_config(p)
         _add_fhir_base(p)
+    elif name == "fhir reset":
+        _add_config(p)
+        _add_fhir_base(p)
+        _add_run_id(p)
+        p.add_argument(
+            "--yes", action="store_true", help="delete after a typed run id (default: dry run)"
+        )
+    elif name == "from-fhir":
+        _add_config(p)
+        _add_fhir_base(p)
+        which = p.add_mutually_exclusive_group(required=True)
+        which.add_argument("--patient", metavar="ID", help="the Patient's server id")
+        which.add_argument("--report", metavar="ID", help="a DiagnosticReport's server id")
+        p.add_argument("--hospital", required=True, metavar="ID", help="the profile to write for")
+        p.add_argument("--out", required=True, metavar="DIR", help="folder for the .hl7 files")
+        _add_now(p)
     elif name == "fhir probe":
         _add_fhir_base(p)
     elif name == "load studies":

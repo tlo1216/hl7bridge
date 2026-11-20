@@ -16,6 +16,7 @@ from fhir.resources.R4B.patient import Patient
 
 from ..errors import MappingError
 from ..ingest.parser import pick_mrn_repetition
+from . import hooks
 from .common import MapContext, birth_date, check_key, typed_identifier
 from .tables import SEX
 
@@ -39,6 +40,18 @@ def mrn_value(ctx: MapContext) -> str:
     return check_key(mrn, "PID-3")
 
 
+def mrn_authority(ctx: MapContext) -> str:
+    """PID-3.4 (assigning authority, its first subcomponent) of the MRN
+    repetition, or ''. Direct mode picks the MRN system by it
+    (``fhir.identifier_systems.mrn_by_authority``)."""
+    r = ctx.reader
+    reps = r.repetitions("PID-3")
+    chosen = pick_mrn_repetition([r.get("PID-3", rep=n, comp=5) for n in range(1, reps + 1)])
+    if not chosen:
+        return ""
+    return r.get("PID-3", rep=chosen, comp=4).split("&", 1)[0]
+
+
 def pid_to_patient(ctx: MapContext) -> Patient:
     r = ctx.reader
     if not r.count("PID"):
@@ -53,7 +66,7 @@ def pid_to_patient(ctx: MapContext) -> Patient:
 
     sex = r.get("PID-8")
     if sex:
-        kwargs["gender"] = SEX.lookup(sex, "PID-8")
+        kwargs["gender"] = hooks.sex_code(sex, lambda raw: SEX.lookup(raw, "PID-8"))
 
     born = birth_date(ctx, "PID-7")
     if born:

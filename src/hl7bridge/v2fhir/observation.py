@@ -27,6 +27,7 @@ from fhir.resources.R4B.reference import Reference
 
 from ..errors import MappingError, TimestampError
 from ..hl7time import parse_hl7_ts
+from . import hooks
 from .common import MapContext, check_key, coded_concept, timestamp
 from .tables import INTERPRETATION, OBSERVATION_STATUS, UCUM, V3_INTERPRETATION, VALUE_TYPE
 
@@ -193,14 +194,21 @@ def obx_to_observation(
                 "coding": [
                     {
                         "system": V3_INTERPRETATION,
-                        "code": INTERPRETATION.lookup(f, "OBX-8", segment=seg),
+                        "code": hooks.abnormal_flag(
+                            f,
+                            seg,
+                            lambda raw: INTERPRETATION.lookup(raw, "OBX-8", segment=seg),
+                            frozenset(INTERPRETATION.codes.values()),
+                        ),
                     }
                 ]
             }
             for f in flags
         ]
 
-    effective = timestamp(ctx, "OBX-14", seg=seg)
+    effective = hooks.observation_time(
+        r.get("OBX-14", seg=seg), ctx.tz, seg, lambda: timestamp(ctx, "OBX-14", seg=seg)
+    )
     if effective:
         kwargs["effectiveDateTime"] = effective
 

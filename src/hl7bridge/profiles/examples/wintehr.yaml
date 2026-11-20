@@ -1,0 +1,30 @@
+# EXAMPLE ONLY. A profile for a teaching lab that sends HL7 v2 into a
+# FHIR server whose patients already exist (a WintEHR stack, say), through
+# the direct listener:
+#
+#   hl7bridge listen --target fhir --config <this folder> --run-id lab-a \
+#     --fhir-base http://127.0.0.1:8080/fhir
+#
+# Patients are matched by MRN and never created or changed (match_only).
+# Check on the live server which identifier system its patients' MR
+# identifiers use, and put it under mrn (or mrn_by_authority) below.
+hospital_id: WINTEHR
+display_name: Teaching lab (example)
+facility_codes: [WINTEHR]
+accession_field: OBR-3
+timezone: America/New_York
+hl7_version: "2.5.1"
+timestamps_include_offset: true
+expected_message_types: [ADT^A01, ADT^A04, ADT^A08, ORM^O01, ORU^R01]
+procedure_code_system: local
+fhir:
+  patient_policy: match_only
+  identifier_systems:
+    mrn: urn:hl7bridge:lab:mrn
+    mrn_by_authority: {WINTEHR: urn:hl7bridge:lab:mrn}
+    accession: urn:hl7bridge:wintehr:accession
+    placer: urn:hl7bridge:wintehr:placer
+    visit: urn:hl7bridge:wintehr:visit
+    observation: urn:hl7bridge:wintehr:observation
+  tag: {system: urn:hl7bridge:tag, code: hl7v2-lab}
+  allowed_processing_ids: [T, D]

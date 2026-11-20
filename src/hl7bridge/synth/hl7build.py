@@ -50,7 +50,7 @@ def msh(
         "",
         message_type,
         control_id,
-        "P",
+        "T",  # training: the direct-to-FHIR listener refuses P (production)
         version,
     )
 

@@ -53,7 +53,7 @@ from .fields import FieldReader
 from .jsontext import resource_dict
 from .observation import KEY_JOIN, notes_after, obx_to_observation
 from .order import accession_value, orc_obr_to_service_request
-from .patient import pid_to_patient
+from .patient import mrn_authority, pid_to_patient
 from .report import is_narrative, obr_to_diagnostic_report, report_text
 
 ADT_EVENTS = ("ADT^A01", "ADT^A04", "ADT^A08")
@@ -75,6 +75,8 @@ class MappedMessage:
     # system, which a post needs to find the results a correction dropped.
     accession: str = ""
     observation_system: str = ""
+    # PID-3.4 of the MRN repetition, for direct mode's MRN system choice.
+    mrn_authority: str = ""
 
     def entry_types(self) -> list[str]:
         return [e.resource.get_resource_type() for e in self.bundle.entry or [] if e.resource]
@@ -157,6 +159,7 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
 
     with _mapping(reader, "pid_to_patient", "PID"):
         patient = pid_to_patient(ctx)
+        authority = mrn_authority(ctx)
     patient_ref = _full_url(patient)
     is_adt = msg_type in ADT_EVENTS
     planned: list[tuple[Resource, str]] = [(patient, MERGE if is_adt else CREATE)]
@@ -190,6 +193,7 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
         policies={_full_url(r): p for r, p in planned},
         accession=report.identifier[0].value if report is not None else "",  # type: ignore[attr-defined]
         observation_system=hospital.systems.observation if report is not None else "",
+        mrn_authority=authority,
     )
 
 
