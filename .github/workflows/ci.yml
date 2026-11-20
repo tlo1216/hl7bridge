@@ -57,6 +57,9 @@ jobs:
       - name: Sync dependencies (locked)
         run: uv sync --locked
       - name: Unit and system tests (no FHIR server)
+        env:
+          # The demo guard tests fail instead of skipping when no bash is found.
+          HL7BRIDGE_REQUIRE_BASH: "1"
         run: uv run pytest -m "not fhir" -q
 
   pip-path:
