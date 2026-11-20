@@ -1,22 +1,29 @@
-"""Fail if internal planning references or tool names appear in the repo.
+"""Fail if words this repository keeps out of its text appear in it.
 
 Usage:
     python tools/check_references.py            # scan the working tree
     python tools/check_references.py --commits  # also scan commit messages
 
-The patterns live only here. Each one is written with a character class
-(for example ``[x]yz``) so this file never matches its own patterns, and the
-scan skips this file's path as well. ``tests/unit/test_check_references.py``
-plants every word in a temporary tree to prove the check is not blind, and
-scans this file's own text to prove it does not match itself.
+The words are not written here. Each line is split into lower-case word
+tokens (runs of letters and digits; a token of digits only counts as "#"),
+and every run of one to three tokens is hashed with a fixed salt. A rule
+fails the scan when one of its digests turns up. Rule ids are neutral, so
+reading this file tells you neither the words nor what they are about. The
+digests cannot match themselves, and the scan skips this file's path too.
 
-ALLOW holds exact (path, pattern name) pairs that are allowed to match. It
+``tests/unit/test_check_references.py`` proves the tokenizer and the
+matching on stand-in words, and, when ``HL7BRIDGE_REFCHECK_SAMPLES`` names a
+local file of real samples (kept outside the repository), that every rule
+catches its sample.
+
+ALLOW holds exact (path, rule id) pairs that are allowed to match. It
 starts empty. Add a pair only with a reason next to it.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
@@ -24,21 +31,49 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-PATTERNS: dict[str, re.Pattern[str]] = {
-    "planning-note numbering": re.compile(r"\b[p]rojects? [0-9]", re.IGNORECASE),
-    "planning-note rule numbering": re.compile(r"\b[e]ngineering rules?\b", re.IGNORECASE),
-    "planning brief": re.compile(r"\b[p]roject brief\b", re.IGNORECASE),
-    "client name": re.compile(r"\b[s]iim\b", re.IGNORECASE),
-    "assistant name": re.compile(r"\b[c]laude\b", re.IGNORECASE),
-    "assistant vendor": re.compile(r"\b[a]nthropic\b", re.IGNORECASE),
-    "review tool name": re.compile(r"\b[c]odex\b", re.IGNORECASE),
-    "review agent name": re.compile(r"\b[f]able\b", re.IGNORECASE),
-    "agent wording": re.compile(r"\b[s]ub-?agents?\b", re.IGNORECASE),
-    "attribution trailer": re.compile(r"\b[c]o-authored-by\b", re.IGNORECASE),
+SALT = b"hl7bridge-reference-check\x00"
+MAX_NGRAM = 3
+DIGEST_CHARS = 16
+
+# rule id -> digests of the token runs it rejects.
+RULES: dict[str, frozenset[str]] = {
+    "R01": frozenset({"35f29f46cfbea24d", "7dd91001ff8d3dbd"}),
+    "R02": frozenset({"d37cd106b22c8e00", "f59537556fb7851e"}),
+    "R03": frozenset({"4a0ca41de919eb66"}),
+    "R04": frozenset({"e34563ee66975f97"}),
+    "R05": frozenset({"590ecabe5ce863ff"}),
+    "R06": frozenset({"b58132f515028e0a"}),
+    "R07": frozenset({"cb3df1874cca52b5"}),
+    "R08": frozenset({"6aea47668e5be577"}),
+    "R09": frozenset(
+        {"12bff9bfd1cf1618", "5ca4c1568998f99e", "96911d9786816c0c", "c4265c827409e6e5"}
+    ),
+    "R10": frozenset({"520516eb522d58c3"}),
 }
 
-# (repo-relative POSIX path, pattern name). Keep it short and justified.
+# (repo-relative POSIX path, rule id). Keep it short and justified.
 ALLOW: frozenset[tuple[str, str]] = frozenset()
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def digest(ngram: str) -> str:
+    """Salted digest of one space-joined token run."""
+    return hashlib.sha256(SALT + ngram.encode("utf-8")).hexdigest()[:DIGEST_CHARS]
+
+
+def tokens(line: str) -> list[str]:
+    return ["#" if t.isdigit() else t for t in _TOKEN_RE.findall(line.lower())]
+
+
+def line_digests(line: str) -> set[str]:
+    toks = tokens(line)
+    found: set[str] = set()
+    for size in range(1, MAX_NGRAM + 1):
+        for i in range(len(toks) - size + 1):
+            found.add(digest(" ".join(toks[i : i + size])))
+    return found
+
 
 SKIP_DIRS = {
     ".git",
@@ -69,9 +104,10 @@ class Hit:
 
 def scan_text(text: str, where: str) -> Iterator[Hit]:
     for lineno, line in enumerate(text.splitlines(), start=1):
-        for name, pattern in PATTERNS.items():
-            if pattern.search(line) and (where, name) not in ALLOW:
-                yield Hit(where, lineno, name, line)
+        found = line_digests(line)
+        for rule, digests in RULES.items():
+            if found & digests and (where, rule) not in ALLOW:
+                yield Hit(where, lineno, rule, line)
 
 
 def _git_files(root: Path) -> list[Path] | None:
