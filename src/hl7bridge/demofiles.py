@@ -50,7 +50,10 @@ between the last check and the delete (Linux and macOS), replace a
 folder between its ``mkdir`` and the identity read, or, on a file system
 that reuses file ids (Linux file systems reuse a freed inode number at
 once; FAT and some ReFS volumes do too), make a new file that carries a
-recorded identity. Each of these needs write access to your
+recorded identity. On Linux and macOS a file is also checked against the
+size and modified time it had right after the demo wrote it, so a reused
+inode number alone is not enough; a program that also copies those can
+still pass. Each of these needs write access to your
 private temp folder, which means it already has your rights and could
 delete your files directly. The race gives it nothing it did not have,
 so the demo does not try to defend against your own account.
@@ -86,6 +89,9 @@ class Entry(NamedTuple):
     parts: tuple[str, ...]
     is_dir: bool
     identity: Identity
+    # Files only, Linux and macOS: (size, mtime_ns) read once the demo has
+    # written the file. None if the write failed or on Windows.
+    stamp: tuple[int, int] | None = None
 
     @property
     def rel(self) -> str:
@@ -150,8 +156,15 @@ class OwnedFiles:
             raise
         # Recorded before the write, so a failed write is still cleaned up.
         self.entries.append(Entry(parts, False, identity))
+        index = len(self.entries) - 1
         with open(fd, "wb", closefd=True) as fh:
             fh.write(data)
+            fh.flush()
+            if sys.platform != "win32":
+                st = os.fstat(fh.fileno())
+                self.entries[index] = self.entries[index]._replace(
+                    stamp=(st.st_size, st.st_mtime_ns)
+                )
 
 
 def _before_step(entry: Entry | None) -> None:
@@ -354,6 +367,8 @@ else:
 
     def _check_last(st: os.stat_result, entry: Entry) -> bool:
         kind_ok = stat.S_ISDIR(st.st_mode) if entry.is_dir else stat.S_ISREG(st.st_mode)
+        if entry.stamp is not None and (st.st_size, st.st_mtime_ns) != entry.stamp:
+            return False  # same inode number, but not the file the demo wrote
         return kind_ok and _ident(st) == entry.identity
 
     def _remove_entry(owned: OwnedFiles, entry: Entry) -> str:

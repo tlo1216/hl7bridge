@@ -272,6 +272,18 @@ def test_a_replaced_file_is_left(owned):
     assert target.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the size and time stamp is POSIX only")
+def test_a_file_changed_after_the_demo_wrote_it_is_left(owned):
+    # Stands in for a new file that reused the old inode number: same
+    # identity, different content, so only the stamp can tell them apart.
+    target = owned.root / "synth" / "a.hl7"
+    with open(target, "ab") as fh:
+        fh.write(b"PID|someone else\r")
+    result = remove_owned(owned)
+    assert "synth/a.hl7" in result.kept
+    assert target.exists()
+
+
 def test_a_replaced_subfolder_is_never_entered(owned):
     sub = owned.root / "synth"
     sub.rename(owned.root.parent / "moved")
