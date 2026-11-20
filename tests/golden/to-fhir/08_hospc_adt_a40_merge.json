@@ -65,8 +65,9 @@
         ]
       },
       "request": {
-        "method": "PUT",
-        "url": "Patient?identifier=urn:hl7bridge:hospc:mrn|SC1002"
+        "method": "POST",
+        "url": "Patient",
+        "ifNoneExist": "identifier=urn:hl7bridge:hospc:mrn|SC1002"
       }
     }
   ]

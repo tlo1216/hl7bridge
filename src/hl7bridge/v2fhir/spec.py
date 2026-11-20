@@ -152,10 +152,15 @@ ROWS: tuple[SpecRow, ...] = (
         "Patient.identifier (MR), Patient.active, Patient.link",
         "",
         "ADT^A40 only. Component 1 is the prior MRN, with the profile's MRN system"
-        " (component 5, when valued, must be MR). One repetition; the same MRN as PID-3 is"
-        " refused. The Patient is set inactive and linked replaced-by to the survivor"
-        " (PID). The IG has no MRG map. A post merges it into the current Patient, or"
-        " writes a bare inactive one when the server has none. The survivor gets no link.",
+        " (component 5, when valued, must be MR; component 4, when valued on both MRG-1 and"
+        " PID-3, must match). One PID, one MRG and one repetition; the same MRN as PID-3, an"
+        " empty or HL7-null MRN are refused. The Patient is set inactive and linked"
+        " replaced-by to the survivor (PID). The IG (1.0.0) has no MRG-to-Patient map and no"
+        " ADT_A40 message map; its only MRG map, segment-mrg-to-account, targets Account and"
+        " leaves MRG-1 unmapped. A post merges this into the current Patient (existing links"
+        " stay, a contradicting or reversed merge is refused), or writes a bare inactive one"
+        " when the server has none; the offline Bundle makes it a conditional create. The"
+        " survivor gets no link.",
     ),
     # PV1 to Encounter
     SpecRow(
@@ -398,7 +403,10 @@ def render_markdown() -> str:
         f"The IG column names a page of the HL7 v2-to-FHIR implementation guide,"
         f" {IG_VERSION}, at {IG_BASE}. The guide is cited by page; its tables are",
         "not copied. The guide has a message map for ADT^A01 and none for A04",
-        "or A08; hl7bridge maps all three with the same PID and PV1 rows.",
+        "or A08; hl7bridge maps all three with the same PID and PV1 rows. It has",
+        "no map for ADT^A40 and none from MRG to Patient (only MRG to Account);",
+        "the merged-away Patient and its `replaced-by` link are hl7bridge's own",
+        "reading of FHIR's Patient.link, not an IG map.",
         "",
         "Resources are FHIR R4B models (`fhir.resources`); servers are R4.",
         "Identifier systems come from the hospital profile (`fhir.identifier_systems`).",

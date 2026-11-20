@@ -27,6 +27,10 @@ Supported messages, by MSH-9:
 | ORM^O01 | Patient, ServiceRequest |
 | ORU^R01 | Patient, one Observation per structured OBX, DiagnosticReport |
 
+Offline, the merged-away Patient of an A40 is a conditional create, never a PUT:
+its body holds only the MRN, so posting the file as is must not replace a Patient
+with it. ``--post`` merges it into the current Patient instead.
+
 Anything else raises ``MappingError``: ACKs, and every type the hospital
 profile does not list.
 """
@@ -108,11 +112,15 @@ def search_query(system: str, value: str) -> str:
     return "identifier=" + quote(f"{system}|{value}", safe=":/|")
 
 
-def _entry(resource: Resource, policy: str) -> BundleEntry:
+def _entry(resource: Resource, policy: str, *, offline_create: bool = False) -> BundleEntry:
+    """``offline_create``: a merge entry whose offline request is a
+    conditional create, not a PUT. A merged-away Patient has only its MRN,
+    so a file posted as is must never replace a Patient with that bare body;
+    a post (``fhir/post.py``) replaces the request either way."""
     ident = resource.identifier[0]  # type: ignore[attr-defined]
     kind = resource.get_resource_type()
     query = search_query(ident.system, ident.value)
-    if policy == CREATE:
+    if policy == CREATE or offline_create:
         request = BundleEntryRequest(method="POST", url=kind, ifNoneExist=query)
     else:
         request = BundleEntryRequest(method="PUT", url=f"{kind}?{query}")
@@ -171,7 +179,7 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
 
     if msg_type == MERGE_EVENT:
         with _mapping(reader, "mrg_to_patient", "MRG"):
-            planned.append((merged_patient(ctx, patient_ref, survivor_mrn), MERGE))
+            planned.append((merged_patient(ctx, patient_ref, survivor_mrn, authority), MERGE))
     elif is_adt:
         with _mapping(reader, "pv1_to_encounter", "PV1"):
             encounter = pv1_to_encounter(ctx, patient_ref)
@@ -191,7 +199,13 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
                 "OBX-3/OBX-4", "two results in one message share a key (code and sub-id)"
             )
         seen.add(url)
-    bundle = Bundle(type="transaction", entry=[_entry(r, p) for r, p in planned])
+    bundle = Bundle(
+        type="transaction",
+        entry=[
+            _entry(r, p, offline_create=msg_type == MERGE_EVENT and n == 1)
+            for n, (r, p) in enumerate(planned)
+        ],
+    )
     report = planned[-1][0] if msg_type == "ORU^R01" else None
     return MappedMessage(
         bundle=bundle,
@@ -270,6 +284,7 @@ __all__ = [
     "ADT_EVENTS",
     "CREATE",
     "MERGE",
+    "MERGE_EVENT",
     "REPLACE",
     "SUPPORTED",
     "MappedMessage",

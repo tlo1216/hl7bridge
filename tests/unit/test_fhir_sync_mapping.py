@@ -4,6 +4,8 @@ and the two paths writing identical content."""
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import json
 import logging
 from decimal import Decimal
@@ -12,10 +14,17 @@ import httpx
 import pytest
 
 from hl7bridge.config import HospitalRegistry
-from hl7bridge.errors import FhirPostError, MappingError
+from hl7bridge.errors import ConfigError, FhirPostError, MappingError
 from hl7bridge.fhir import sync_to_fhir
 from hl7bridge.fhir.client import HapiClient
-from hl7bridge.fhir.post import PostOrderError, check_run_order, merge_resource, post_mapped
+from hl7bridge.fhir.post import (
+    ConcurrentWriteError,
+    MergeRefusedError,
+    PostOrderError,
+    check_run_order,
+    merge_resource,
+    post_mapped,
+)
 from hl7bridge.ingest import IngestPipeline
 from hl7bridge.profiles import BUNDLED_PROFILES, SAMPLES_DIR
 from hl7bridge.store import connect
@@ -89,14 +98,12 @@ def test_sync_posts_the_stored_visit_as_an_encounter(store, registry):
     assert enc["subject"]["reference"].startswith("Patient/")
 
 
-def test_sync_leaves_out_a_merged_patient(store, registry):
+def test_sync_posts_a_merged_patients_own_messages_too(store, registry):
     store.execute("UPDATE patients SET merged_into_mrn = 'SB9999' WHERE mrn = 'SB1001'")
     store.commit()
     report, server = _sync(store, registry)
-    assert report.merged_away == 3  # its A08, ORM and ORU
     assert not report.skipped
-    assert server.by_identifier("Patient", "urn:hl7bridge:hospb:mrn", "SB1001") == []
-    assert server.all("Patient")
+    assert len(server.by_identifier("Patient", "urn:hl7bridge:hospb:mrn", "SB1001")) == 1
 
 
 def test_sync_skips_a_message_whose_sex_code_is_not_in_the_table(store, registry, caplog):
@@ -626,7 +633,7 @@ def _a40(pid_mrn: str = "SC1001", gone: str = "SC1002") -> str:
     return (
         "\r".join(
             [
-                "MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007083000||ADT^A40|TA40|T|2.5",
+                f"MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007083000||ADT^A40|TA40{pid_mrn}{gone}|T|2.5",
                 "EVN|A40|20261007083000",
                 f"PID|1||{pid_mrn}^^^HOSPC^MR||ZZZSAMPLE^THREE|||F",
                 f"MRG|{gone}^^^HOSPC^MR",
@@ -640,7 +647,7 @@ def _a08(mrn: str, family: str) -> str:
     return (
         "\r".join(
             [
-                "MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007070000||ADT^A08|TA08|T|2.5",
+                f"MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007070000||ADT^A08|TA08{mrn}|T|2.5",
                 f"PID|1||{mrn}^^^HOSPC^MR||{family}^ONE",
                 "PV1|1|O",
             ]
@@ -694,3 +701,200 @@ def test_sync_posts_the_stored_a40(store, registry):
         {"other": {"reference": f"Patient/{survivor['id']}"}, "type": "replaced-by"}
     ]
     assert not any(kind == "ADT^A40" for kind, _, _ in report.skipped)
+
+
+# -- ADT^A40: links kept, chains, contradictions, one resource twice -----------------
+
+_GONE = f"{_HOSPC_MRN}|SC1002"
+
+
+def _ref(server: FakeFhir, mrn: str) -> str:
+    return f"Patient/{server.by_key('Patient', f'{_HOSPC_MRN}|{mrn}')['id']}"
+
+
+def _links(server: FakeFhir, mrn: str) -> list[dict]:
+    return server.by_key("Patient", f"{_HOSPC_MRN}|{mrn}").get("link", [])
+
+
+def test_a40_keeps_the_links_the_merged_patient_already_has(registry):
+    server = FakeFhir()
+    _post(server, registry, _a08("SC1002", "OLDNAME"), _a08("SC1001", "KEEPER"))
+    gone = server.by_key("Patient", _GONE)
+    other = {"other": {"reference": "Patient/elsewhere"}, "type": "seealso"}
+    gone["link"] = [other]
+    server._write("Patient", gone["id"], gone)
+    _post(server, registry, _a40())
+    want = {"other": {"reference": _ref(server, "SC1001")}, "type": "replaced-by"}
+    assert _links(server, "SC1002") == [other, want]
+    _post(server, registry, _a40())  # a resend adds nothing
+    assert _links(server, "SC1002") == [other, want]
+
+
+def test_merge_resource_keeps_current_links_and_adds_only_new_ones():
+    current = {
+        "resourceType": "Patient",
+        "link": [{"type": "refer", "other": {"reference": "P/1"}}],
+    }
+    new = {
+        "resourceType": "Patient",
+        "link": [
+            {"type": "refer", "other": {"reference": "P/1"}},
+            {"type": "seealso", "other": {"reference": "P/2"}},
+        ],
+    }
+    merged = merge_resource(current, new)
+    assert [x["type"] for x in merged["link"]] == ["refer", "seealso"]
+
+
+def test_a40_chain_posts_every_edge_and_a_resend_is_quiet(registry):
+    server2 = FakeFhir()  # _a40 takes (survivor, merged-away)
+    _post(server2, registry, _a40("SC1002", "SC1001"), _a40("SC1003", "SC1002"))
+    assert _links(server2, "SC1001")[0]["other"]["reference"] == _ref(server2, "SC1002")
+    assert _links(server2, "SC1002")[0]["other"]["reference"] == _ref(server2, "SC1003")
+    assert "link" not in server2.by_key("Patient", f"{_HOSPC_MRN}|SC1003")
+    again = copy.deepcopy(server2.data)
+    _post(server2, registry, _a40("SC1002", "SC1001"), _a40("SC1003", "SC1002"))
+    assert {k: {i: r.get("link") for i, r in v.items()} for k, v in server2.data.items()} == {
+        k: {i: r.get("link") for i, r in v.items()} for k, v in again.items()
+    }
+
+
+def test_sync_does_not_drop_the_first_a40_of_a_chain(tmp_path, registry):
+    conn = connect(tmp_path / "c.db")
+    pipeline = IngestPipeline(registry, conn)
+    for text in (_a40("SC1002", "SC1001"), _a40("SC1003", "SC1002")):
+        pipeline.handle_bytes(text.encode())
+    report, server = _sync(conn, registry)
+    again, _ = _sync(conn, registry, server)
+    conn.close()
+    assert report.skipped == [] and again.skipped == []
+    assert _links(server, "SC1001")[0]["other"]["reference"] == _ref(server, "SC1002")
+    assert _links(server, "SC1002")[0]["other"]["reference"] == _ref(server, "SC1003")
+    assert server.by_key("Patient", _GONE)["active"] is False
+    assert server.by_key("Patient", f"{_HOSPC_MRN}|SC1003").get("active") is None
+
+
+def test_a_contradicting_a40_is_refused_and_writes_nothing(registry):
+    server = FakeFhir()
+    _post(server, registry, _a40("SC1002", "SC1001"))
+    sent = len(server.transactions)
+    with pytest.raises(MergeRefusedError, match="already replaced by another"):
+        _post(server, registry, _a40("SC1003", "SC1001"))
+    assert len(server.transactions) == sent
+    assert _links(server, "SC1001")[0]["other"]["reference"] == _ref(server, "SC1002")
+
+
+def test_a_reversed_a40_is_refused(registry):
+    server = FakeFhir()
+    _post(server, registry, _a40("SC1002", "SC1001"))
+    sent = len(server.transactions)
+    with pytest.raises(MergeRefusedError, match="surviving Patient is inactive or merged"):
+        _post(server, registry, _a40("SC1001", "SC1002"))
+    assert len(server.transactions) == sent
+    assert "link" not in server.by_key("Patient", f"{_HOSPC_MRN}|SC1002")
+
+
+def test_an_a40_into_an_inactive_survivor_is_refused(registry):
+    server = FakeFhir()
+    _post(server, registry, _a08("SC1001", "KEEPER"))
+    survivor = server.by_key("Patient", f"{_HOSPC_MRN}|SC1001")
+    survivor["active"] = False
+    server._write("Patient", survivor["id"], survivor)
+    with pytest.raises(MergeRefusedError):
+        _post(server, registry, _a40("SC1001", "SC1002"))
+
+
+def test_sync_skips_a_refused_a40_loudly_and_goes_on(tmp_path, registry):
+    conn = connect(tmp_path / "r.db")
+    pipeline = IngestPipeline(registry, conn)
+    for text in (_a40("SC1002", "SC1001"), _a40("SC1003", "SC1001"), _a08("SC1004", "AFTER")):
+        pipeline.handle_bytes(text.encode())
+    report, server = _sync(conn, registry)
+    conn.close()
+    assert [(k, r[:34]) for k, _, r in report.skipped] == [
+        ("ADT^A40", "the merged-away Patient is already")
+    ]
+    assert server.by_key("Patient", f"{_HOSPC_MRN}|SC1004")["name"][0]["family"] == "AFTER"
+
+
+def test_two_entries_that_resolve_to_one_patient_are_refused(registry):
+    server = FakeFhir()
+    both = {
+        "resourceType": "Patient",
+        "identifier": [
+            {"system": _HOSPC_MRN, "value": "SC1001"},
+            {"system": _HOSPC_MRN, "value": "SC1002"},
+        ],
+    }
+    server._write("Patient", "one", both)
+    with pytest.raises(MergeRefusedError, match="resolve to one resource"):
+        _post(server, registry, _a40())
+    assert server.transactions == []
+    assert "link" not in server.data["Patient"]["one"]
+
+
+def test_the_fake_server_rejects_two_writes_to_one_id(registry):
+    server = FakeFhir()
+    server._write("Patient", "one", {"resourceType": "Patient", "identifier": []})
+    entry = {
+        "resource": {"resourceType": "Patient", "identifier": []},
+        "fullUrl": "urn:uuid:a",
+        "request": {"method": "PUT", "url": "Patient/one"},
+    }
+    body = {
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [entry, {**entry, "fullUrl": "urn:uuid:b"}],
+    }
+    with _client(server) as client, pytest.raises(FhirPostError, match="returned 400"):
+        client.commit(body)
+    assert server.data["Patient"]["one"]["meta"]["versionId"] == "1"
+
+
+def test_a_merged_patient_created_by_another_writer_is_a_retryable_conflict(registry):
+    server = FakeFhir()
+    _post(server, registry, _a08("SC1001", "KEEPER"))
+
+    def race(body):
+        server.before_commit = None
+        server._write(
+            "Patient",
+            "theirs",
+            {"resourceType": "Patient", "identifier": [{"system": _HOSPC_MRN, "value": "SC1002"}]},
+        )
+
+    server.before_commit = race
+    with pytest.raises(ConcurrentWriteError, match="send again"):
+        _post(server, registry, _a40())
+    # The resend completes the merge.
+    _post(server, registry, _a40())
+    assert _links(server, "SC1002")[0]["type"] == "replaced-by"
+    assert len(server.all("Patient")) == 2
+
+
+def test_the_batch_post_refuses_an_a40_for_a_match_only_profile(registry):
+    mapped = dataclasses.replace(message_to_bundle(_a40(), registry), patient_policy="match_only")
+    server = FakeFhir()
+    with _client(server) as client, pytest.raises(ConfigError, match="match_only"):
+        post_mapped(client, mapped)
+    assert server.requests == []
+
+
+def test_sync_and_to_fhir_agree_when_the_merged_patient_has_other_messages(store, registry):
+    """The merged-away patient's later A08 is posted by both paths."""
+    late = _a08("SC1002", "LATE")
+    IngestPipeline(registry, store).handle_bytes(late.encode())
+    _, synced = _sync(store, registry)
+    posted = FakeFhir()
+    texts = []
+    for path in sorted(SAMPLES_DIR.glob("*.hl7")):
+        text = path.read_bytes().decode()
+        try:
+            message_to_bundle(text, registry)
+        except MappingError:
+            continue
+        texts.append(text)
+    _post(posted, registry, *texts, late)
+    assert _normalized(posted) == _normalized(synced)
+    gone = synced.by_key("Patient", _GONE)
+    assert gone["name"][0]["family"] == "LATE" and gone["active"] is False

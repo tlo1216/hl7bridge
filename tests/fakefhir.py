@@ -6,7 +6,8 @@ exact identifier, read by id, conditional update (``PUT
 conditional creates (``ifNoneExist``), updates by id with ``If-Match``,
 and ``urn:uuid`` references resolved to ``<Type>/<id>``. A failed
 ``If-Match`` or a conditional update that matches more than one resource
-fails the whole transaction, as on HAPI. Decimals are kept as Decimal.
+fails the whole transaction, as on HAPI, and so do two writes to one
+resource id (answered 400). Decimals are kept as Decimal.
 Searches and conditional creates honour ``_tag``. Transactions take
 ``DELETE <Type>/<id>`` too, refused (and the whole transaction with them)
 when a resource that stays still refers to the one deleted, as HAPI's
@@ -205,6 +206,11 @@ class FakeFhir:
                     return _outcome(412, "conflict")
                 plan.append((kind, server_id, 200, resource))
             placeholders[entry["fullUrl"]] = f"{kind}/{plan[-1][1]}"
+        written = [(k, i) for k, i, _, r in plan if r is not None]
+        if len(set(written)) != len(written):
+            # HAPI: "Transaction bundle contains multiple resources with ID".
+            self.data = saved
+            return _outcome(400, "invalid")
         self._ids = ids
         answers = []
         for kind, server_id, status, resource in plan:

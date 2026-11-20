@@ -303,3 +303,151 @@ def test_sync_keeps_the_patient_a_direct_post_keeps(client, run, tmp_path: Path)
     assert got["address"][0]["city"] == "TESTVILLE"
     final = _one(client, "DiagnosticReport", f"{other_root}:hospa:accession", "SACCA0001")
     assert final["status"] == "final"
+
+
+# -- ADT^A40 ---------------------------------------------------------------------------
+
+
+def _a08(mrn: str, family: str) -> str:
+    return (
+        "MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007070000||ADT^A08|"
+        f"A8{mrn}|T|2.5\rPID|1||{mrn}^^^HOSPC^MR||{family}^ONE\rPV1|1|O\r"
+    )
+
+
+def _a40(survivor: str, gone: str) -> str:
+    return (
+        "MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007083000||ADT^A40|"
+        f"M{survivor}{gone}|T|2.5\rEVN|A40|20261007083000\r"
+        f"PID|1||{survivor}^^^HOSPC^MR||ZZZSAMPLE^THREE|||F\rMRG|{gone}^^^HOSPC^MR\r"
+    )
+
+
+def _patient(client: HapiClient, root: str, mrn: str) -> dict:
+    return _one(client, "Patient", f"{root}:hospc:mrn", mrn)
+
+
+def test_an_a40_links_the_merged_patient_and_keeps_its_data_and_links(client, run):
+    registry, root = run
+    _post(
+        client,
+        registry,
+        _a08("SC7002", "OLDNAME"),
+        _a08("SC7001", "KEEPER"),
+        _a08("SC7003", "RELATIVE"),
+    )
+    gone = _patient(client, root, "SC7002")
+    other = {"other": {"reference": f"Patient/{_patient(client, root, 'SC7003')['id']}"}}
+    other["type"] = "seealso"
+    gone["link"] = [other]
+    client.commit(
+        {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [
+                {"resource": gone, "request": {"method": "PUT", "url": f"Patient/{gone['id']}"}}
+            ],
+        }
+    )
+    _post(client, registry, _a40("SC7001", "SC7002"))
+    gone = _patient(client, root, "SC7002")
+    survivor = _patient(client, root, "SC7001")
+    assert gone["active"] is False
+    assert gone["name"][0]["family"] == "OLDNAME"
+    assert gone["link"] == [
+        other,
+        {"other": {"reference": f"Patient/{survivor['id']}"}, "type": "replaced-by"},
+    ]
+    assert "link" not in survivor and survivor["name"][0]["family"] == "ZZZSAMPLE"
+    version = gone["meta"]["versionId"]
+    _post(client, registry, _a40("SC7001", "SC7002"))  # a resend changes nothing in content
+    assert len(_patient(client, root, "SC7002")["link"]) == 2
+    assert int(_patient(client, root, "SC7002")["meta"]["versionId"]) >= int(version)
+
+
+def test_an_a40_with_no_merged_patient_on_the_server_writes_a_bare_inactive_one(client, run):
+    registry, root = run
+    _post(client, registry, _a40("SC7011", "SC7012"))
+    gone = _patient(client, root, "SC7012")
+    survivor = _patient(client, root, "SC7011")
+    assert gone["active"] is False and "name" not in gone
+    assert gone["link"][0]["other"]["reference"] == f"Patient/{survivor['id']}"
+
+
+def test_an_a40_chain_and_a_contradicting_or_reversed_merge(client, run):
+    from hl7bridge.fhir.post import MergeRefusedError
+
+    registry, root = run
+    _post(client, registry, _a40("SC7022", "SC7021"), _a40("SC7023", "SC7022"))
+    a, b, c = (_patient(client, root, m) for m in ("SC7021", "SC7022", "SC7023"))
+    assert a["link"][0]["other"]["reference"] == f"Patient/{b['id']}"
+    assert b["link"][0]["other"]["reference"] == f"Patient/{c['id']}"
+    assert "link" not in c
+    _post(client, registry, _a40("SC7022", "SC7021"))  # the first edge again: a resend
+    with pytest.raises(MergeRefusedError):
+        _post(client, registry, _a40("SC7024", "SC7021"))  # a second survivor for A
+    with pytest.raises(MergeRefusedError):
+        _post(client, registry, _a40("SC7021", "SC7022"))  # B back into A
+    assert _patient(client, root, "SC7021")["meta"]["versionId"] == a["meta"]["versionId"]
+
+
+def test_an_a40_whose_two_mrns_are_one_server_patient_is_refused(client, run):
+    from hl7bridge.fhir.post import MergeRefusedError
+
+    registry, root = run
+    system = f"{root}:hospc:mrn"
+    (done,) = client.commit(
+        {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "Patient",
+                        "identifier": [
+                            {"system": system, "value": "SC7031"},
+                            {"system": system, "value": "SC7032"},
+                        ],
+                    },
+                    "request": {"method": "POST", "url": "Patient"},
+                }
+            ],
+        }
+    )
+    with pytest.raises(MergeRefusedError):
+        _post(client, registry, _a40("SC7031", "SC7032"))
+    only = client.read_by_id("Patient", str(done.server_id))
+    assert only is not None and "link" not in only and "active" not in only
+
+
+def test_the_server_rejects_two_writes_to_one_id_as_the_fake_does(client, run):
+    registry, root = run
+    _post(client, registry, _a08("SC7041", "ONE"))
+    patient = _patient(client, root, "SC7041")
+    entry = {
+        "resource": patient,
+        "request": {"method": "PUT", "url": f"Patient/{patient['id']}"},
+    }
+    with pytest.raises(FhirPostError):
+        client.commit({"resourceType": "Bundle", "type": "transaction", "entry": [entry, entry]})
+
+
+def test_sync_posts_a_stored_a40_chain_the_same_as_a_direct_post(client, run, tmp_path: Path):
+    registry, root = run
+    texts = [_a40("SC7052", "SC7051"), _a40("SC7053", "SC7052"), _a08("SC7051", "LATE")]
+    _post(client, registry, *texts)
+    want = {m: _patient(client, root, m) for m in ("SC7051", "SC7052", "SC7053")}
+    other_registry, other_root = _fresh_registry(tmp_path / "other")
+    conn = connect(tmp_path / "a40.db")
+    pipeline = IngestPipeline(other_registry, conn)
+    for text in texts:
+        pipeline.handle_bytes(text.encode())
+    report = sync_to_fhir(conn, other_registry, client)
+    again = sync_to_fhir(conn, other_registry, client)
+    conn.close()
+    assert report.skipped == [] and again.skipped == []
+    got = {m: _patient(client, other_root, m) for m in want}
+    for mrn in want:
+        assert got[mrn].get("active") == want[mrn].get("active"), mrn
+        assert got[mrn].get("name") == want[mrn].get("name"), mrn
+        assert len(got[mrn].get("link", [])) == len(want[mrn].get("link", [])), mrn

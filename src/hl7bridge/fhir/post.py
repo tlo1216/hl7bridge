@@ -18,6 +18,14 @@ is sent, two things are read from the server and folded into it:
    writer created it between the search and the write) fails the post
    with a "send again" reason, so a concurrent create is never overwritten
    unmerged. More than one: refused, never "first match wins".
+   ADT^A40 adds rules, all checked before anything is sent (``MergeRefusedError``):
+   Patient.link keeps what the server has; a merged-away Patient already
+   replaced by another Patient, a survivor that is inactive or merged away
+   itself (a reversed merge), and two entries that resolve to one server
+   resource are refused. A resend of a merge already there passes. If another
+   writer creates the merged-away Patient between the read and the commit,
+   the conditional create answers 200, the survivor update has committed, and
+   ``ConcurrentWriteError`` says to send again (a resend is safe).
 2. **Retire** (ORU). A corrected report can drop a result. The current
    DiagnosticReport's ``result`` list is read, and each Observation in it
    whose key parses to this report's accession and that the new version no
@@ -48,7 +56,7 @@ from datetime import datetime
 from typing import Any
 
 from ..errors import BridgeError, ConfigError, FhirPostError
-from ..v2fhir.bundle import MERGE, MappedMessage, bundle_json, full_url, search_query
+from ..v2fhir.bundle import MERGE, MERGE_EVENT, MappedMessage, bundle_json, full_url, search_query
 from ..v2fhir.observation import KEY_JOIN, SET_ID_PART, SUB_ID_PART
 from .client import EntryResult, HapiClient
 
@@ -59,6 +67,9 @@ OWNED: dict[str, tuple[str, ...]] = {
     "Encounter": ("status", "class", "subject", "period"),
     "ServiceRequest": ("status", "intent", "code", "authoredOn", "subject"),
 }
+# Elements kept whole and added to: Patient.link entries on the server
+# stay, and the message's are added when not already there.
+ADDITIVE = {("Patient", "link")}
 # Elements merged one level down: an A08 with PV1-45 and no PV1-44 keeps
 # the admit time.
 NESTED = {("Encounter", "period")}
@@ -98,12 +109,24 @@ class StaleResultError(BridgeError):
 class ConcurrentWriteError(FhirPostError):
     """Another writer created a resource between our search and our write."""
 
-    def __init__(self, kind: str) -> None:
-        super().__init__(
-            0,
-            kind,
-            reason=f"another writer created the {kind} first; nothing of it was merged, send again",
-        )
+    def __init__(self, kind: str, *, partial: bool = False) -> None:
+        reason = f"another writer created the {kind} first; nothing of it was merged, send again"
+        if partial:
+            reason = (
+                f"another writer created the {kind} while the merge was posted; it was not"
+                " linked and the surviving Patient may already be updated; send again (a"
+                " resend is safe)"
+            )
+        super().__init__(0, kind, reason=reason)
+
+
+class MergeRefusedError(FhirPostError):
+    """An ADT^A40 that the server's current state does not allow, or that
+    two entries resolve to one resource. Raised while preparing, so nothing
+    was written; the reason is fixed text."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(0, "Patient", reason=reason)
 
 
 def parse_instant(value: object) -> datetime | None:
@@ -148,15 +171,31 @@ def _key(resource: dict[str, Any]) -> str:
     return f"{ident['system']}|{ident['value']}"
 
 
-def merge_resource(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+def _link_key(link: dict[str, Any], resolved: dict[str, str]) -> tuple[Any, Any]:
+    ref = str(link.get("other", {}).get("reference", ""))
+    return link.get("type"), _patient_ref(resolved.get(ref, ref)) or ref
+
+
+def merge_resource(
+    current: dict[str, Any], new: dict[str, Any], resolved: dict[str, str] | None = None
+) -> dict[str, Any]:
     """``new`` laid over ``current``: owned elements the message has replace
-    the current ones, absent ones are kept, identifiers are added to."""
+    the current ones, absent ones are kept, identifiers are added to, and
+    additive elements (Patient.link) keep the current entries and gain the
+    message's that are not there yet. ``resolved`` maps a ``urn:uuid`` full
+    URL of this transaction to its ``Patient/<id>``, for comparing links."""
     kind = new["resourceType"]
     merged = copy.deepcopy(current)
+    ids = resolved or {}
     for element in OWNED[kind]:
         if element not in new:
             continue
-        if (kind, element) in NESTED and isinstance(merged.get(element), dict):
+        if (kind, element) in ADDITIVE:
+            have_links = {_link_key(x, ids) for x in merged.get(element, [])}
+            for item in new[element]:
+                if _link_key(item, ids) not in have_links:
+                    merged.setdefault(element, []).append(copy.deepcopy(item))
+        elif (kind, element) in NESTED and isinstance(merged.get(element), dict):
             merged[element] = {**merged[element], **new[element]}
         else:
             merged[element] = copy.deepcopy(new[element])
@@ -190,10 +229,56 @@ def _one(client: HapiClient, kind: str, key: str) -> dict[str, Any] | None:
     return found[0] if found else None
 
 
-def _merge_entry(client: HapiClient, entry: dict[str, Any]) -> None:
+_PATIENT_REF = re.compile(r"(?:^|/)(Patient/[A-Za-z0-9.\-]{1,64})(?:/_history/[^/]+)?$")
+
+
+def _patient_ref(reference: str) -> str | None:
+    """``Patient/<id>`` from a literal or absolute Patient reference."""
+    match = _PATIENT_REF.search(reference)
+    return match.group(1) if match else None
+
+
+def _replaced_by(patient: dict[str, Any]) -> list[str]:
+    """The targets (``Patient/<id>``, or the raw reference) of the
+    replaced-by links of a Patient."""
+    out = []
+    for link in patient.get("link", []):
+        if link.get("type") == "replaced-by":
+            ref = str(link.get("other", {}).get("reference", ""))
+            out.append(_patient_ref(ref) or ref)
+    return out
+
+
+def _check_merge(survivor: dict[str, Any] | None, gone: dict[str, Any] | None) -> None:
+    """Refuse an A40 the server's current state contradicts: the merged-away
+    Patient already replaced by another one, or a surviving Patient that is
+    itself inactive or merged away (a reversed merge would leave two
+    Patients pointing at each other). A resend of the merge that is already
+    there passes."""
+    target = f"Patient/{survivor['id']}" if survivor else None
+    if gone is not None:
+        replaced = _replaced_by(gone)
+        if target is not None and replaced == [target]:
+            return
+        if replaced:
+            raise MergeRefusedError(
+                "the merged-away Patient is already replaced by another Patient;"
+                " a contradicting merge is not applied"
+            )
+    if survivor is not None and (survivor.get("active") is False or _replaced_by(survivor)):
+        raise MergeRefusedError(
+            "the surviving Patient is inactive or merged away itself; the merge is not applied"
+        )
+
+
+def _merge_entry(
+    client: HapiClient,
+    entry: dict[str, Any],
+    current: dict[str, Any] | None,
+    resolved: dict[str, str],
+) -> None:
     new = entry["resource"]
     kind = new["resourceType"]
-    current = _one(client, kind, _key(new))
     if current is None:
         # Create only if it is still missing at commit; post_mapped checks
         # that the answer is 201.
@@ -204,7 +289,7 @@ def _merge_entry(client: HapiClient, entry: dict[str, Any]) -> None:
             "ifNoneExist": search_query(ident["system"], ident["value"]),
         }
         return
-    merged = merge_resource(current, new)
+    merged = merge_resource(current, new, resolved)
     server_id = current["id"]
     entry["resource"] = merged
     entry["request"] = {
@@ -287,9 +372,29 @@ def prepare(client: HapiClient, mapped: MappedMessage) -> dict[str, Any]:
     """The transaction to send for ``mapped``: merges and retirements done."""
     body = bundle_json(mapped)
     entries: list[dict[str, Any]] = body["entry"]
-    for entry in entries:
-        if mapped.policies.get(entry["fullUrl"]) == MERGE:
-            _merge_entry(client, entry)
+    merging = [e for e in entries if mapped.policies.get(e["fullUrl"]) == MERGE]
+    currents = {
+        e["fullUrl"]: _one(client, e["resource"]["resourceType"], _key(e["resource"]))
+        for e in merging
+    }
+    seen: set[tuple[str, str]] = set()
+    resolved: dict[str, str] = {}
+    for entry in merging:
+        found = currents[entry["fullUrl"]]
+        if found is not None:
+            slot = (entry["resource"]["resourceType"], str(found["id"]))
+            if slot in seen:
+                raise MergeRefusedError(
+                    "two entries of the message resolve to one resource on the server;"
+                    " nothing was written"
+                )
+            seen.add(slot)
+            resolved[entry["fullUrl"]] = f"{slot[0]}/{slot[1]}"
+    if mapped.message_type == MERGE_EVENT:
+        survivor, gone = (currents[e["fullUrl"]] for e in merging[:2])
+        _check_merge(survivor, gone)
+    for entry in merging:
+        _merge_entry(client, entry, currents[entry["fullUrl"]], resolved)
     report = next(
         (e["resource"] for e in entries if e["resource"]["resourceType"] == "DiagnosticReport"),
         None,
@@ -307,12 +412,21 @@ def prepare(client: HapiClient, mapped: MappedMessage) -> dict[str, Any]:
     return body
 
 
-def check_created(body: dict[str, Any], results: Sequence[EntryResult], creates: set[int]) -> None:
+def check_created(
+    body: dict[str, Any],
+    results: Sequence[EntryResult],
+    creates: set[int],
+    *,
+    merge_event: bool = False,
+) -> None:
     """Raise ConcurrentWriteError when an entry planned as a create (its
     search found nothing) was answered 200: another writer made it first."""
     for n in creates:
         if results[n].code != 201:
-            raise ConcurrentWriteError(str(body["entry"][n]["resource"]["resourceType"]))
+            kind = str(body["entry"][n]["resource"]["resourceType"])
+            # An A40 writes the survivor in the same transaction, so a lost
+            # create of the merged-away Patient (entry 1) leaves it updated.
+            raise ConcurrentWriteError(kind, partial=merge_event and n == 1)
 
 
 def refuse_match_only(hospital_id: str, policy: str) -> None:
@@ -339,7 +453,7 @@ def post_mapped(client: HapiClient, mapped: MappedMessage) -> list[Committed]:
         if mapped.policies.get(entry["fullUrl"]) == MERGE and entry["request"]["method"] == "POST"
     }
     results: list[EntryResult] = client.commit(body)
-    check_created(body, results, creates)
+    check_created(body, results, creates, merge_event=mapped.message_type == MERGE_EVENT)
     mapped_count = len(mapped.bundle.entry or [])
     return [
         Committed(r.kind, _key(entry["resource"]), r.code, r.server_id, retired=n >= mapped_count)
@@ -387,6 +501,7 @@ __all__ = [
     "OWNED",
     "Committed",
     "ConcurrentWriteError",
+    "MergeRefusedError",
     "PostOrderError",
     "StaleResultError",
     "check_created",
