@@ -523,9 +523,12 @@ class _HospitalDay:
             "breaches": tat_breaches,
         }
 
+        # Since the A40 work, fhir sync writes the merged-away Patient too
+        # (inactive, with a replaced-by link), so every pool patient lands.
         merged_away = 1 if "ADT^A40" in cfg.expected_message_types else 0
         self.fhir_expect = {
-            "patients": N_PATIENTS - merged_away,
+            "patients": N_PATIENTS,
+            "merged_patients": merged_away,
             "service_requests": N_ORDERS,
             "diagnostic_reports": len(completed),
             "imaging_studies": len(self.study_specs),

@@ -112,7 +112,8 @@ def test_expected_counts_present(generated):
     assert manifest.expected["fhir"]["service_requests"] == 30
     assert manifest.expected["fhir"]["diagnostic_reports"] == 24
     assert manifest.expected["fhir"]["imaging_studies"] == 27
-    assert manifest.expected["fhir"]["patients"] == 22
+    assert manifest.expected["fhir"]["patients"] == 24
+    assert manifest.expected["fhir"]["merged_patients"] == 2
     for hosp in ("HOSPA", "HOSPB", "HOSPC"):
         acks = manifest.expected["acks"][hosp]
         assert acks["DELIVERED"] == 5

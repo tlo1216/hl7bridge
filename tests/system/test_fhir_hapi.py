@@ -73,6 +73,11 @@ def test_server_counts_match_manifest(synced):
     client, _registry, manifest, _first, _second = synced
     expected = manifest.expected["fhir"]
     assert _count_by_identifier_system(client, "Patient", mrn_system) == expected["patients"]
+    inactive = sum(
+        client.search_total("Patient", {"identifier": f"{mrn_system(h)}|", "active": "false"})
+        for h in HOSPITALS
+    )
+    assert inactive == expected["merged_patients"]
     assert (
         _count_by_identifier_system(client, "ServiceRequest", accession_system)
         == expected["service_requests"]
