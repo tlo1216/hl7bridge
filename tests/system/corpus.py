@@ -9,10 +9,11 @@ from pathlib import Path
 from hl7bridge.config import HospitalRegistry
 from hl7bridge.ingest import IngestPipeline
 from hl7bridge.ingest.loaders import load_outbound, load_studies
+from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.store import connect
 from hl7bridge.synth import Manifest, generate
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 # Fixed ingest clock: shortly after the simulated day, before report_now.
 INGEST_NOW = datetime(2026, 10, 7, 23, 0, tzinfo=UTC)
 

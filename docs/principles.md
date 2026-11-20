@@ -52,7 +52,8 @@ Enforced by: ruff `DTZ`, `tests/unit/test_hl7time.py`, `tests/unit/test_store.py
 ## 5. Field positions live in configuration
 
 Where a hospital puts its accession, which message types it sends, its
-time zone and its lint profile are per-hospital YAML in `config/hospitals/`.
+time zone and its lint profile are per-hospital YAML profiles, bundled in
+`src/hl7bridge/profiles/` (see `docs/profiles.md`).
 Code addresses fields by HL7 position strings such as `"OBR-3"`.
 
 Enforced by: `tests/unit/test_config.py`.

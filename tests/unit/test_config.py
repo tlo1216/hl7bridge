@@ -43,14 +43,34 @@ def test_good_config_loads(tmp_path):
     assert cfg.timestamps_include_offset is False
 
 
-def test_unknown_key_rejected(tmp_path):
-    with pytest.raises(ConfigError, match=r"unknown keys.*accesion_field"):
-        load_hospital_config(write(tmp_path, GOOD + "accesion_field: OBR-3\n"))
+def test_unknown_key_rejected_with_a_suggestion(tmp_path):
+    path = write(tmp_path, GOOD + "acession_field: OBR-3\n")
+    with pytest.raises(ConfigError) as excinfo:
+        load_hospital_config(path)
+    assert str(excinfo.value) == (
+        f"{path}: unknown key 'acession_field'. Did you mean 'accession_field'?"
+    )
+
+
+def test_unknown_key_with_no_close_match_lists_the_allowed_keys(tmp_path):
+    path = write(tmp_path, GOOD + "colour: blue\n")
+    with pytest.raises(ConfigError, match=r"unknown key 'colour'\. Allowed: accession_field, "):
+        load_hospital_config(path)
+
+
+def test_several_unknown_keys_are_all_named(tmp_path):
+    path = write(tmp_path, GOOD + "colour: blue\nsize: 3\n")
+    with pytest.raises(ConfigError, match=r"unknown keys 'colour', 'size'\. Allowed: "):
+        load_hospital_config(path)
 
 
 def test_unknown_reconcile_key_rejected(tmp_path):
     bad = GOOD.replace("order_lag_minutes: 45", "order_lag_mins: 45")
-    with pytest.raises(ConfigError, match="unknown reconcile keys"):
+    with pytest.raises(
+        ConfigError,
+        match=r"unknown key 'order_lag_mins' under 'reconcile'\. "
+        r"Did you mean 'order_lag_minutes'\?",
+    ):
         load_hospital_config(write(tmp_path, bad))
 
 
@@ -81,8 +101,14 @@ def test_registry_duplicate_facility_code_rejected(tmp_path):
 
 
 def test_registry_empty_dir_rejected(tmp_path):
-    with pytest.raises(ConfigError, match=r"no .*hospital configs"):
+    with pytest.raises(ConfigError, match=r"no \*\.yaml hospital profiles in ") as excinfo:
         HospitalRegistry.load_dir(tmp_path)
+    assert excinfo.value.hint == "Try: hl7bridge init"
+
+
+def test_registry_missing_dir_rejected(tmp_path):
+    with pytest.raises(ConfigError, match=r"profile folder .* does not exist"):
+        HospitalRegistry.load_dir(tmp_path / "nope")
 
 
 def test_registry_facility_matching(tmp_path):
@@ -94,9 +120,10 @@ def test_registry_facility_matching(tmp_path):
 
 
 def test_repo_hospital_configs_load():
-    """The shipped config/hospitals directory must always be loadable."""
-    root = Path(__file__).resolve().parents[2]
-    reg = HospitalRegistry.load_dir(root / "config" / "hospitals")
+    """The bundled profiles must always be loadable."""
+    from hl7bridge.profiles import BUNDLED_PROFILES
+
+    reg = HospitalRegistry.load_dir(BUNDLED_PROFILES)
     assert set(reg.by_id) == {"HOSPA", "HOSPB", "HOSPC"}
     # The dialect spread the demo depends on: differing accession fields.
     fields = {h.accession_field for h in reg.by_id.values()}

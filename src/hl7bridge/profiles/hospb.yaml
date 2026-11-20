@@ -1,5 +1,10 @@
 # Hospital B (synthetic). v2.4 dialect: accession in ORC-3, a Z-segment
 # appended to orders, Central time without offsets.
+#
+# The habit it imitates: an order system that fills ORC-3 and leaves OBR-3
+# empty, and appends a site-specific billing Z-segment that a strict
+# parser would choke on. It sends no merges, so ADT^A40 is not expected
+# and gets AR if it ever arrives.
 hospital_id: HOSPB
 display_name: Hospital B (synthetic)
 facility_codes: [HOSPB]

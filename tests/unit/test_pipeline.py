@@ -1,16 +1,16 @@
 """Pipeline: every row of the ACK decision table, tested with a real store."""
 
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 
 from hl7bridge.config import HospitalRegistry
 from hl7bridge.ingest.parser import get_field, parse_hl7
 from hl7bridge.ingest.pipeline import IngestPipeline
+from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.store import connect, quarantine_summary
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 FIXED_NOW = datetime(2026, 10, 7, 19, 0, tzinfo=UTC)
 
 

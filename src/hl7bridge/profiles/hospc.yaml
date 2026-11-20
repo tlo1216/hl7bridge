@@ -1,5 +1,9 @@
 # Hospital C (synthetic). v2.5 dialect: accession in OBR-3, Eastern time,
 # and timestamps carry explicit UTC offsets.
+#
+# The habit it imitates: a newer interface engine that fills both ORC-3
+# and OBR-3, stamps every time with its UTC offset, and answers the
+# reports we send with ACKs, so report delivery can be tracked.
 hospital_id: HOSPC
 display_name: Hospital C (synthetic)
 facility_codes: [HOSPC, HOSPC_HIS]

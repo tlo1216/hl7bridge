@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 
 from hl7bridge.config import HospitalRegistry
+from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.synth import generate, verify_manifest
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 
 
 @pytest.fixture

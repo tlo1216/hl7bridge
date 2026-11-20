@@ -6,6 +6,7 @@ and duplicate facility codes all fail at load time with the offending file named
 
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -18,7 +19,7 @@ from .errors import ConfigError
 # HL7 spec position (OBR-3 is the filler order number, ORC-3 its ORC twin).
 ALLOWED_ACCESSION_FIELDS = ("OBR-2", "OBR-3", "ORC-2", "ORC-3")
 
-_KNOWN_KEYS = {
+KNOWN_KEYS = {
     "hospital_id",
     "display_name",
     "facility_codes",
@@ -35,18 +36,38 @@ _KNOWN_KEYS = {
     "lint",
 }
 
-_KNOWN_RECONCILE_KEYS = {
+KNOWN_RECONCILE_KEYS = {
     "order_without_image_hours",
     "order_without_image_hours_by_modality",
     "order_lag_minutes",
 }
 
-_KNOWN_TAT_KEYS = {
+KNOWN_TAT_KEYS = {
     "exam_to_final_target_hours",
     "exam_to_final_target_hours_by_priority",
 }
 
-_KNOWN_LINT_KEYS = {"disabled_rules"}
+KNOWN_LINT_KEYS = {"disabled_rules"}
+
+
+def _unknown_keys_message(
+    source: str, unknown: set[str], allowed: set[str], section: str = ""
+) -> str:
+    """``hospb.yaml: unknown key 'acession_field'. Did you mean 'accession_field'?``
+
+    One unknown key gets a close-match suggestion when there is one. Several
+    unknown keys are listed with the allowed set."""
+    where = f" under '{section}'" if section else ""
+    names = sorted(str(k) for k in unknown)
+    if len(names) == 1:
+        name = names[0]
+        close = difflib.get_close_matches(name, sorted(allowed), n=1, cutoff=0.6)
+        if close:
+            return f"{source}: unknown key '{name}'{where}. Did you mean '{close[0]}'?"
+        return f"{source}: unknown key '{name}'{where}. Allowed: {', '.join(sorted(allowed))}"
+    listed = ", ".join(f"'{n}'" for n in names)
+    return f"{source}: unknown keys {listed}{where}. Allowed: {', '.join(sorted(allowed))}"
+
 
 # Lint rule ids look like HL7-010; the lint runner validates that each
 # disabled id actually exists (config stays import-cycle-free of lint).
@@ -139,11 +160,9 @@ def load_hospital_config(path: Path) -> HospitalConfig:
     if not isinstance(data, dict):
         raise ConfigError(f"{source}: expected a mapping at top level, got {type(data).__name__}")
 
-    unknown = set(data) - _KNOWN_KEYS
+    unknown = set(data) - KNOWN_KEYS
     if unknown:
-        raise ConfigError(
-            f"{source}: unknown keys {sorted(unknown)}; allowed: {sorted(_KNOWN_KEYS)}"
-        )
+        raise ConfigError(_unknown_keys_message(source, unknown, KNOWN_KEYS))
 
     accession_field = _require_str(data, "accession_field", source)
     if accession_field not in ALLOWED_ACCESSION_FIELDS:
@@ -160,9 +179,11 @@ def load_hospital_config(path: Path) -> HospitalConfig:
     reconcile_raw = data.get("reconcile", {})
     if not isinstance(reconcile_raw, dict):
         raise ConfigError(f"{source}: 'reconcile' must be a mapping")
-    unknown_rec = set(reconcile_raw) - _KNOWN_RECONCILE_KEYS
+    unknown_rec = set(reconcile_raw) - KNOWN_RECONCILE_KEYS
     if unknown_rec:
-        raise ConfigError(f"{source}: unknown reconcile keys {sorted(unknown_rec)}")
+        raise ConfigError(
+            _unknown_keys_message(source, unknown_rec, KNOWN_RECONCILE_KEYS, "reconcile")
+        )
     by_modality_raw = reconcile_raw.get("order_without_image_hours_by_modality", {})
     if not isinstance(by_modality_raw, dict) or not all(
         isinstance(k, str) and isinstance(v, (int, float)) for k, v in by_modality_raw.items()
@@ -179,9 +200,9 @@ def load_hospital_config(path: Path) -> HospitalConfig:
     tat_raw = data.get("tat", {})
     if not isinstance(tat_raw, dict):
         raise ConfigError(f"{source}: 'tat' must be a mapping")
-    unknown_tat = set(tat_raw) - _KNOWN_TAT_KEYS
+    unknown_tat = set(tat_raw) - KNOWN_TAT_KEYS
     if unknown_tat:
-        raise ConfigError(f"{source}: unknown tat keys {sorted(unknown_tat)}")
+        raise ConfigError(_unknown_keys_message(source, unknown_tat, KNOWN_TAT_KEYS, "tat"))
     by_priority_raw = tat_raw.get("exam_to_final_target_hours_by_priority", {})
     if not isinstance(by_priority_raw, dict) or not all(
         isinstance(k, str) and isinstance(v, (int, float)) for k, v in by_priority_raw.items()
@@ -197,9 +218,9 @@ def load_hospital_config(path: Path) -> HospitalConfig:
     lint_raw = data.get("lint", {})
     if not isinstance(lint_raw, dict):
         raise ConfigError(f"{source}: 'lint' must be a mapping")
-    unknown_lint = set(lint_raw) - _KNOWN_LINT_KEYS
+    unknown_lint = set(lint_raw) - KNOWN_LINT_KEYS
     if unknown_lint:
-        raise ConfigError(f"{source}: unknown lint keys {sorted(unknown_lint)}")
+        raise ConfigError(_unknown_keys_message(source, unknown_lint, KNOWN_LINT_KEYS, "lint"))
     disabled_raw = lint_raw.get("disabled_rules", [])
     prefix, id_len = _LINT_RULE_ID_SHAPE
     if not isinstance(disabled_raw, list) or not all(
@@ -262,10 +283,7 @@ class HospitalRegistry:
 
     @classmethod
     def load_dir(cls, directory: Path) -> HospitalRegistry:
-        paths = sorted(directory.glob("*.yaml"))
-        if not paths:
-            raise ConfigError(f"no *.yaml hospital configs found in {directory}")
-        return cls([load_hospital_config(p) for p in paths])
+        return cls([load_hospital_config(p) for p in profile_paths(directory)])
 
     def match_facility(self, *codes: str) -> HospitalConfig | None:
         """Match MSH-4 / MSH-6 values against configured facility codes."""
@@ -274,3 +292,83 @@ class HospitalRegistry:
             if hospital is not None:
                 return hospital
         return None
+
+
+def profile_paths(directory: Path) -> list[Path]:
+    """The ``*.yaml`` profiles in ``directory``, sorted. Raises ConfigError
+    with a hint when the folder is missing or holds none."""
+    if not directory.is_dir():
+        raise ConfigError(
+            f"profile folder {directory} does not exist",
+            hint="Try: hl7bridge init, or pass --config with a folder of profiles.",
+        )
+    paths = sorted(directory.glob("*.yaml"))
+    if not paths:
+        raise ConfigError(
+            f"no *.yaml hospital profiles in {directory}",
+            hint="Try: hl7bridge init",
+        )
+    return paths
+
+
+def profile_as_dict(cfg: HospitalConfig) -> dict[str, object]:
+    """Every key of a loaded profile with defaults filled in, in file order,
+    shaped like the YAML so ``profile show`` output can be pasted back."""
+    return {
+        "hospital_id": cfg.hospital_id,
+        "display_name": cfg.display_name,
+        "facility_codes": list(cfg.facility_codes),
+        "accession_field": cfg.accession_field,
+        "timezone": cfg.timezone,
+        "hl7_version": cfg.hl7_version,
+        "timestamps_include_offset": cfg.timestamps_include_offset,
+        "expected_message_types": list(cfg.expected_message_types),
+        "procedure_code_system": cfg.procedure_code_system,
+        "z_segment": cfg.z_segment,
+        "reconcile": {
+            "order_without_image_hours": cfg.reconcile.order_without_image_hours,
+            "order_without_image_hours_by_modality": dict(
+                cfg.reconcile.order_without_image_hours_by_modality
+            ),
+            "order_lag_minutes": cfg.reconcile.order_lag_minutes,
+        },
+        "ack_timeout_minutes": cfg.ack_timeout_minutes,
+        "tat": {
+            "exam_to_final_target_hours": cfg.tat.exam_to_final_target_hours,
+            "exam_to_final_target_hours_by_priority": dict(
+                cfg.tat.exam_to_final_target_hours_by_priority
+            ),
+        },
+        "lint": {"disabled_rules": list(cfg.lint.disabled_rules)},
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileCheck:
+    """One line of ``profile check``: a file and its problem, or None."""
+
+    name: str
+    problem: str | None
+    hospital_id: str | None = None
+
+
+def check_profile_dir(directory: Path) -> list[ProfileCheck]:
+    """Validate every profile in ``directory`` on its own, then the set
+    together (duplicate ids and facility codes), so one bad file does not
+    hide the others. A missing or empty folder raises ConfigError."""
+    results: list[ProfileCheck] = []
+    loaded: list[HospitalConfig] = []
+    for path in profile_paths(directory):
+        try:
+            cfg = load_hospital_config(path)
+        except ConfigError as exc:
+            results.append(ProfileCheck(path.name, str(exc)))
+            continue
+        loaded.append(cfg)
+        results.append(ProfileCheck(path.name, None, cfg.hospital_id))
+    if loaded:
+        try:
+            HospitalRegistry(loaded)
+        except ConfigError as exc:
+            results.append(ProfileCheck("(all profiles)", str(exc)))
+    return results

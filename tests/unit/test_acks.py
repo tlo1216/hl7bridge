@@ -1,16 +1,16 @@
 """ACK tracker: one terminal state per outbound report, loud edge handling."""
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
 from hl7bridge.acks import track_acks
 from hl7bridge.config import HospitalRegistry
+from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.store import connect, utc_iso
 from hl7bridge.store.repo import AckInRow, insert_ack_in, record_outbound_report
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 SENT = datetime(2026, 10, 7, 20, 0, tzinfo=UTC)
 
 

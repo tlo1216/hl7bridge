@@ -8,9 +8,10 @@ import pytest
 from hl7bridge.config import HospitalRegistry
 from hl7bridge.errors import BridgeError
 from hl7bridge.ingest.loaders import StudyLoadError, load_outbound, load_studies
+from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.store import connect
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 REGISTRY = HospitalRegistry.load_dir(CONFIG_DIR)
 
 

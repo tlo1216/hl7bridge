@@ -1,16 +1,16 @@
 """Reconciliation: every category detected, clean data produces zero flags."""
 
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 
 from hl7bridge.config import HospitalRegistry
+from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.reconcile import reconcile
 from hl7bridge.store import connect, utc_iso
 from hl7bridge.store.repo import OrderRow, StudyRow, insert_study, upsert_order
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
 MORNING = utc_iso(datetime(2026, 10, 7, 15, 0, tzinfo=UTC))  # well past all thresholds
 JUST_NOW = utc_iso(datetime(2026, 10, 8, 11, 45, tzinfo=UTC))  # inside grace/thresholds

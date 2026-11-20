@@ -1,5 +1,11 @@
 # Hospital A (synthetic). Baseline v2.3 dialect: accession in OBR-3,
 # local times with no UTC offset.
+#
+# The habit it imitates: an older RIS that puts the accession in the
+# filler order number (OBR-3), sends wall-clock times in its own zone and
+# leaves the receiver to know which zone that is. Across a daylight saving
+# change the same wall-clock hour happens twice, so the time zone below
+# matters. Its RIS also sends ADT merges (A40).
 hospital_id: HOSPA
 display_name: Hospital A (synthetic)
 facility_codes: [HOSPA, HOSPA_RIS]

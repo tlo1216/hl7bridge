@@ -5,17 +5,17 @@ timestamps, so the engine is checked against numbers it did not produce.
 """
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from hl7bridge.config import HospitalRegistry
+from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.store import connect, utc_iso
 from hl7bridge.store.repo import OrderRow, ReportEventRow, insert_report_event, upsert_order
 from hl7bridge.tat import render_tat_text, tat_report
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 CHICAGO = ZoneInfo("America/Chicago")
 BASE = datetime(2026, 10, 7, 15, 0, tzinfo=UTC)
 
