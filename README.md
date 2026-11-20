@@ -261,6 +261,17 @@ hl7bridge fhir reset --run-id lab-a --fhir-base http://127.0.0.1:8080/fhir --con
   swaps in three mapping steps (sex code, abnormal flag, OBX-14 time) for
   a student exercise; it runs Python, so it is for a loopback lab only.
 
+Known limitations in this release:
+
+- Run one listener per run id. Within one listener, per-key locks stop
+  the same resource from being created twice; two listener processes
+  on the same run (each with its own log file) are not coordinated and
+  can create a duplicate when the same new result arrives at both.
+- If the listener stops after the server commits a transaction but
+  before it writes its own log row, the log does not show that
+  message. The resources are on the server, and a resend updates them
+  in place.
+
 The example profile is `src/hl7bridge/profiles/examples/wintehr.yaml`.
 [docs/cli.md](docs/cli.md) has the details and ADR-0004 the reasons.
 

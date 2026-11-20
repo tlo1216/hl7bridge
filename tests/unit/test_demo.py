@@ -284,6 +284,29 @@ def test_a_file_changed_after_the_demo_wrote_it_is_left(owned):
     assert target.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the size and time stamp is POSIX only")
+def test_a_same_size_file_with_another_mtime_is_left(owned):
+    target = owned.root / "synth" / "a.hl7"
+    st = target.stat()
+    with open(target, "r+b") as fh:  # same length, other bytes
+        fh.write(b"X" * st.st_size)
+    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert target.stat().st_size == st.st_size
+    result = remove_owned(owned)
+    assert "synth/a.hl7" in result.kept
+
+
+def test_an_unstamped_file_changed_after_writing_is_still_removed(tmp_path):
+    root = Path(tempfile.mkdtemp(dir=tmp_path))
+    owned = OwnedFiles(root, temporary=True)
+    db = root / "bridge.db"
+    owned.write_bytes(db, b"", stamp=False)
+    db.write_bytes(b"SQLite format 3\x00 and more")  # what the store does later
+    result = remove_owned(owned)
+    assert result.kept == []
+    assert not root.exists()
+
+
 def test_a_replaced_subfolder_is_never_entered(owned):
     sub = owned.root / "synth"
     sub.rename(owned.root.parent / "moved")

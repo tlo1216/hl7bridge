@@ -52,11 +52,13 @@ that reuses file ids (Linux file systems reuse a freed inode number at
 once; FAT and some ReFS volumes do too), make a new file that carries a
 recorded identity. On Linux and macOS a file is also checked against the
 size and modified time it had right after the demo wrote it, so a reused
-inode number alone is not enough; a program that also copies those can
-still pass. Each of these needs write access to your
-private temp folder, which means it already has your rights and could
-delete your files directly. The race gives it nothing it did not have,
-so the demo does not try to defend against your own account.
+inode number alone is usually not enough. This is a heuristic, not proof
+of identity: a new file of the same size can get the same mtime by
+chance on coarse-timestamp file systems, and a program can set it.
+Each of these needs write access to your private temp folder, which
+means it already has your rights and could delete your files directly.
+The race gives it nothing it did not have, so the demo does not try to
+defend against your own account.
 """
 
 from __future__ import annotations
@@ -163,6 +165,8 @@ class OwnedFiles:
             fh.write(data)
             fh.flush()
             if stamp and sys.platform != "win32":
+                # fsync first: on NFS a cached mtime can change again at close.
+                os.fsync(fh.fileno())
                 st = os.fstat(fh.fileno())
                 self.entries[index] = self.entries[index]._replace(
                     stamp=(st.st_size, st.st_mtime_ns)
