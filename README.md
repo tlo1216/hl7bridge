@@ -19,11 +19,21 @@ defects, so every result can be checked against known answers.
 
 ## Install
 
-You need Python 3.12 or newer and Git. hl7bridge is not on PyPI yet, so
-install it from a clone. The hospital profiles and sample messages ship
-inside the package, so nothing else needs to be in place.
+You need Python 3.12 or newer. hl7bridge is on PyPI:
 
-### With uv (Windows, macOS, Linux)
+```
+pip install hl7bridge
+hl7bridge --version
+```
+
+Or, with uv, as a tool on your PATH: `uv tool install hl7bridge`. The
+hospital profiles and sample messages ship inside the package, so nothing
+else needs to be in place.
+
+To work on the code or run the tests, install from a clone instead (you
+also need Git).
+
+### From a clone with uv (Windows, macOS, Linux)
 
 ```
 git clone https://github.com/tlo1216/hl7bridge.git
@@ -34,7 +44,7 @@ uv run hl7bridge --version
 
 With uv, put `uv run` in front of every `hl7bridge` command below.
 
-### Without uv, Windows PowerShell
+### From a clone without uv, Windows PowerShell
 
 ```
 git clone https://github.com/tlo1216/hl7bridge.git
@@ -55,7 +65,7 @@ venv's own Python for the install, so the package lands in `.venv`:
 
 Then call `.venv\Scripts\hl7bridge.exe` instead of `hl7bridge`.
 
-### Without uv, macOS or Linux
+### From a clone without uv, macOS or Linux
 
 ```
 git clone https://github.com/tlo1216/hl7bridge.git
