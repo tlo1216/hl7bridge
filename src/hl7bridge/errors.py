@@ -161,6 +161,22 @@ class FhirMappingError(BridgeError):
     """A stored row could not be mapped to a valid FHIR resource."""
 
 
+class MappingError(BridgeError):
+    """A message could not be mapped to FHIR (``hl7bridge.v2fhir``).
+
+    The text is built only from a field position (``OBX-11``), the segment
+    number, and a fixed reason phrase from the code. There is no argument
+    for the value, so the message cannot quote one; the CLI prints it.
+    """
+
+    def __init__(self, field: str, reason: str, *, segment: int = 1) -> None:
+        self.field = field
+        self.reason = reason
+        self.segment = segment
+        where = field if segment == 1 else f"{field} (segment {segment})"
+        super().__init__(f"{where}: {reason}")
+
+
 class FhirPostError(BridgeError):
     """The FHIR server rejected a request, or its answer was unusable.
 

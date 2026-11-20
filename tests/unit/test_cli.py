@@ -63,7 +63,7 @@ def clean_env(monkeypatch) -> None:
 
 @pytest.fixture
 def sample_db(tmp_path) -> Path:
-    """A store holding the twelve bundled samples."""
+    """A store holding the fifteen bundled samples."""
     db = tmp_path / "samples.db"
     from hl7bridge.config import HospitalRegistry
     from hl7bridge.ingest import IngestPipeline
@@ -430,7 +430,7 @@ def test_old_schema_message(tmp_path, capsys):
     rc = cli.main(["summary", "--db", str(db)])
     assert rc == EXIT_USAGE
     assert (
-        f"error: database {db} has schema version 1; this hl7bridge needs version 2."
+        f"error: database {db} has schema version 1; this hl7bridge needs version 3."
         " There is no migration. Demo databases can be deleted and made again.\n"
     ) in capsys.readouterr().err
     # The old file was not changed.
@@ -680,7 +680,7 @@ def test_send_shows_ae_details_and_exits_1(tmp_path, capsys):
     ) in out
     assert f"  next: hl7bridge lint {SAMPLES_DIR / '11_broken_missing_accession.hl7'}" in out
     assert "12_broken_bad_timestamp.hl7: AE" in out
-    assert f"sent 12 message(s) from {SAMPLES_DIR}, got 12 ACK(s)\n  AA: 10\n  AE: 2\n" in out
+    assert f"sent 15 message(s) from {SAMPLES_DIR}, got 15 ACK(s)\n  AA: 13\n  AE: 2\n" in out
 
 
 def test_send_all_accepted_exits_0(tmp_path, capsys):
@@ -793,7 +793,7 @@ def test_lint_json(capsys):
     rc = cli.main(["lint", str(SAMPLES_DIR), "--json"])
     data = json.loads(capsys.readouterr().out)
     assert rc == EXIT_FINDINGS
-    assert data["files_checked"] == 12
+    assert data["files_checked"] == 15
     assert data["error_count"] == 2
     assert {f["rule_id"] for f in data["findings"]} == {"HL7-010", "HL7-014"}
 
@@ -805,7 +805,7 @@ def test_init_copies_profiles_and_samples_byte_for_byte(tmp_path, capsys, monkey
     monkeypatch.chdir(tmp_path)
     assert cli.main(["init"]) == EXIT_OK
     out = capsys.readouterr().out
-    assert "wrote 3 profiles" in out and "wrote 12 sample messages" in out
+    assert "wrote 3 profiles" in out and "wrote 15 sample messages" in out
     for src in BUNDLED_PROFILES.glob("*.yaml"):
         assert (tmp_path / "hl7bridge" / "profiles" / src.name).read_bytes() == src.read_bytes()
     for src in SAMPLES_DIR.glob("*.hl7"):
@@ -937,7 +937,7 @@ def test_doctor_reports_an_old_database_with_the_fix(tmp_path, capsys, monkeypat
     out = capsys.readouterr().out
     assert rc == EXIT_FINDINGS
     assert (
-        f"[FAIL] database: {db} (--db) has schema version 1; this hl7bridge needs version 2"
+        f"[FAIL] database: {db} (--db) has schema version 1; this hl7bridge needs version 3"
         " Fix: there is no migration. Delete it if it is a demo database,"
         " or pass --db with a new path."
     ) in out
@@ -974,7 +974,7 @@ def test_doctor_database_states(tmp_path):
     assert inspect_db(tmp_path / "missing.db") == ("missing", None)
     good = tmp_path / "good.db"
     connect(good).close()
-    assert inspect_db(good) == ("ok", 2)
+    assert inspect_db(good) == ("ok", 3)
     junk = tmp_path / "junk.db"
     junk.write_bytes(b"x" * 4096)
     assert inspect_db(junk)[0] == "not_a_database"

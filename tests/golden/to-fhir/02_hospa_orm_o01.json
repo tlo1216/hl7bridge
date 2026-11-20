@@ -1,0 +1,92 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a",
+      "resource": {
+        "resourceType": "Patient",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MR"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospa:mrn",
+            "value": "SA1001"
+          }
+        ],
+        "name": [
+          {
+            "family": "ZZZSAMPLE",
+            "given": [
+              "ONE"
+            ]
+          }
+        ],
+        "gender": "female",
+        "birthDate": "1980-01-01"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient?identifier=urn:hl7bridge:hospa:mrn|SA1001"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:4cc5dcd5-8fe8-5524-8dde-f4dbe0293f9b",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "ACSN"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospa:accession",
+            "value": "SACCA0001"
+          },
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "PLAC"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospa:placer",
+            "value": "PLSMPA0002"
+          }
+        ],
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "urn:hl7bridge:hospa:procedure-codes:local",
+              "code": "71046",
+              "display": "XR CHEST 2 VIEWS"
+            }
+          ],
+          "text": "XR CHEST 2 VIEWS"
+        },
+        "subject": {
+          "reference": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a"
+        },
+        "authoredOn": "2026-10-07T15:15:00Z"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest?identifier=urn:hl7bridge:hospa:accession|SACCA0001"
+      }
+    }
+  ]
+}

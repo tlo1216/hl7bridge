@@ -12,7 +12,14 @@ import pytest
 from hl7bridge.config import HospitalRegistry
 from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.store import connect, utc_iso
-from hl7bridge.store.repo import OrderRow, ReportEventRow, insert_report_event, upsert_order
+from hl7bridge.store.repo import (
+    OrderRow,
+    ReportEventRow,
+    insert_report_event,
+    message_row_id,
+    record_message,
+    upsert_order,
+)
 from hl7bridge.tat import render_tat_text, tat_report
 
 CONFIG_DIR = BUNDLED_PROFILES
@@ -52,12 +59,21 @@ def add_order(conn, accession, *, modality="CT", priority="R", ordered=BASE, hos
 
 
 def add_event(conn, accession, status, *, observed, result, hosp="HOSPA", control="C1"):
+    record_message(
+        conn,
+        hospital_id=hosp,
+        control_id=control,
+        message_type="ORU^R01",
+        received_at_utc=utc_iso(BASE),
+        raw="MSH|^~\\&|\r",
+    )
     insert_report_event(
         conn,
         ReportEventRow(
             hospital_id=hosp,
             accession=accession,
             control_id=control,
+            message_id=message_row_id(conn, hospital_id=hosp, control_id=control),
             status=status,
             observed_at_utc=utc_iso(observed) if observed else None,
             result_at_utc=utc_iso(result) if result else None,

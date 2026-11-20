@@ -3,6 +3,7 @@
 from .db import connect, utc_iso
 from .repo import (
     AckInRow,
+    EncounterRow,
     OrderRow,
     PatientRow,
     ReportRow,
@@ -16,6 +17,7 @@ from .repo import (
     record_merge,
     record_message,
     record_outbound_report,
+    upsert_encounter,
     upsert_order,
     upsert_patient,
     upsert_report,
@@ -23,6 +25,7 @@ from .repo import (
 
 __all__ = [
     "AckInRow",
+    "EncounterRow",
     "OrderRow",
     "PatientRow",
     "ReportRow",
@@ -37,6 +40,7 @@ __all__ = [
     "record_merge",
     "record_message",
     "record_outbound_report",
+    "upsert_encounter",
     "upsert_order",
     "upsert_patient",
     "upsert_report",

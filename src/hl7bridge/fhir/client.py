@@ -15,9 +15,11 @@ the full URL, query included, and would print in any traceback.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import httpx
+from fhir.resources.R4B.bundle import Bundle
 from fhir.resources.R4B.resource import Resource
 
 from ..errors import FhirPostError
@@ -26,6 +28,8 @@ from ..logsafety import install_third_party_redaction, safe_url
 log = logging.getLogger(__name__)
 
 FHIR_JSON = "application/fhir+json"
+# A transaction-response entry status: "201 Created", "200 OK".
+_ENTRY_STATUS = re.compile(r"([1-5][0-9]{2})(?: |$)")
 
 
 class HapiClient:
@@ -96,6 +100,52 @@ class HapiClient:
                 response.status_code, str(response.url), reason="response carried no resource id"
             )
         return server_id, "created" if response.status_code == 201 else "updated"
+
+    def transaction(self, bundle: Bundle) -> list[tuple[str, int]]:
+        """POST a transaction Bundle and check that all of it was committed.
+
+        A 2xx status alone is not enough. The answer must be a Bundle of
+        type ``transaction-response`` with exactly one entry per request
+        entry, and every entry status must be 200 or 201. Anything else
+        raises FhirPostError, whose text holds counts and positions only.
+        Returns (resource type, status code) per entry, in request order.
+        """
+        requests = bundle.entry or []
+        response = self._send(
+            "POST",
+            self.base_url,
+            content=bundle.model_dump_json(exclude_none=True),
+            headers={"Content-Type": FHIR_JSON},
+        )
+        url = str(response.url)
+        if response.status_code != 200:
+            raise FhirPostError(response.status_code, url, response.text)
+        try:
+            body = response.json()
+        except ValueError:
+            raise FhirPostError(200, url, reason="the answer is not JSON") from None
+        if (
+            not isinstance(body, dict)
+            or body.get("resourceType") != "Bundle"
+            or body.get("type") != "transaction-response"
+        ):
+            raise FhirPostError(200, url, reason="the answer is not a transaction-response Bundle")
+        entries = body.get("entry")
+        if not isinstance(entries, list) or len(entries) != len(requests):
+            got = len(entries) if isinstance(entries, list) else 0
+            raise FhirPostError(
+                200, url, reason=f"the answer has {got} entries for {len(requests)} requests"
+            )
+        results: list[tuple[str, int]] = []
+        for i, (sent, answer) in enumerate(zip(requests, entries, strict=True), start=1):
+            status = answer.get("response", {}).get("status") if isinstance(answer, dict) else None
+            match = _ENTRY_STATUS.match(status) if isinstance(status, str) else None
+            code = int(match.group(1)) if match else 0
+            if code not in (200, 201):
+                raise FhirPostError(200, url, reason=f"entry {i} was not committed")
+            kind = sent.resource.get_resource_type() if sent.resource else "?"
+            results.append((kind, code))
+        return results
 
     def search_total(self, resource_type: str, params: dict[str, str] | None = None) -> int:
         """Server-side count. _summary=count means no resources transfer."""

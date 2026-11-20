@@ -1,0 +1,92 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:4ac146b1-c8d9-5bcd-b17c-6de35bba55ee",
+      "resource": {
+        "resourceType": "Patient",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MR"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospb:mrn",
+            "value": "SB1001"
+          }
+        ],
+        "name": [
+          {
+            "family": "ZZZSAMPLE",
+            "given": [
+              "TWO"
+            ]
+          }
+        ],
+        "gender": "male",
+        "birthDate": "1975-03-15"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient?identifier=urn:hl7bridge:hospb:mrn|SB1001"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:cd25e8c6-65b5-5c2f-877d-e33ec37f6dd3",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "ACSN"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospb:accession",
+            "value": "SACCB0001"
+          },
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "PLAC"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospb:placer",
+            "value": "PLSMPB0002"
+          }
+        ],
+        "status": "active",
+        "intent": "order",
+        "code": {
+          "coding": [
+            {
+              "system": "urn:hl7bridge:hospb:procedure-codes:local",
+              "code": "70551",
+              "display": "MRI BRAIN WO CONTRAST"
+            }
+          ],
+          "text": "MRI BRAIN WO CONTRAST"
+        },
+        "subject": {
+          "reference": "urn:uuid:4ac146b1-c8d9-5bcd-b17c-6de35bba55ee"
+        },
+        "authoredOn": "2026-10-07T14:10:00Z"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ServiceRequest?identifier=urn:hl7bridge:hospb:accession|SACCB0001"
+      }
+    }
+  ]
+}

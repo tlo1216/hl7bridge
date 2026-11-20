@@ -1,0 +1,242 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a",
+      "resource": {
+        "resourceType": "Patient",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MR"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospa:mrn",
+            "value": "SA1001"
+          }
+        ],
+        "name": [
+          {
+            "family": "ZZZSAMPLE",
+            "given": [
+              "ONE"
+            ]
+          }
+        ],
+        "gender": "female",
+        "birthDate": "1980-01-01"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient?identifier=urn:hl7bridge:hospa:mrn|SA1001"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:6f4c7ca0-599e-59e5-81bc-abdd90d2a54c",
+      "resource": {
+        "resourceType": "Observation",
+        "identifier": [
+          {
+            "system": "urn:hl7bridge:hospa:observation",
+            "value": "SACCA0002/MEAS1/1"
+          }
+        ],
+        "status": "final",
+        "code": {
+          "coding": [
+            {
+              "system": "urn:hl7bridge:coding-system:99HUB",
+              "code": "MEAS1",
+              "display": "Synthetic measurement"
+            }
+          ],
+          "text": "Synthetic measurement"
+        },
+        "subject": {
+          "reference": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a"
+        },
+        "effectiveDateTime": "2026-10-07T18:05:00Z",
+        "valueQuantity": {
+          "value": 12.5,
+          "unit": "millimeter",
+          "system": "http://unitsofmeasure.org",
+          "code": "mm"
+        },
+        "interpretation": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation",
+                "code": "N"
+              }
+            ]
+          }
+        ],
+        "referenceRange": [
+          {
+            "text": "5-15"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0002/MEAS1/1"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:b64425e1-8356-5adb-9fcc-6d05b8c18053",
+      "resource": {
+        "resourceType": "Observation",
+        "identifier": [
+          {
+            "system": "urn:hl7bridge:hospa:observation",
+            "value": "SACCA0002/FIND1/1"
+          }
+        ],
+        "status": "final",
+        "code": {
+          "coding": [
+            {
+              "system": "urn:hl7bridge:coding-system:99HUB",
+              "code": "FIND1",
+              "display": "Synthetic finding"
+            }
+          ],
+          "text": "Synthetic finding"
+        },
+        "subject": {
+          "reference": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a"
+        },
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "system": "urn:hl7bridge:coding-system:99HUB",
+              "code": "SF01",
+              "display": "Synthetic finding present"
+            }
+          ],
+          "text": "Synthetic finding present"
+        },
+        "note": [
+          {
+            "text": "Synthetic note on the finding."
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0002/FIND1/1"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:8f49df7d-5d63-527a-ac7e-2db517512970",
+      "resource": {
+        "resourceType": "Observation",
+        "identifier": [
+          {
+            "system": "urn:hl7bridge:hospa:observation",
+            "value": "SACCA0002/RPT/set-3"
+          }
+        ],
+        "status": "final",
+        "code": {
+          "coding": [
+            {
+              "code": "RPT",
+              "display": "Report Text"
+            }
+          ],
+          "text": "Report Text"
+        },
+        "subject": {
+          "reference": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a"
+        },
+        "valueString": "Synthetic structured report. Measurement within range."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0002/RPT/set-3"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:59581679-a51e-5a00-a54e-ade00bfd473a",
+      "resource": {
+        "resourceType": "DiagnosticReport",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "ACSN"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospa:accession",
+            "value": "SACCA0002"
+          }
+        ],
+        "basedOn": [
+          {
+            "type": "ServiceRequest",
+            "identifier": {
+              "type": {
+                "coding": [
+                  {
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                    "code": "ACSN"
+                  }
+                ]
+              },
+              "system": "urn:hl7bridge:hospa:accession",
+              "value": "SACCA0002"
+            }
+          }
+        ],
+        "status": "final",
+        "code": {
+          "coding": [
+            {
+              "system": "urn:hl7bridge:hospa:procedure-codes:local",
+              "code": "76700",
+              "display": "US ABDOMEN COMPLETE"
+            }
+          ],
+          "text": "US ABDOMEN COMPLETE"
+        },
+        "subject": {
+          "reference": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a"
+        },
+        "effectiveDateTime": "2026-10-07T18:00:00Z",
+        "issued": "2026-10-07T19:00:00Z",
+        "result": [
+          {
+            "reference": "urn:uuid:6f4c7ca0-599e-59e5-81bc-abdd90d2a54c"
+          },
+          {
+            "reference": "urn:uuid:b64425e1-8356-5adb-9fcc-6d05b8c18053"
+          },
+          {
+            "reference": "urn:uuid:8f49df7d-5d63-527a-ac7e-2db517512970"
+          }
+        ],
+        "conclusion": "Synthetic structured report. Measurement within range.",
+        "presentedForm": [
+          {
+            "contentType": "text/plain; charset=utf-8",
+            "data": "U3ludGhldGljIHN0cnVjdHVyZWQgcmVwb3J0LiBNZWFzdXJlbWVudCB3aXRoaW4gcmFuZ2Uu"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport?identifier=urn:hl7bridge:hospa:accession|SACCA0002"
+      }
+    }
+  ]
+}

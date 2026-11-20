@@ -83,21 +83,39 @@ def test_order_upsert_and_cancel(conn):
     assert (row["modality"], row["status"]) == ("MR", "cancelled")
 
 
-def _report(status, control_id="R1", text="No acute findings.") -> ReportRow:
+def _report(status, control_id="R1", text="No acute findings.", *, message_id=1) -> ReportRow:
     return ReportRow(
         hospital_id="HOSPA",
         accession="ACC1",
         control_id=control_id,
+        message_id=message_id,
         status=status,
         report_text=text,
+        procedure_code=None,
+        procedure_description=None,
+        code_system=None,
         patient_mrn="M1",
+        observed_at_utc=None,
         result_at_utc=NOW,
         received_at_utc=NOW,
     )
 
 
+def _messages(conn, *control_ids):
+    for control_id in control_ids:
+        record_message(
+            conn,
+            hospital_id="HOSPA",
+            control_id=control_id,
+            message_type="ORU^R01",
+            received_at_utc=NOW,
+            raw="MSH|^~\\&|\r",
+        )
+
+
 def test_report_rank_progression_and_regression(conn):
     with conn:
+        _messages(conn, "R1", "R2", "R3", "R4")
         assert upsert_report(conn, _report("P")) == "inserted"
         assert upsert_report(conn, _report("F", "R2")) == "updated"
         assert upsert_report(conn, _report("C", "R3", "Corrected.")) == "updated"

@@ -1,0 +1,40 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:4ac146b1-c8d9-5bcd-b17c-6de35bba55ee",
+      "resource": {
+        "resourceType": "Patient",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MR"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospb:mrn",
+            "value": "SB1001"
+          }
+        ],
+        "name": [
+          {
+            "family": "ZZZSAMPLE",
+            "given": [
+              "TWO"
+            ]
+          }
+        ],
+        "gender": "male",
+        "birthDate": "1975-03-15"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient?identifier=urn:hl7bridge:hospb:mrn|SB1001"
+      }
+    }
+  ]
+}

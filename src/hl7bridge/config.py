@@ -34,6 +34,7 @@ KNOWN_KEYS = {
     "ack_timeout_minutes",
     "tat",
     "lint",
+    "fhir",
 }
 
 KNOWN_RECONCILE_KEYS = {
@@ -48,6 +49,14 @@ KNOWN_TAT_KEYS = {
 }
 
 KNOWN_LINT_KEYS = {"disabled_rules"}
+
+KNOWN_FHIR_KEYS = {"identifier_systems"}
+# The identifier kinds the v2-to-FHIR mapping writes. Each defaults to
+# urn:hl7bridge:<hospital id, lower case>:<kind>.
+IDENTIFIER_KINDS = ("mrn", "accession", "placer", "visit", "observation")
+# Characters a FHIR token search treats as special. A system holding one
+# would break the conditional update URL (identifier=system|value).
+_TOKEN_SPECIAL = ("|", ",", "$", "\\", " ")
 
 
 def _unknown_keys_message(
@@ -112,6 +121,23 @@ class LintConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class IdentifierSystems:
+    """FHIR identifier systems for one hospital, from the profile's
+    ``fhir.identifier_systems`` block, defaults filled in."""
+
+    mrn: str
+    accession: str
+    placer: str
+    visit: str
+    observation: str
+
+    @classmethod
+    def defaults(cls, hospital_id: str) -> IdentifierSystems:
+        base = f"urn:hl7bridge:{hospital_id.lower()}"
+        return cls(**{kind: f"{base}:{kind}" for kind in IDENTIFIER_KINDS})
+
+
+@dataclass(frozen=True, slots=True)
 class HospitalConfig:
     hospital_id: str
     display_name: str
@@ -127,6 +153,14 @@ class HospitalConfig:
     ack_timeout_minutes: float = 30.0
     tat: TatConfig = field(default_factory=TatConfig)
     lint: LintConfig = field(default_factory=LintConfig)
+    identifier_systems: IdentifierSystems | None = None
+
+    @property
+    def systems(self) -> IdentifierSystems:
+        """The identifier systems, with the defaults when the profile has none."""
+        if self.identifier_systems is not None:
+            return self.identifier_systems
+        return IdentifierSystems.defaults(self.hospital_id)
 
     @property
     def tzinfo(self) -> ZoneInfo:
@@ -231,6 +265,9 @@ def load_hospital_config(path: Path) -> HospitalConfig:
         )
     lint = LintConfig(disabled_rules=tuple(disabled_raw))
 
+    hospital_id = _require_str(data, "hospital_id", source)
+    systems = _load_fhir_block(data.get("fhir", {}), hospital_id, source)
+
     z_segment_raw = data.get("z_segment")
     if z_segment_raw is not None and not isinstance(z_segment_raw, str):
         raise ConfigError(f"{source}: 'z_segment' must be a string if present")
@@ -244,7 +281,7 @@ def load_hospital_config(path: Path) -> HospitalConfig:
         raise ConfigError(f"{source}: 'timestamps_include_offset' must be a boolean")
 
     return HospitalConfig(
-        hospital_id=_require_str(data, "hospital_id", source),
+        hospital_id=hospital_id,
         display_name=_require_str(data, "display_name", source),
         facility_codes=_str_tuple(data, "facility_codes", source),
         accession_field=accession_field,
@@ -258,7 +295,39 @@ def load_hospital_config(path: Path) -> HospitalConfig:
         ack_timeout_minutes=float(ack_timeout_raw),
         tat=tat,
         lint=lint,
+        identifier_systems=systems,
     )
+
+
+def _load_fhir_block(raw: object, hospital_id: str, source: str) -> IdentifierSystems:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{source}: 'fhir' must be a mapping")
+    unknown = set(raw) - KNOWN_FHIR_KEYS
+    if unknown:
+        raise ConfigError(_unknown_keys_message(source, unknown, KNOWN_FHIR_KEYS, "fhir"))
+    given = raw.get("identifier_systems", {})
+    if not isinstance(given, dict):
+        raise ConfigError(f"{source}: 'fhir.identifier_systems' must be a mapping")
+    unknown = set(given) - set(IDENTIFIER_KINDS)
+    if unknown:
+        raise ConfigError(
+            _unknown_keys_message(source, unknown, set(IDENTIFIER_KINDS), "fhir.identifier_systems")
+        )
+    values = {
+        kind: getattr(IdentifierSystems.defaults(hospital_id), kind) for kind in IDENTIFIER_KINDS
+    }
+    for kind, value in given.items():
+        if (
+            not isinstance(value, str)
+            or not value.startswith(("urn:", "http://", "https://"))
+            or any(ch in value for ch in _TOKEN_SPECIAL)
+        ):
+            raise ConfigError(
+                f"{source}: fhir.identifier_systems.{kind} must be a urn: or http(s) URI"
+                " with no '|', ',', '$', backslash or space"
+            )
+        values[kind] = value
+    return IdentifierSystems(**values)
 
 
 class HospitalRegistry:
@@ -340,6 +409,9 @@ def profile_as_dict(cfg: HospitalConfig) -> dict[str, object]:
             ),
         },
         "lint": {"disabled_rules": list(cfg.lint.disabled_rules)},
+        "fhir": {
+            "identifier_systems": {kind: getattr(cfg.systems, kind) for kind in IDENTIFIER_KINDS}
+        },
     }
 
 

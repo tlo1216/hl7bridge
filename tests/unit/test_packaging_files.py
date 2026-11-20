@@ -17,6 +17,7 @@ import yaml
 
 from hl7bridge import __version__
 from hl7bridge.config import (
+    IDENTIFIER_KINDS,
     KNOWN_KEYS,
     KNOWN_LINT_KEYS,
     KNOWN_RECONCILE_KEYS,
@@ -50,6 +51,9 @@ EXPECTED_SAMPLES = {
     "10_hospc_ack_r01.hl7": ("AA", ""),
     "11_broken_missing_accession.hl7": ("AE", "missing_accession: ORC-3"),
     "12_broken_bad_timestamp.hl7": ("AE", "bad_timestamp: OBR-22"),
+    "13_hospc_adt_a01_inpatient.hl7": ("AA", ""),
+    "14_hospa_oru_r01_structured.hl7": ("AA", ""),
+    "15_hospc_adt_a08_discharge.hl7": ("AA", ""),
 }
 
 
@@ -68,7 +72,7 @@ def test_samples_get_the_expected_acks(tmp_path):
 def test_samples_lint_findings_are_only_the_two_broken_ones():
     registry = HospitalRegistry.load_dir(BUNDLED_PROFILES)
     report = lint_directory(SAMPLES_DIR, registry)
-    assert report.files_checked == 12
+    assert report.files_checked == 15
     assert {name: [f.rule_id for f in fs] for name, fs in report.by_file} == {
         "11_broken_missing_accession.hl7": ["HL7-010"],
         "12_broken_bad_timestamp.hl7": ["HL7-014"],
@@ -103,7 +107,8 @@ def test_profiles_doc_covers_every_key():
     expected |= {f"reconcile.{k}" for k in KNOWN_RECONCILE_KEYS}
     expected |= {f"tat.{k}" for k in KNOWN_TAT_KEYS}
     expected |= {f"lint.{k}" for k in KNOWN_LINT_KEYS}
-    expected -= {"reconcile", "tat", "lint"}
+    expected |= {f"fhir.identifier_systems.{k}" for k in IDENTIFIER_KINDS}
+    expected -= {"reconcile", "tat", "lint", "fhir"}
     assert documented == expected
 
 

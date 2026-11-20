@@ -60,6 +60,17 @@ suggestion (`unknown key 'acession_field'. Did you mean 'accession_field'?`).
 | `tat.exam_to_final_target_hours` | number | `2` | The turnaround target; a report strictly over it is a breach |
 | `tat.exam_to_final_target_hours_by_priority` | map of priority to hours | `{}` | Per-priority targets, such as a tighter one for stat (`S`) |
 | `lint.disabled_rules` | list of rule ids | `[]` | Rules this site's feed is known to break, so lint output stays useful |
+| `fhir.identifier_systems.mrn` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:mrn` | The FHIR identifier system for PID-3 MRNs, so Patients match the ones the server already holds |
+| `fhir.identifier_systems.accession` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:accession` | The system for the accession identifier (type ACSN) on ServiceRequest, DiagnosticReport and ImagingStudy |
+| `fhir.identifier_systems.placer` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:placer` | The system for the placer order number (ORC-2, type PLAC) |
+| `fhir.identifier_systems.visit` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:visit` | The system for the visit number (PV1-19, type VN) on Encounter |
+| `fhir.identifier_systems.observation` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:observation` | The system for the result key `<accession>/<OBX-3.1>/<OBX-4 or set-N>` on Observation |
 
 Numbers may be written as integers or decimals; `profile show` prints them
 as decimals.
+
+An identifier system may not hold `|`, `,`, `$`, a backslash or a space:
+FHIR token searches treat them as separators, and the conditional update
+URL `identifier=<system>|<value>` would break. Every key under `fhir` is
+optional; a profile with no `fhir` block writes the default systems, as
+0.3.0 did. `docs/mapping.md` lists what each system is written on.

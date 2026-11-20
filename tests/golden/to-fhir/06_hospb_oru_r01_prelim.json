@@ -1,0 +1,139 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:4ac146b1-c8d9-5bcd-b17c-6de35bba55ee",
+      "resource": {
+        "resourceType": "Patient",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MR"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospb:mrn",
+            "value": "SB1001"
+          }
+        ],
+        "name": [
+          {
+            "family": "ZZZSAMPLE",
+            "given": [
+              "TWO"
+            ]
+          }
+        ],
+        "gender": "male",
+        "birthDate": "1975-03-15"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient?identifier=urn:hl7bridge:hospb:mrn|SB1001"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:9a8d1056-9bd1-5d72-9427-c120a0f063ed",
+      "resource": {
+        "resourceType": "Observation",
+        "identifier": [
+          {
+            "system": "urn:hl7bridge:hospb:observation",
+            "value": "SACCB0001/RPT/set-1"
+          }
+        ],
+        "status": "preliminary",
+        "code": {
+          "coding": [
+            {
+              "code": "RPT",
+              "display": "Report Text"
+            }
+          ],
+          "text": "Report Text"
+        },
+        "subject": {
+          "reference": "urn:uuid:4ac146b1-c8d9-5bcd-b17c-6de35bba55ee"
+        },
+        "valueString": "Synthetic preliminary read. Final to follow."
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation?identifier=urn:hl7bridge:hospb:observation|SACCB0001/RPT/set-1"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:cde9fd82-abef-5a2a-8ffd-a9ef3982dda5",
+      "resource": {
+        "resourceType": "DiagnosticReport",
+        "identifier": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "ACSN"
+                }
+              ]
+            },
+            "system": "urn:hl7bridge:hospb:accession",
+            "value": "SACCB0001"
+          }
+        ],
+        "basedOn": [
+          {
+            "type": "ServiceRequest",
+            "identifier": {
+              "type": {
+                "coding": [
+                  {
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                    "code": "ACSN"
+                  }
+                ]
+              },
+              "system": "urn:hl7bridge:hospb:accession",
+              "value": "SACCB0001"
+            }
+          }
+        ],
+        "status": "preliminary",
+        "code": {
+          "coding": [
+            {
+              "system": "urn:hl7bridge:hospb:procedure-codes:local",
+              "code": "70551",
+              "display": "MRI BRAIN WO CONTRAST"
+            }
+          ],
+          "text": "MRI BRAIN WO CONTRAST"
+        },
+        "subject": {
+          "reference": "urn:uuid:4ac146b1-c8d9-5bcd-b17c-6de35bba55ee"
+        },
+        "effectiveDateTime": "2026-10-07T14:30:00Z",
+        "issued": "2026-10-07T15:30:00Z",
+        "result": [
+          {
+            "reference": "urn:uuid:9a8d1056-9bd1-5d72-9427-c120a0f063ed"
+          }
+        ],
+        "conclusion": "Synthetic preliminary read. Final to follow.",
+        "presentedForm": [
+          {
+            "contentType": "text/plain; charset=utf-8",
+            "data": "U3ludGhldGljIHByZWxpbWluYXJ5IHJlYWQuIEZpbmFsIHRvIGZvbGxvdy4="
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DiagnosticReport?identifier=urn:hl7bridge:hospb:accession|SACCB0001"
+      }
+    }
+  ]
+}

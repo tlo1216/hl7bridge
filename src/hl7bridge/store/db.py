@@ -9,9 +9,13 @@ from pathlib import Path
 
 from ..errors import StoreError
 
-# v2: orders.priority, report_events table. No migration path by design for
-# the demo: a mismatched database fails loudly and is recreated.
-SCHEMA_VERSION = 2
+# v2: orders.priority, report_events table.
+# v3: encounters table; reports.observed_at_utc and the report's own OBR-4
+#     code; message_id on reports and report_events.
+# No migration path yet by design: a mismatched database fails loudly and
+# demo databases are made again. The first migration is planned with the
+# imaging operations work, and starts from version 3.
+SCHEMA_VERSION = 3
 
 
 def utc_iso(dt: datetime) -> str:

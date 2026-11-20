@@ -48,11 +48,27 @@ class ReportRow:
     hospital_id: str
     accession: str
     control_id: str
+    message_id: int
     status: Literal["P", "F", "C"]
     report_text: str
+    procedure_code: str | None
+    procedure_description: str | None
+    code_system: str | None
     patient_mrn: str | None
+    observed_at_utc: str | None
     result_at_utc: str | None
     received_at_utc: str
+
+
+@dataclass(frozen=True, slots=True)
+class EncounterRow:
+    hospital_id: str
+    visit_number: str
+    patient_mrn: str
+    patient_class: str
+    admitted_at_utc: str | None
+    discharged_at_utc: str | None
+    last_message_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +76,7 @@ class ReportEventRow:
     hospital_id: str
     accession: str
     control_id: str
+    message_id: int
     status: Literal["P", "F", "C"]
     observed_at_utc: str | None
     result_at_utc: str | None
@@ -219,14 +236,21 @@ def upsert_report(
         return "ignored_regression"
     conn.execute(
         """
-        INSERT INTO reports (hospital_id, accession, control_id, status, report_text,
-                             patient_mrn, result_at_utc, received_at_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO reports (hospital_id, accession, control_id, message_id, status,
+                             report_text, procedure_code, procedure_description,
+                             code_system, patient_mrn, observed_at_utc, result_at_utc,
+                             received_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (hospital_id, accession) DO UPDATE SET
             control_id = excluded.control_id,
+            message_id = excluded.message_id,
             status = excluded.status,
             report_text = excluded.report_text,
+            procedure_code = excluded.procedure_code,
+            procedure_description = excluded.procedure_description,
+            code_system = excluded.code_system,
             patient_mrn = excluded.patient_mrn,
+            observed_at_utc = excluded.observed_at_utc,
             result_at_utc = excluded.result_at_utc,
             received_at_utc = excluded.received_at_utc
         """,
@@ -234,9 +258,14 @@ def upsert_report(
             r.hospital_id,
             r.accession,
             r.control_id,
+            r.message_id,
             r.status,
             r.report_text,
+            r.procedure_code,
+            r.procedure_description,
+            r.code_system,
             r.patient_mrn,
+            r.observed_at_utc,
             r.result_at_utc,
             r.received_at_utc,
         ),
@@ -269,20 +298,53 @@ def insert_report_event(conn: sqlite3.Connection, e: ReportEventRow) -> None:
     """Append-only: every accepted ORU is one event, never overwritten."""
     conn.execute(
         """
-        INSERT INTO report_events (hospital_id, accession, control_id, status,
+        INSERT INTO report_events (hospital_id, accession, control_id, message_id, status,
                                    observed_at_utc, result_at_utc, received_at_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             e.hospital_id,
             e.accession,
             e.control_id,
+            e.message_id,
             e.status,
             e.observed_at_utc,
             e.result_at_utc,
             e.received_at_utc,
         ),
     )
+
+
+def upsert_encounter(conn: sqlite3.Connection, e: EncounterRow) -> Literal["inserted", "updated"]:
+    """One row per (hospital, visit number); a later A01, A04 or A08 for the
+    same visit replaces every column, since each carries the whole visit."""
+    existing = conn.execute(
+        "SELECT 1 FROM encounters WHERE hospital_id = ? AND visit_number = ?",
+        (e.hospital_id, e.visit_number),
+    ).fetchone()
+    conn.execute(
+        """
+        INSERT INTO encounters (hospital_id, visit_number, patient_mrn, patient_class,
+                                admitted_at_utc, discharged_at_utc, last_message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (hospital_id, visit_number) DO UPDATE SET
+            patient_mrn = excluded.patient_mrn,
+            patient_class = excluded.patient_class,
+            admitted_at_utc = excluded.admitted_at_utc,
+            discharged_at_utc = excluded.discharged_at_utc,
+            last_message_id = excluded.last_message_id
+        """,
+        (
+            e.hospital_id,
+            e.visit_number,
+            e.patient_mrn,
+            e.patient_class,
+            e.admitted_at_utc,
+            e.discharged_at_utc,
+            e.last_message_id,
+        ),
+    )
+    return "updated" if existing else "inserted"
 
 
 def record_outbound_report(

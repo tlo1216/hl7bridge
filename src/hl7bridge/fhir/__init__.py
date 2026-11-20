@@ -3,6 +3,7 @@
 from .client import HapiClient
 from .mapper import (
     diagnostic_report_resource,
+    encounter_resource,
     imaging_study_resource,
     patient_resource,
     service_request_resource,
@@ -13,6 +14,7 @@ __all__ = [
     "FhirSyncReport",
     "HapiClient",
     "diagnostic_report_resource",
+    "encounter_resource",
     "imaging_study_resource",
     "patient_resource",
     "render_sync_text",

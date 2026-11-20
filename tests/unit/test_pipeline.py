@@ -326,3 +326,87 @@ def test_expected_type_without_handler_is_ae(pipeline, tmp_path):
     ack = p2.handle_bytes(msg(PID, msg_type="SIU^S12"))
     assert ack_fields(ack) == ("AE", "C1")
     assert quarantine_summary(pipeline.conn) == {"no_handler_for_type": 1}
+
+
+# -- visits (PV1) and message references --------------------------------------------
+
+
+def _pv1(**fields: str) -> str:
+    values = [""] * 46
+    values[0] = "PV1"
+    values[1] = "1"
+    for key, value in fields.items():
+        values[int(key[1:])] = value
+    return "|".join(values).rstrip("|")
+
+
+def _adt(event: str, pv1: str, control_id: str) -> bytes:
+    return msg(PID, pv1, msg_type=f"ADT^{event}", control_id=control_id, facility="HOSPC")
+
+
+def test_a01_stores_the_visit_and_a08_updates_it(pipeline):
+    a01 = _adt("A01", _pv1(p2="I", p19="V1", p44="20261007080000-0400"), "C1")
+    a08 = _adt("A08", _pv1(p2="I", p19="V1", p44="20261007080000-0400", p45="20261008090000"), "C2")
+    assert ack_fields(pipeline.handle_bytes(a01))[0] == "AA"
+    assert ack_fields(pipeline.handle_bytes(a08))[0] == "AA"
+    rows = pipeline.conn.execute("SELECT * FROM encounters").fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["visit_number"], row["patient_class"], row["patient_mrn"]) == ("V1", "I", "M1001")
+    assert row["admitted_at_utc"] == "2026-10-07T12:00:00+00:00"
+    # No offset: read in the hospital's zone (America/New_York, EDT).
+    assert row["discharged_at_utc"] == "2026-10-08T13:00:00+00:00"
+    last = pipeline.conn.execute("SELECT id FROM messages WHERE control_id = 'C2'").fetchone()
+    assert row["last_message_id"] == last["id"]
+
+
+def test_adt_without_a_visit_number_stores_no_visit(pipeline):
+    assert ack_fields(pipeline.handle_bytes(_adt("A04", _pv1(p2="O"), "C1")))[0] == "AA"
+    assert pipeline.conn.execute("SELECT COUNT(*) FROM encounters").fetchone()[0] == 0
+
+
+def test_a40_never_writes_a_visit(pipeline):
+    a40 = msg(
+        PID, "MRG|M2^^^HOSPC^MR", _pv1(p2="I", p19="V9"), msg_type="ADT^A40", facility="HOSPC"
+    )
+    assert ack_fields(pipeline.handle_bytes(a40))[0] == "AA"
+    assert pipeline.conn.execute("SELECT COUNT(*) FROM encounters").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("field", ["p44", "p45"])
+def test_bad_visit_time_is_ae_and_writes_nothing(pipeline, field):
+    raw = _adt("A01", _pv1(p2="I", p19="V1", **{field: "2026"}), "C1")
+    ack = parse_hl7(pipeline.handle_bytes(raw))
+    assert get_field(ack, "MSA-1") == "AE"
+    assert get_field(ack, "MSA-3") == f"bad_timestamp: PV1-{field[1:]}"
+    assert pipeline.conn.execute("SELECT COUNT(*) FROM encounters").fetchone()[0] == 0
+    assert pipeline.conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0] == 0
+
+
+def test_unknown_patient_class_is_stored_as_sent(pipeline):
+    """The store keeps what was sent; fhir sync refuses a class it cannot map."""
+    assert ack_fields(pipeline.handle_bytes(_adt("A01", _pv1(p2="Z", p19="V1"), "C1")))[0] == "AA"
+    assert pipeline.conn.execute("SELECT patient_class FROM encounters").fetchone()[0] == "Z"
+
+
+def test_reports_carry_the_message_row_id(pipeline):
+    raw = msg(
+        PID,
+        "ORC|RE|PL1",
+        obr(status="F", result_ts="20261007110000"),
+        "OBX|1|TX|RPT^T||text||||||F",
+        msg_type="ORU^R01",
+        control_id="R1",
+    )
+    assert ack_fields(pipeline.handle_bytes(raw))[0] == "AA"
+    message_id = pipeline.conn.execute("SELECT id FROM messages").fetchone()["id"]
+    report = pipeline.conn.execute("SELECT * FROM reports").fetchone()
+    event = pipeline.conn.execute("SELECT * FROM report_events").fetchone()
+    assert report["message_id"] == event["message_id"] == message_id
+    assert report["observed_at_utc"] == "2026-10-07T17:00:00+00:00"
+
+
+def test_placer_falls_back_to_obr2(pipeline):
+    raw = msg(PID, "ORC|NW||FIL1||||||20261007093000", OBR, control_id="C9")
+    assert ack_fields(pipeline.handle_bytes(raw))[0] == "AA"
+    assert pipeline.conn.execute("SELECT placer_order_id FROM orders").fetchone()[0] == "PL1"

@@ -39,6 +39,7 @@ from ..hl7time import parse_hl7_ts
 from ..store import utc_iso
 from ..store.repo import (
     AckInRow,
+    EncounterRow,
     OrderRow,
     PatientRow,
     ReportEventRow,
@@ -49,6 +50,7 @@ from ..store.repo import (
     message_row_id,
     record_merge,
     record_message,
+    upsert_encounter,
     upsert_order,
     upsert_patient,
     upsert_report,
@@ -79,6 +81,13 @@ VALID_REPORT_STATUSES = ("P", "F", "C")
 VALID_ACK_CODES = ("AA", "AE", "AR")
 SUPPORTED_ORDER_CONTROLS = ("NW", "CA")
 _TRIGGER_RE = re.compile(r"[A-Z][A-Z0-9]{2}")
+# ADT events whose PV1 is stored as a visit (encounters table).
+VISIT_EVENTS = ("ADT^A01", "ADT^A04", "ADT^A08")
+
+
+def _placer(message: hl7.Message) -> str | None:
+    """The placer order number: ORC-2, else OBR-2."""
+    return get_field(message, "ORC-2") or get_field(message, "OBR-2") or None
 
 
 _PARSE_ACK_TEXT = {
@@ -211,7 +220,10 @@ class IngestPipeline:
                     raw=text,
                 )
                 if outcome == "new":
-                    self._dispatch(hospital, message, msg_type, control_id, received)
+                    message_id = message_row_id(
+                        self.conn, hospital_id=hospital.hospital_id, control_id=control_id
+                    )
+                    self._dispatch(hospital, message, msg_type, control_id, received, message_id)
         except MessageValidationError as exc:
             # The transaction above rolled back: no partial domain writes.
             decision = AckDecision("AE", exc.reason, exc.detail, ack_text=exc.field)
@@ -375,15 +387,16 @@ class IngestPipeline:
         msg_type: str,
         control_id: str,
         received: str,
+        message_id: int,
     ) -> None:
         if msg_type == "ACK" or msg_type.startswith("ACK^"):
             self._handle_ack(hospital, message, control_id, received)
         elif msg_type.startswith("ADT^"):
-            self._handle_adt(hospital, message, msg_type, received)
+            self._handle_adt(hospital, message, msg_type, received, message_id)
         elif msg_type == "ORM^O01":
             self._handle_orm(hospital, message, received)
         elif msg_type == "ORU^R01":
-            self._handle_oru(hospital, message, control_id, received)
+            self._handle_oru(hospital, message, control_id, received, message_id)
         else:
             # expected_message_types allowed a type we have no handler for:
             # that is a config/code mismatch and must be loud, not ignored.
@@ -417,10 +430,17 @@ class IngestPipeline:
         )
 
     def _handle_adt(
-        self, hospital: HospitalConfig, message: hl7.Message, msg_type: str, received: str
+        self,
+        hospital: HospitalConfig,
+        message: hl7.Message,
+        msg_type: str,
+        received: str,
+        message_id: int,
     ) -> None:
         patient = self._extract_patient(hospital, message)
         upsert_patient(self.conn, patient)
+        if msg_type in VISIT_EVENTS:
+            self._record_visit(hospital, message, patient.mrn, message_id)
         if msg_type == "ADT^A40":
             merged_mrn = get_field(message, "MRG-1", repetition=1, component=1)
             if not merged_mrn:
@@ -436,6 +456,34 @@ class IngestPipeline:
                 merged_mrn=merged_mrn,
                 merged_at_utc=merged_at,
             )
+
+    def _record_visit(
+        self, hospital: HospitalConfig, message: hl7.Message, mrn: str, message_id: int
+    ) -> None:
+        """PV1 of an A01, A04 or A08, keyed by PV1-19. No visit number, no
+        row: there is nothing to key a later update on. The patient class is
+        stored as sent; ``fhir sync`` refuses a code it cannot map."""
+        visit = get_field(message, "PV1-19")
+        if not visit:
+            return
+        admit_raw = get_field(message, "PV1-44")
+        discharge_raw = get_field(message, "PV1-45")
+        upsert_encounter(
+            self.conn,
+            EncounterRow(
+                hospital_id=hospital.hospital_id,
+                visit_number=visit,
+                patient_mrn=mrn,
+                patient_class=get_field(message, "PV1-2"),
+                admitted_at_utc=self._parse_ts(hospital, admit_raw, "PV1-44")
+                if admit_raw
+                else None,
+                discharged_at_utc=self._parse_ts(hospital, discharge_raw, "PV1-45")
+                if discharge_raw
+                else None,
+                last_message_id=message_id,
+            ),
+        )
 
     def _accession(self, hospital: HospitalConfig, message: hl7.Message) -> str:
         accession = get_field(message, hospital.accession_field)
@@ -478,7 +526,7 @@ class IngestPipeline:
                     OrderRow(
                         hospital_id=hospital.hospital_id,
                         accession=accession,
-                        placer_order_id=get_field(message, "ORC-2") or None,
+                        placer_order_id=_placer(message),
                         procedure_code=get_field(message, "OBR-4", component=1) or None,
                         procedure_description=get_field(message, "OBR-4", component=2) or None,
                         code_system=hospital.procedure_code_system,
@@ -496,7 +544,7 @@ class IngestPipeline:
             OrderRow(
                 hospital_id=hospital.hospital_id,
                 accession=accession,
-                placer_order_id=get_field(message, "ORC-2") or None,
+                placer_order_id=_placer(message),
                 procedure_code=get_field(message, "OBR-4", component=1) or None,
                 procedure_description=get_field(message, "OBR-4", component=2) or None,
                 code_system=hospital.procedure_code_system,
@@ -509,7 +557,12 @@ class IngestPipeline:
         )
 
     def _handle_oru(
-        self, hospital: HospitalConfig, message: hl7.Message, control_id: str, received: str
+        self,
+        hospital: HospitalConfig,
+        message: hl7.Message,
+        control_id: str,
+        received: str,
+        message_id: int,
     ) -> None:
         accession = self._accession(hospital, message)
         status = get_field(message, "OBR-25")
@@ -533,6 +586,7 @@ class IngestPipeline:
                 hospital_id=hospital.hospital_id,
                 accession=accession,
                 control_id=control_id,
+                message_id=message_id,
                 status=status,  # type: ignore[arg-type]
                 observed_at_utc=observed_at,
                 result_at_utc=result_at,
@@ -545,9 +599,14 @@ class IngestPipeline:
                 hospital_id=hospital.hospital_id,
                 accession=accession,
                 control_id=control_id,
+                message_id=message_id,
                 status=status,  # type: ignore[arg-type]
                 report_text=collect_obx_text(message),
+                procedure_code=get_field(message, "OBR-4", component=1) or None,
+                procedure_description=get_field(message, "OBR-4", component=2) or None,
+                code_system=hospital.procedure_code_system,
                 patient_mrn=patient.mrn,
+                observed_at_utc=observed_at,
                 result_at_utc=result_at,
                 received_at_utc=received,
             ),

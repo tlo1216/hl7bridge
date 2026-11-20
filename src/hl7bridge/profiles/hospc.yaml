@@ -11,7 +11,7 @@ accession_field: OBR-3
 timezone: America/New_York
 hl7_version: "2.5"
 timestamps_include_offset: true
-expected_message_types: [ADT^A04, ADT^A08, ADT^A40, ORM^O01, ORU^R01]
+expected_message_types: [ADT^A01, ADT^A04, ADT^A08, ADT^A40, ORM^O01, ORU^R01]
 procedure_code_system: local
 reconcile:
   order_without_image_hours: 4

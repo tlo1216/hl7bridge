@@ -56,15 +56,36 @@ CREATE TABLE IF NOT EXISTS studies (
     source_file  TEXT
 );
 
+-- Visits from ADT PV1 (A01, A04, A08), keyed by the visit number PV1-19.
+-- A message with no PV1-19 has no row here. An A08 rewrites the row.
+-- last_message_id is the messages.id of the message that wrote it last.
+CREATE TABLE IF NOT EXISTS encounters (
+    hospital_id       TEXT NOT NULL,
+    visit_number      TEXT NOT NULL,
+    patient_mrn       TEXT NOT NULL,
+    patient_class     TEXT NOT NULL,
+    admitted_at_utc   TEXT,
+    discharged_at_utc TEXT,
+    last_message_id   INTEGER NOT NULL REFERENCES messages (id),
+    PRIMARY KEY (hospital_id, visit_number)
+);
+
 -- Latest report per (hospital, accession). A corrected (C) report replaces
--- the final (F); full history stays in messages.raw.
+-- the final (F); full history stays in messages.raw. message_id is the
+-- messages.id of the ORU it came from, the stable reference later
+-- features join on instead of hospital and control id.
 CREATE TABLE IF NOT EXISTS reports (
     hospital_id     TEXT NOT NULL,
     accession       TEXT NOT NULL,
     control_id      TEXT NOT NULL,
+    message_id      INTEGER NOT NULL REFERENCES messages (id),
     status          TEXT NOT NULL CHECK (status IN ('P', 'F', 'C')),
     report_text     TEXT NOT NULL,
+    procedure_code        TEXT,
+    procedure_description TEXT,
+    code_system           TEXT,
     patient_mrn     TEXT,
+    observed_at_utc TEXT,
     result_at_utc   TEXT,
     received_at_utc TEXT NOT NULL,
     PRIMARY KEY (hospital_id, accession)
@@ -78,6 +99,7 @@ CREATE TABLE IF NOT EXISTS report_events (
     hospital_id     TEXT NOT NULL,
     accession       TEXT NOT NULL,
     control_id      TEXT NOT NULL,
+    message_id      INTEGER NOT NULL REFERENCES messages (id),
     status          TEXT NOT NULL CHECK (status IN ('P', 'F', 'C')),
     observed_at_utc TEXT,
     result_at_utc   TEXT,

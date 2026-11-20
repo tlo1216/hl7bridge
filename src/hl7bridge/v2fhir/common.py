@@ -1,0 +1,116 @@
+"""Helpers the segment mappers share: identifiers, codes and times."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from fhir.resources.R4B.codeableconcept import CodeableConcept
+from fhir.resources.R4B.coding import Coding
+from fhir.resources.R4B.identifier import Identifier
+
+from ..config import HospitalConfig
+from ..errors import MappingError, TimestampError
+from ..hl7time import parse_hl7_ts
+from ..store.db import utc_iso
+from .fields import FieldReader
+from .tables import CODING_SYSTEMS, V2_0203
+
+# A coding system name from the message becomes part of a URN, so only
+# plain names are kept; anything else is refused, never cleaned up.
+_SYSTEM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}")
+OWN_CODING_SYSTEM = "urn:hl7bridge:coding-system:"
+
+
+@dataclass(frozen=True, slots=True)
+class MapContext:
+    hospital: HospitalConfig
+    reader: FieldReader
+
+
+def typed_identifier(type_code: str, system: str, value: str) -> Identifier:
+    """An identifier with a v2 table 0203 type code (MR, ACSN, PLAC, VN)."""
+    return Identifier(
+        type=CodeableConcept(coding=[Coding(system=V2_0203, code=type_code)]),
+        system=system,
+        value=value,
+    )
+
+
+def procedure_system(hospital_id: str, code_system: str | None) -> str:
+    """The procedure code system for a hospital. OBR-4 component 3 is not
+    read: the profile's ``procedure_code_system`` names it, as on the store
+    path, so both paths write the same ServiceRequest and report codes."""
+    return f"urn:hl7bridge:{hospital_id.lower()}:procedure-codes:{code_system or 'local'}"
+
+
+def procedure_concept(
+    hospital_id: str, code_system: str | None, code: str, desc: str
+) -> CodeableConcept | None:
+    if not code and not desc:
+        return None
+    coding = None
+    if code:
+        coding = [
+            Coding(
+                system=procedure_system(hospital_id, code_system),
+                code=code,
+                display=desc or None,
+            )
+        ]
+    return CodeableConcept(coding=coding, text=desc or code)
+
+
+def coding_system(name: str, field: str, *, segment: int = 1) -> str | None:
+    """The URI for a CE or CWE coding system name (component 3): a known
+    name maps to its URI, another plain name is kept in hl7bridge's own
+    namespace, and an empty name gives no system."""
+    if not name:
+        return None
+    if name in CODING_SYSTEMS.codes:
+        return CODING_SYSTEMS.codes[name]
+    if not _SYSTEM_NAME.fullmatch(name):
+        raise MappingError(field, "coding system name is not a plain name", segment=segment)
+    return OWN_CODING_SYSTEM + name
+
+
+def coded_concept(
+    reader: FieldReader, ref: str, *, seg: int = 1, rep: int = 1
+) -> CodeableConcept | None:
+    """A CE or CWE field as a CodeableConcept: components 1 to 3, then the
+    alternate code in 4 to 6, and CWE original text in component 9."""
+    codings: list[Coding] = []
+    for code_c, text_c, system_c in ((1, 2, 3), (4, 5, 6)):
+        code = reader.get(ref, comp=code_c, seg=seg, rep=rep)
+        if not code:
+            continue
+        display = reader.get(ref, comp=text_c, seg=seg, rep=rep)
+        system = coding_system(reader.get(ref, comp=system_c, seg=seg, rep=rep), ref, segment=seg)
+        codings.append(Coding(system=system, code=code, display=display or None))
+    original = reader.get(ref, comp=9, seg=seg, rep=rep)
+    text = original or reader.get(ref, comp=2, seg=seg, rep=rep) or None
+    if not codings and not text:
+        return None
+    return CodeableConcept(coding=codings or None, text=text)
+
+
+def timestamp(ctx: MapContext, ref: str, *, seg: int = 1) -> str | None:
+    """An HL7 timestamp as an ISO 8601 UTC string, or None when empty. A
+    value with no offset is read in the hospital's time zone."""
+    value = ctx.reader.get(ref, seg=seg)
+    if not value:
+        return None
+    try:
+        return utc_iso(parse_hl7_ts(value, default_tz=ctx.hospital.tzinfo))
+    except TimestampError:
+        raise MappingError(ref, "not a valid HL7 timestamp", segment=seg) from None
+
+
+def birth_date(ctx: MapContext, ref: str) -> str | None:
+    value = ctx.reader.get(ref)
+    if not value:
+        return None
+    try:
+        return parse_hl7_ts(value, default_tz=ctx.hospital.tzinfo).date().isoformat()
+    except TimestampError:
+        raise MappingError(ref, "not a valid HL7 date") from None
