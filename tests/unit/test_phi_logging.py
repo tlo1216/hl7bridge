@@ -1294,3 +1294,102 @@ def test_safe_url_and_error_paths_never_return_user_info(url):
 
     for shown in (safe_url(url), _url_path(url), str(FhirPostError(0, url))):
         assert "s3cr3t" not in shown and "alice" not in shown, shown
+
+
+# -- 9. the 0.4 message commands: to-fhir, explain, replay ----------------------
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_cli_to_fhir_over_the_corpus_has_no_phi_in_errors_or_logs(corpus, tmp_path, capsys):
+    """The corpus holds seeded defects, so mapping errors are printed; none
+    may quote a value. Bundles go to files, which are product output."""
+    _, out, _ = corpus
+    rc = _run_cli(
+        [
+            "-vv",
+            "to-fhir",
+            str(out / "messages"),
+            "--config",
+            str(CONFIG_DIR),
+            "--out",
+            str(tmp_path / "bundles"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "error: " in captured.err, "no mapping error printed; test would be vacuous"
+    assert "could not be mapped" in captured.err
+    assert find_leaks(captured.err) == []
+    assert find_leaks(captured.out) == []
+
+
+@pytest.mark.usefixtures("restore_logging")
+@pytest.mark.parametrize("mode", ["4xx_echo", "transport", "timeout"])
+def test_cli_to_fhir_post_failure_has_no_phi(tmp_path, capsys, monkeypatch, mode):
+    _patch_client(monkeypatch, failing_handler(mode))
+    message = tmp_path / "a.hl7"
+    message.write_bytes(
+        (
+            "MSH|^~\\&|ADT|HOSPA|HL7BRIDGE|HUB|20261007080000||ADT^A04|C1|T|2.3\r"
+            f"PID|1||{CANARY_MRN}^^^HOSPA^MR||{CANARY_NAME}^ALPHA||19800101|F\r"
+        ).encode()
+    )
+    rc = _run_cli(["-vv", "to-fhir", str(message), "--post", "--fhir-base", FHIR_BASE])
+    captured = capsys.readouterr()
+    assert rc == (3 if mode in ("transport", "timeout") else 1)
+    assert "error: FHIR" in captured.err
+    assert find_leaks(captured.err) == []
+    assert find_leaks(captured.out) == []
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_cli_explain_writes_values_to_stdout_only(corpus, capsys, caplog):
+    _, out, _ = corpus
+    first = sorted((out / "messages").rglob("*.hl7"))[0]
+    with caplog.at_level(logging.DEBUG):
+        rc = _run_cli(["-vv", "explain", str(first)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert find_leaks(captured.out) != [], "explain prints the message; test would be vacuous"
+    assert find_leaks(captured.err) == []
+    assert find_leaks(caplog.text) == []
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_cli_replay_dry_run_prints_no_identifiers(loaded_db, capsys):
+    db_path, _, values = loaded_db
+    rc = _run_cli(["replay", "--db", str(db_path), "--dry-run"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "would be sent" in captured.out, "nothing listed; test would be vacuous"
+    assert find_leaks(captured.out, values) == []
+    assert find_leaks(captured.err, values) == []
+
+
+def test_sync_skip_reasons_for_unmapped_codes_hold_no_value(loaded_db, caplog):
+    db_path, _, values = loaded_db
+    canary = "QX7"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    saved = conn.execute("SELECT hospital_id, mrn, sex FROM patients LIMIT 1").fetchone()
+    conn.execute(
+        "UPDATE patients SET sex = ? WHERE hospital_id = ? AND mrn = ?",
+        (canary, saved["hospital_id"], saved["mrn"]),
+    )
+    conn.commit()
+    try:
+        registry = HospitalRegistry.load_dir(CONFIG_DIR)
+        with caplog.at_level(logging.DEBUG), mock_client(ok_handler()) as client:
+            report = sync_to_fhir(conn, registry, client)
+    finally:
+        conn.execute(
+            "UPDATE patients SET sex = ? WHERE hospital_id = ? AND mrn = ?",
+            (saved["sex"], saved["hospital_id"], saved["mrn"]),
+        )
+        conn.commit()
+        conn.close()
+    reasons = [reason for kind, _, reason in report.skipped if kind == "Patient"]
+    assert reasons == ["PID-8: code not in table 0001 (administrative sex); refusing to guess"]
+    assert "fhir sync skipped 1 Patient row(s)" in caplog.text
+    assert canary not in caplog.text
+    assert find_leaks(caplog.text, values) == []

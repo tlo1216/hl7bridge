@@ -1,0 +1,49 @@
+MSH  message header
+  MSH-1  Field separator: |
+  MSH-2  Encoding characters: ^~\&
+  MSH-3  Sending application: RIS
+  MSH-4  Sending facility: HOSPA
+  MSH-5  Receiving application: HL7BRIDGE
+  MSH-6  Receiving facility: HUB
+  MSH-7  Message date and time: 20261007100000
+  MSH-9  Message type: ORU^R01
+      MSH-9.1 message code: ORU
+      MSH-9.2 trigger event: R01
+  MSH-10 Message control id: SMPA0003
+  MSH-11 Processing id: T = training
+  MSH-12 Version: 2.3
+PID  patient identification
+  PID-1  Set id: 1
+  PID-3  Patient identifier list: SA1001^^^HOSPA^MR
+      PID-3.1 id number: SA1001
+      PID-3.4 assigning authority: HOSPA
+      PID-3.5 identifier type: MR
+  PID-5  Patient name: ZZZSAMPLE^ONE
+      PID-5.1 family name: ZZZSAMPLE
+      PID-5.2 given name: ONE
+  PID-7  Date of birth: 19800101
+  PID-8  Administrative sex: F = female
+ORC  common order
+  ORC-1  Order control: RE = observations to follow
+  ORC-2  Placer order number: PLSMPA0003
+OBR  observation request
+  OBR-1  Set id: 1
+  OBR-2  Placer order number: PLSMPA0003
+  OBR-3  Filler order number: SACCA0001
+  OBR-4  Universal service id: 71046^XR CHEST 2 VIEWS^local
+      OBR-4.1 identifier: 71046
+      OBR-4.2 text: XR CHEST 2 VIEWS
+      OBR-4.3 coding system: local
+  OBR-5  Priority (old): R
+  OBR-7  Observation date and time: 20261007083000
+  OBR-22 Results report or status change time: 20261007100000
+  OBR-24 Diagnostic service section: CR
+  OBR-25 Result status: F = final
+OBX  observation result
+  OBX-1  Set id: 1
+  OBX-2  Value type: TX = text
+  OBX-3  Observation identifier: RPT^Report Text
+      OBX-3.1 identifier: RPT
+      OBX-3.2 text: Report Text
+  OBX-5  Observation value: Synthetic sample report. No acute finding.
+  OBX-11 Observation result status: F = final

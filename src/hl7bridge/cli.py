@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import errno
+import json
 import logging
 import os
 import re
@@ -42,10 +43,13 @@ from .errors import (
     EXIT_USAGE,
     BridgeError,
     FhirPostError,
+    HL7ParseError,
     ListenError,
+    MappingError,
     NetworkError,
     UsageError,
 )
+from .explain import as_json, explain_message, render_text, split_messages
 from .fhir import HapiClient, render_sync_text, sync_to_fhir
 from .ingest import IngestPipeline, send_messages, serve
 from .ingest.ack import ALL_REASONS
@@ -58,9 +62,11 @@ from .msgfiles import display_key, hl7_files
 from .profiles import Resolved, resolve_db, resolve_profiles
 from .reconcile import reconcile, render_reconcile_text
 from .scaffold import DEFAULT_FOLDER, init_folder
-from .store import connect, message_counts, quarantine_summary
+from .store import connect, message_counts, quarantine_summary, utc_iso
+from .store.db import inspect_db, schema_mismatch_message
 from .synth import generate, verify_manifest
 from .tat import render_tat_text, tat_report
+from .v2fhir import MappedMessage, bundle_json, message_to_bundle
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +74,6 @@ DEFAULT_FHIR_BASE = "http://localhost:8080/fhir"
 FHIR_BASE_ENV = "HL7BRIDGE_FHIR_BASE"
 FHIR_APIKEY_ENV = "HL7BRIDGE_FHIR_APIKEY"
 FHIR_TOKEN_ENV = "HL7BRIDGE_FHIR_TOKEN"
-REMOVED_IN = "0.4.0"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 ACK_CODE_WORDS = {
@@ -310,11 +315,172 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 # -- Messages ------------------------------------------------------------------------
 
 
+STDIN = "-"
+STDIN_NAME = "<stdin>"
+
+
 def _message_path(args: argparse.Namespace) -> Path:
     given = args.path or args.dir
     if not given:
         raise UsageError(f"{args.command}: give a file or folder of *.hl7 messages.")
+    if given == STDIN:
+        raise UsageError(f"{args.command} does not read stdin; give a file or folder.")
     return Path(given)
+
+
+@dataclass(frozen=True, slots=True)
+class _Input:
+    """One input file: its name for reports, its bytes, and its path."""
+
+    name: str
+    data: bytes
+    path: Path | None
+
+
+def _reads_stdin(args: argparse.Namespace) -> bool:
+    return bool((args.path or args.dir) == STDIN)
+
+
+def _inputs(args: argparse.Namespace) -> list[_Input]:
+    """The files a message command was pointed at, or stdin for ``-``."""
+    if _reads_stdin(args):
+        return [_Input(STDIN_NAME, sys.stdin.buffer.read(), None)]
+    root = _message_path(args)
+    return [_Input(display_key(p, root), p.read_bytes(), p) for p in hl7_files(root)]
+
+
+def _decode(item: _Input) -> str:
+    """Message text. Bytes that are not UTF-8 become U+FFFD, with a note."""
+    try:
+        return item.data.decode("utf-8")
+    except UnicodeDecodeError:
+        print(
+            f"note: {item.name} is not valid UTF-8; undecodable bytes are shown as U+FFFD.",
+            file=sys.stderr,
+        )
+        return item.data.decode("utf-8", errors="replace")
+
+
+def _labelled_messages(item: _Input) -> list[tuple[str, str]]:
+    """(label, text) for each message in a file; a file may hold several."""
+    messages = split_messages(_decode(item))
+    if len(messages) == 1:
+        return [(item.name, messages[0])]
+    return [(f"{item.name} message {n}", text) for n, text in enumerate(messages, start=1)]
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    failed = 0
+    documents: list[dict[str, object]] = []
+    blocks: list[str] = []
+    for item in _inputs(args):
+        labelled = _labelled_messages(item)
+        if not labelled:
+            print(f"error: {item.name}: no HL7 segments in it.", file=sys.stderr)
+            failed += 1
+            continue
+        for n, (label, text) in enumerate(labelled, start=1):
+            try:
+                views = explain_message(text, show_all=args.all)
+            except HL7ParseError:
+                # The reason is not printed: say what failed, not what was in it.
+                print(f"error: {label}: not parseable as HL7 v2.", file=sys.stderr)
+                failed += 1
+                continue
+            if args.json:
+                documents.append({"file": item.name, "message": n, "segments": as_json(views)})
+            else:
+                blocks.append(f"== {label}\n{render_text(views)}")
+    if args.json:
+        _print_json(documents)
+    elif blocks:
+        print("\n\n".join(blocks))
+    return EXIT_FINDINGS if failed else EXIT_OK
+
+
+def _bundle_text(mapped: MappedMessage) -> str:
+    return json.dumps(bundle_json(mapped), indent=2) + "\n"
+
+
+def _bundle_name(label: str) -> str:
+    """``a.hl7`` gives ``a.json``; ``sub/b.hl7 message 2`` gives ``sub_b-2.json``."""
+    name, _, number = label.partition(" message ")
+    stem = name[: -len(".hl7")] if name.endswith(".hl7") else name
+    stem = stem.replace("/", "_").strip("<>") or "message"
+    return f"{stem}-{number}.json" if number else f"{stem}.json"
+
+
+def cmd_to_fhir(args: argparse.Namespace) -> int:
+    registry = _registry(args)
+    jobs: list[tuple[str, str]] = []
+    for item in _inputs(args):
+        jobs.extend(_labelled_messages(item) or [(item.name, "")])
+    out_dir = Path(args.out) if args.out else None
+    if out_dir is None and not args.post and len(jobs) > 1:
+        raise UsageError(
+            f"{len(jobs)} messages need a folder for their Bundles.",
+            hint="Pass --out DIR, or --post to send them.",
+        )
+    if out_dir is not None:
+        if out_dir.exists() and not out_dir.is_dir():
+            raise UsageError(f"--out {out_dir} exists and is not a folder.")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    mapped: list[tuple[str, MappedMessage]] = []
+    failed = 0
+    for label, text in jobs:
+        try:
+            mapped.append((label, message_to_bundle(text, registry)))
+        except MappingError as exc:
+            # A field position and a fixed reason, never a value.
+            print(f"error: {label}: {exc}", file=sys.stderr)
+            failed += 1
+
+    if out_dir is not None:
+        names = [_bundle_name(label) for label, _ in mapped]
+        if len(set(names)) != len(names):
+            raise UsageError("two inputs would be written to the same file name.")
+        for name, (_, result) in zip(names, mapped, strict=True):
+            try:
+                # Exclusive create: an existing file is never overwritten.
+                with open(out_dir / name, "x", encoding="utf-8", newline="\n") as fh:
+                    fh.write(_bundle_text(result))
+            except FileExistsError:
+                raise UsageError(
+                    f"{out_dir / name} already exists; to-fhir never overwrites a file.",
+                    hint="Pass --out with a new folder.",
+                ) from None
+        print(f"wrote {len(mapped)} Bundle(s) to {out_dir}", file=sys.stderr)
+    elif not args.post:
+        for _, result in mapped:
+            sys.stdout.write(_bundle_text(result))
+
+    if args.post and mapped:
+        _post_bundles(args, mapped)
+    if failed:
+        print(f"{failed} of {len(jobs)} message(s) could not be mapped", file=sys.stderr)
+    return EXIT_FINDINGS if failed else EXIT_OK
+
+
+def _post_bundles(args: argparse.Namespace, mapped: list[tuple[str, MappedMessage]]) -> None:
+    """Post each Bundle as one transaction, in order. The first one the
+    server does not fully commit stops the run: later messages can depend
+    on it. What was committed before it has been printed."""
+    base, named = _fhir_base(args)
+    if not named:
+        raise UsageError(
+            "to-fhir --post writes to a FHIR server, so it needs one named.",
+            hint=f"Pass --fhir-base URL or set {FHIR_BASE_ENV}.",
+        )
+    headers = _fhir_headers()
+    _warn_plain_http(base, headers)
+    with HapiClient(base, extra_headers=headers) as client:
+        _require_metadata(client, base)
+        for label, result in mapped:
+            entries = client.transaction(result.bundle)
+            counts = Counter(f"{kind} {code}" for kind, code in entries)
+            summary = ", ".join(f"{key} x{n}" if n > 1 else key for key, n in counts.items())
+            print(f"{label}: committed ({summary})")
 
 
 def cmd_lint(args: argparse.Namespace) -> int:
@@ -367,26 +533,47 @@ def _read_ack(raw: bytes) -> _AckView:
     )
 
 
-def cmd_send(args: argparse.Namespace) -> int:
-    root = _message_path(args)
-    paths = hl7_files(root)
-    payloads: list[bytes] = []
-    for path in paths:
-        payload, converted = _to_cr(path.read_bytes())
-        if converted:
-            print(
-                f"note: {display_key(path, root)} uses LF line ends; converted to CR for sending."
-            )
-        payloads.append(payload)
+@dataclass(frozen=True, slots=True)
+class _Outgoing:
+    """One message to send: its label in the results, its bytes, and the
+    command to suggest when it is not accepted."""
 
+    label: str
+    payload: bytes
+    next_step: str
+
+
+def _warn_not_loopback(host: str) -> None:
+    if host not in LOOPBACK_HOSTS:
+        print(
+            f"warning: sending to {host}, which is not loopback. MLLP has no encryption;"
+            " anyone on the network path can read these messages.",
+            file=sys.stderr,
+        )
+
+
+def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) -> int:
+    """Send in order, one ACK at a time, then print the results. Shared by
+    ``send`` and ``replay``. Exit 1 when any ACK differs from ``--expect``
+    or one is missing; 3 when the listener does not answer in time."""
+    _warn_not_loopback(args.host)
     acks: list[bytes] = []
     where = f"{args.host}:{args.port}"
+    interval = 1.0 / args.rate if args.rate else 0.0
+    payloads = [o.payload for o in outgoing]
     try:
         asyncio.run(
-            send_messages(args.host, args.port, payloads, ack_timeout_s=args.timeout, acks=acks)
+            send_messages(
+                args.host,
+                args.port,
+                payloads,
+                ack_timeout_s=args.timeout,
+                acks=acks,
+                interval_s=interval,
+            )
         )
     except TimeoutError:
-        _print_send_results(root, paths, acks)
+        _print_send_results(outgoing, acks, source, args.expect)
         raise NetworkError(
             f"no ACK from {where} within {args.timeout:g} s."
             " The message may or may not have been processed."
@@ -398,23 +585,39 @@ def cmd_send(args: argparse.Namespace) -> int:
             hint="Try: hl7bridge listen",
         ) from None
     except (ConnectionError, OSError) as exc:
-        _print_send_results(root, paths, acks)
+        _print_send_results(outgoing, acks, source, args.expect)
         raise NetworkError(
             f"the connection to {where} broke ({type(exc).__name__})"
             f" after {len(acks)} of {len(payloads)} ACKs."
         ) from None
-    return _print_send_results(root, paths, acks)
+    return _print_send_results(outgoing, acks, source, args.expect)
 
 
-def _print_send_results(root: Path, paths: list[Path], acks: list[bytes]) -> int:
+def cmd_send(args: argparse.Namespace) -> int:
+    outgoing: list[_Outgoing] = []
+    for item in _inputs(args):
+        payload, converted = _to_cr(item.data)
+        if converted:
+            print(f"note: {item.name} uses LF line ends; converted to CR for sending.")
+        hint = f"hl7bridge lint {item.path}" if item.path else "hl7bridge explain -"
+        outgoing.append(_Outgoing(item.name, payload, hint))
+    source = STDIN_NAME if _reads_stdin(args) else str(_message_path(args))
+    # --repeat sends the same bytes again, never restamped: a listener that
+    # keys on the control id answers AA and stores nothing new.
+    return _transmit(args, outgoing * args.repeat, source)
+
+
+def _print_send_results(
+    outgoing: list[_Outgoing], acks: list[bytes], source: str, expect: str
+) -> int:
     counts: Counter[str] = Counter()
-    for path, raw in zip(paths, acks, strict=False):
+    for item, raw in zip(outgoing, acks, strict=False):
         view = _read_ack(raw)
         counts[view.code] += 1
         if view.code == "AA":
             continue
         words = ACK_CODE_WORDS.get(view.code, "not a known ACK code")
-        print(f"{display_key(path, root)}: {view.code} ({words})")
+        print(f"{item.label}: {view.code} ({words})")
         if view.text:
             print(f"  MSA-3: {view.text}")
         if view.err:
@@ -422,12 +625,107 @@ def _print_send_results(root: Path, paths: list[Path], acks: list[bytes]) -> int
         reason = view.text.split(":", 1)[0].strip()
         if reason in ALL_REASONS:  # only hl7bridge's own reason codes
             print(f"  quarantine reason: {reason}")
-        print(f"  next: hl7bridge lint {path}")
-    print(f"sent {len(paths)} message(s) from {root}, got {len(acks)} ACK(s)")
+        print(f"  next: {item.next_step}")
+    print(f"sent {len(outgoing)} message(s) from {source}, got {len(acks)} ACK(s)")
     for code in sorted(counts):
         print(f"  {code}: {counts[code]}")
-    rejected = sum(n for code, n in counts.items() if code != "AA")
-    return EXIT_FINDINGS if rejected or len(acks) != len(paths) else EXIT_OK
+    if expect != "AA":
+        print(f"  expected {expect}: {counts[expect]} of {len(outgoing)}")
+    unexpected = sum(n for code, n in counts.items() if code != expect)
+    return EXIT_FINDINGS if unexpected or len(acks) != len(outgoing) else EXIT_OK
+
+
+REPLAY_SOURCES = ("quarantine", "store")
+NOT_REPLAYED = "mllp_junk"  # bytes received outside framing are not a message
+
+
+def _readonly_db(args: argparse.Namespace) -> sqlite3.Connection:
+    """The store, opened read-only: replay never writes to it."""
+    path = _db_path(args)
+    state, version = inspect_db(path)
+    if state == "missing":
+        raise UsageError(f"no database at {path}.", hint="Pass --db with the database file.")
+    if state == "old_schema":
+        raise UsageError(schema_mismatch_message(str(path), version))
+    if state != "ok":
+        raise UsageError(f"{path} is not an hl7bridge database.")
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _replay_rows(args: argparse.Namespace, conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    where: list[str] = []
+    params: list[object] = []
+    if args.source == "quarantine":
+        query = "SELECT id, hospital_id, reason AS kind, received_at_utc, raw FROM quarantine"
+        where.append("reason != ?")
+        params.append(NOT_REPLAYED)
+        if args.only_reason:
+            where.append("reason = ?")
+            params.append(args.only_reason)
+    else:
+        query = "SELECT id, hospital_id, message_type AS kind, received_at_utc, raw FROM messages"
+    if args.since:
+        where.append("received_at_utc >= ?")
+        params.append(utc_iso(_now_arg(args.since)))
+    if args.hospital:
+        where.append("hospital_id = ?")
+        params.append(args.hospital)
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    query += " ORDER BY received_at_utc, id"
+    if args.limit:
+        query += " LIMIT ?"
+        params.append(args.limit)
+    return conn.execute(query, params).fetchall()
+
+
+def _stored_bytes(raw: object) -> bytes:
+    """The exact stored message: a replay never restamps MSH-7 or MSH-10."""
+    if isinstance(raw, (bytes, memoryview)):
+        return bytes(raw)
+    return str(raw).encode("utf-8")
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    if args.only_reason:
+        if args.source != "quarantine":
+            raise UsageError("--only-reason applies to --from quarantine only.")
+        if args.only_reason not in ALL_REASONS or args.only_reason == NOT_REPLAYED:
+            known = ", ".join(sorted(ALL_REASONS - {NOT_REPLAYED}))
+            raise UsageError(
+                "--only-reason takes one of hl7bridge's quarantine reason codes.",
+                hint=f"Known: {known}.",
+            )
+    if args.since:
+        _now_arg(args.since)  # a bad time is a usage error before anything opens
+    conn = _readonly_db(args)
+    try:
+        rows = _replay_rows(args, conn)
+    finally:
+        conn.close()
+    label = "quarantine" if args.source == "quarantine" else "message"
+    if not rows:
+        print(f"nothing to replay from the {args.source}")
+        return EXIT_OK
+    if args.dry_run:
+        for row in rows:
+            print(
+                f"{label} #{row['id']}  {row['received_at_utc']}  {row['hospital_id'] or '-'}"
+                f"  {row['kind']}  {len(_stored_bytes(row['raw']))} bytes"
+            )
+        print(f"{len(rows)} message(s) would be sent, oldest first (dry run: nothing sent)")
+        return EXIT_OK
+    outgoing = [
+        _Outgoing(
+            f"{label} #{row['id']}",
+            _stored_bytes(row["raw"]),
+            f"hl7bridge replay --dry-run --from {args.source}",
+        )
+        for row in rows
+    ]
+    return _transmit(args, outgoing, f"the {args.source}")
 
 
 def cmd_synth(args: argparse.Namespace) -> int:
@@ -784,7 +1082,6 @@ class Command:
     summary: str
     func: Callable[[argparse.Namespace], int]
     examples: tuple[str, ...]
-    old_name: str | None = None
 
 
 COMMANDS: tuple[Command, ...] = (
@@ -814,6 +1111,17 @@ COMMANDS: tuple[Command, ...] = (
         ("hl7bridge doctor", "hl7bridge doctor --port 2576 --json"),
     ),
     Command(
+        "explain",
+        "Messages",
+        "print a message one field per line, with field names",
+        cmd_explain,
+        (
+            "hl7bridge explain hl7bridge/samples/03_hospa_oru_r01_final.hl7",
+            "hl7bridge explain a.hl7 --all",
+            "hl7bridge explain hl7bridge/samples --json",
+        ),
+    ),
+    Command(
         "lint",
         "Messages",
         "check messages against the hospital profiles",
@@ -823,9 +1131,25 @@ COMMANDS: tuple[Command, ...] = (
     Command(
         "send",
         "Messages",
-        "send one file or a folder over MLLP and show the ACKs",
+        "send a file, a folder or stdin over MLLP and show the ACKs",
         cmd_send,
-        ("hl7bridge send hl7bridge/samples", "hl7bridge send a.hl7 --port 2576 --timeout 5"),
+        (
+            "hl7bridge send hl7bridge/samples",
+            "hl7bridge send a.hl7 --port 2576 --timeout 5",
+            "hl7bridge send a.hl7 --repeat 3 --rate 2",
+            "hl7bridge send broken.hl7 --expect AE",
+        ),
+    ),
+    Command(
+        "replay",
+        "Messages",
+        "resend quarantined or stored messages, oldest first",
+        cmd_replay,
+        (
+            "hl7bridge replay --dry-run",
+            "hl7bridge replay --only-reason missing_accession --port 2576",
+            "hl7bridge replay --from store --since 2026-10-07T00:00:00+00:00 --rate 5",
+        ),
     ),
     Command(
         "synth",
@@ -840,7 +1164,6 @@ COMMANDS: tuple[Command, ...] = (
         "run the MLLP listener",
         cmd_listen,
         ("hl7bridge listen", "hl7bridge listen --port 2576 --db data/bridge.db"),
-        old_name="serve",
     ),
     Command(
         "reconcile",
@@ -871,12 +1194,22 @@ COMMANDS: tuple[Command, ...] = (
         ("hl7bridge summary", "hl7bridge summary --db data/bridge.db --json"),
     ),
     Command(
+        "to-fhir",
+        "FHIR",
+        "convert messages to FHIR transaction Bundles (JSON, or --post)",
+        cmd_to_fhir,
+        (
+            "hl7bridge to-fhir hl7bridge/samples/14_hospa_oru_r01_structured.hl7",
+            "hl7bridge to-fhir hl7bridge/samples --out bundles",
+            "hl7bridge to-fhir a.hl7 --post --fhir-base http://localhost:8080/fhir",
+        ),
+    ),
+    Command(
         "fhir sync",
         "FHIR",
         "post the store to a FHIR server",
         cmd_fhir_sync,
         ("hl7bridge fhir sync --fhir-base http://localhost:8080/fhir",),
-        old_name="fhir-sync",
     ),
     Command(
         "fhir probe",
@@ -884,7 +1217,6 @@ COMMANDS: tuple[Command, ...] = (
         "read-only server check: capability statement and resource counts",
         cmd_fhir_probe,
         ("hl7bridge fhir probe", "hl7bridge fhir probe --fhir-base https://example.test/fhir"),
-        old_name="fhir-probe",
     ),
     Command(
         "load studies",
@@ -892,7 +1224,6 @@ COMMANDS: tuple[Command, ...] = (
         "load DICOM study metadata into the store",
         cmd_load_studies,
         ("hl7bridge load studies --dicom data/synth/dicom",),
-        old_name="load-studies",
     ),
     Command(
         "load outbound",
@@ -900,7 +1231,6 @@ COMMANDS: tuple[Command, ...] = (
         "load the outbound report log into the store",
         cmd_load_outbound,
         ("hl7bridge load outbound --path data/synth/outbound_reports.jsonl",),
-        old_name="load-outbound",
     ),
     Command(
         "profile show",
@@ -1009,9 +1339,58 @@ def _add_now(p: argparse.ArgumentParser) -> None:
     p.add_argument("--now", default=None, help="report time, ISO 8601 with offset (default: now)")
 
 
-def _add_message_path(p: argparse.ArgumentParser) -> None:
-    p.add_argument("path", nargs="?", help="an .hl7 file, or a folder searched for *.hl7")
+def _add_message_path(p: argparse.ArgumentParser, *, stdin: bool = False) -> None:
+    text = "an .hl7 file, or a folder searched for *.hl7"
+    p.add_argument("path", nargs="?", help=f"{text}, or - for stdin" if stdin else text)
     p.add_argument("--dir", help=argparse.SUPPRESS)  # the 0.2 spelling
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a whole number") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"{number} is not 1 or more")
+    return number
+
+
+def _rate(value: str) -> float:
+    try:
+        rate = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not 0 < rate <= 1000:
+        raise argparse.ArgumentTypeError(f"{value} is not more than 0 and at most 1000")
+    return rate
+
+
+ACK_CODES = ("AA", "AE", "AR", "CA", "CE", "CR")
+
+
+def _add_sender(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--host", default="127.0.0.1", help="listener host (default: 127.0.0.1)")
+    p.add_argument("--port", type=_port, default=2575, help="listener port (default: 2575)")
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        metavar="SECONDS",
+        help="wait this long for each ACK (default: 10)",
+    )
+    p.add_argument(
+        "--rate",
+        type=_rate,
+        default=None,
+        metavar="PER_SECOND",
+        help="send at most this many messages a second (default: as fast as ACKs come)",
+    )
+    p.add_argument(
+        "--expect",
+        choices=ACK_CODES,
+        default="AA",
+        help="exit 1 when any ACK code differs from this one (default: AA)",
+    )
 
 
 def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
@@ -1059,16 +1438,50 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         _add_message_path(p)
         _add_config(p)
         _add_json(p)
+    elif name == "explain":
+        _add_message_path(p, stdin=True)
+        p.add_argument("--all", action="store_true", help="show empty fields and components too")
+        _add_json(p)
     elif name == "send":
-        _add_message_path(p)
-        p.add_argument("--host", default="127.0.0.1", help="listener host (default: 127.0.0.1)")
-        p.add_argument("--port", type=_port, default=2575, help="listener port (default: 2575)")
+        _add_message_path(p, stdin=True)
+        _add_sender(p)
         p.add_argument(
-            "--timeout",
-            type=float,
-            default=10.0,
-            metavar="SECONDS",
-            help="wait this long for each ACK (default: 10)",
+            "--repeat",
+            type=_positive_int,
+            default=1,
+            metavar="N",
+            help="send the whole set N times, unchanged (default: 1)",
+        )
+    elif name == "replay":
+        _add_db(p)
+        p.add_argument(
+            "--from",
+            dest="source",
+            choices=REPLAY_SOURCES,
+            default="quarantine",
+            help="what to resend (default: quarantine)",
+        )
+        p.add_argument(
+            "--only-reason", metavar="REASON", help="only quarantine rows with this reason code"
+        )
+        p.add_argument(
+            "--since", metavar="TIME", help="only rows received at or after this time (ISO 8601)"
+        )
+        p.add_argument("--hospital", metavar="ID", help="only rows for this hospital id")
+        p.add_argument("--limit", type=_positive_int, metavar="N", help="at most N rows")
+        p.add_argument(
+            "--dry-run", action="store_true", help="list what would be sent and send nothing"
+        )
+        _add_sender(p)
+    elif name == "to-fhir":
+        _add_message_path(p, stdin=True)
+        _add_config(p)
+        p.add_argument("--out", metavar="DIR", help="write one Bundle per message into a folder")
+        p.add_argument(
+            "--post", action="store_true", help="post each Bundle to a FHIR server, in order"
+        )
+        p.add_argument(
+            "--fhir-base", metavar="URL", help=f"the server for --post (default: {FHIR_BASE_ENV})"
         )
     elif name == "synth":
         p.add_argument("--out", required=True, metavar="DIR", help="output folder")
@@ -1125,18 +1538,6 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         _add_json(p)
     else:  # pragma: no cover - guarded by test_every_command_is_configured
         raise AssertionError(f"no options for {name}")
-
-
-def _deprecated(command: Command) -> Callable[[argparse.Namespace], int]:
-    def run(args: argparse.Namespace) -> int:
-        print(
-            f"warning: '{command.old_name}' is now 'hl7bridge {command.name}';"
-            f" the old name goes away in {REMOVED_IN}.",
-            file=sys.stderr,
-        )
-        return command.func(args)
-
-    return run
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1199,9 +1600,6 @@ def build_parser() -> argparse.ArgumentParser:
             leaf(nested[parent_name], child, command, command.func, command.name)
         else:
             leaf(sub, command.name, command, command.func, command.name)
-    for command in COMMANDS:
-        if command.old_name:
-            leaf(sub, command.old_name, command, _deprecated(command), command.old_name)
     return parser
 
 

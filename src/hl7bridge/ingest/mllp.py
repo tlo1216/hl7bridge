@@ -128,17 +128,21 @@ async def send_messages(
     *,
     ack_timeout_s: float = 10.0,
     acks: list[bytes] | None = None,
+    interval_s: float = 0.0,
 ) -> list[bytes]:
     """Send each payload as one MLLP frame and collect the ACK responses.
 
     A missing or late ACK raises TimeoutError; silence is never success.
     Pass ``acks`` to keep the ACKs that did arrive when that happens.
+    ``interval_s`` is the pause between one ACK and the next send.
     """
     reader, writer = await asyncio.open_connection(host, port)
     if acks is None:
         acks = []
     try:
-        for payload in payloads:
+        for i, payload in enumerate(payloads):
+            if i and interval_s > 0:
+                await asyncio.sleep(interval_s)
             writer.write(encode_mllp(payload))
             await writer.drain()
             ack = await asyncio.wait_for(_read_one_frame(reader), timeout=ack_timeout_s)

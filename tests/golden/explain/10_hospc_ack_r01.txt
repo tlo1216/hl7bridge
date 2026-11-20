@@ -1,0 +1,17 @@
+MSH  message header
+  MSH-1  Field separator: |
+  MSH-2  Encoding characters: ^~\&
+  MSH-3  Sending application: EHR
+  MSH-4  Sending facility: HOSPC
+  MSH-5  Receiving application: HL7BRIDGE
+  MSH-6  Receiving facility: HUB
+  MSH-7  Message date and time: 20261007110000-0400
+  MSH-9  Message type: ACK^R01
+      MSH-9.1 message code: ACK
+      MSH-9.2 trigger event: R01
+  MSH-10 Message control id: SMPC0004
+  MSH-11 Processing id: T = training
+  MSH-12 Version: 2.5
+MSA  message acknowledgment
+  MSA-1  Acknowledgment code: AA = accepted
+  MSA-2  Message control id: OUTSMPC0001

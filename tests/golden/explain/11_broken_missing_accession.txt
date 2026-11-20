@@ -1,0 +1,42 @@
+MSH  message header
+  MSH-1  Field separator: |
+  MSH-2  Encoding characters: ^~\&
+  MSH-3  Sending application: RIS
+  MSH-4  Sending facility: HOSPB
+  MSH-5  Receiving application: HL7BRIDGE
+  MSH-6  Receiving facility: HUB
+  MSH-7  Message date and time: 20261007092000
+  MSH-9  Message type: ORM^O01
+      MSH-9.1 message code: ORM
+      MSH-9.2 trigger event: O01
+  MSH-10 Message control id: SMPB0004
+  MSH-11 Processing id: T = training
+  MSH-12 Version: 2.4
+PID  patient identification
+  PID-1  Set id: 1
+  PID-3  Patient identifier list: SB1001^^^HOSPB^MR
+      PID-3.1 id number: SB1001
+      PID-3.4 assigning authority: HOSPB
+      PID-3.5 identifier type: MR
+  PID-5  Patient name: ZZZSAMPLE^TWO
+      PID-5.1 family name: ZZZSAMPLE
+      PID-5.2 given name: TWO
+  PID-7  Date of birth: 19750315
+  PID-8  Administrative sex: M = male
+ORC  common order
+  ORC-1  Order control: NW = new order
+  ORC-2  Placer order number: PLSMPB0004
+  ORC-9  Transaction date and time: 20261007092000
+OBR  observation request
+  OBR-1  Set id: 1
+  OBR-2  Placer order number: PLSMPB0004
+  OBR-4  Universal service id: 70551^MRI BRAIN WO CONTRAST^local
+      OBR-4.1 identifier: 70551
+      OBR-4.2 text: MRI BRAIN WO CONTRAST
+      OBR-4.3 coding system: local
+  OBR-5  Priority (old): R
+  OBR-7  Observation date and time: 20261007092000
+  OBR-24 Diagnostic service section: MR
+ZBI  site-specific segment
+  ZBI-1: 1
+  ZBI-2: SYNTHBILL42

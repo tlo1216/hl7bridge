@@ -1,0 +1,82 @@
+MSH  message header
+  MSH-1  Field separator: |
+  MSH-2  Encoding characters: ^~\&
+  MSH-3  Sending application: RIS
+  MSH-4  Sending facility: HOSPA
+  MSH-5  Receiving application: HL7BRIDGE
+  MSH-6  Receiving facility: HUB
+  MSH-7  Message date and time: 20261007120000
+  MSH-9  Message type: ORU^R01
+      MSH-9.1 message code: ORU
+      MSH-9.2 trigger event: R01
+  MSH-10 Message control id: SMPA0005
+  MSH-11 Processing id: T = training
+  MSH-12 Version: 2.3
+PID  patient identification
+  PID-1  Set id: 1
+  PID-3  Patient identifier list: SA1001^^^HOSPA^MR
+      PID-3.1 id number: SA1001
+      PID-3.4 assigning authority: HOSPA
+      PID-3.5 identifier type: MR
+  PID-5  Patient name: ZZZSAMPLE^ONE
+      PID-5.1 family name: ZZZSAMPLE
+      PID-5.2 given name: ONE
+  PID-7  Date of birth: 19800101
+  PID-8  Administrative sex: F = female
+ORC  common order
+  ORC-1  Order control: RE = observations to follow
+  ORC-2  Placer order number: PLSMPA0005
+OBR  observation request
+  OBR-1  Set id: 1
+  OBR-2  Placer order number: PLSMPA0005
+  OBR-3  Filler order number: SACCA0002
+  OBR-4  Universal service id: 76700^US ABDOMEN COMPLETE^local
+      OBR-4.1 identifier: 76700
+      OBR-4.2 text: US ABDOMEN COMPLETE
+      OBR-4.3 coding system: local
+  OBR-5  Priority (old): R
+  OBR-7  Observation date and time: 20261007110000
+  OBR-22 Results report or status change time: 20261007120000
+  OBR-24 Diagnostic service section: US
+  OBR-25 Result status: F = final
+OBX  observation result
+  OBX-1  Set id: 1
+  OBX-2  Value type: NM = numeric
+  OBX-3  Observation identifier: MEAS1^Synthetic measurement^99HUB
+      OBX-3.1 identifier: MEAS1
+      OBX-3.2 text: Synthetic measurement
+      OBX-3.3 coding system: 99HUB
+  OBX-4  Observation sub-id: 1
+  OBX-5  Observation value: 12.5
+  OBX-6  Units: mm^millimeter^UCUM
+      OBX-6.1 identifier: mm
+      OBX-6.2 text: millimeter
+      OBX-6.3 coding system: UCUM
+  OBX-7  Reference range: 5-15
+  OBX-8  Abnormal flags: N = normal
+  OBX-11 Observation result status: F = final
+  OBX-14 Observation date and time: 20261007110500
+OBX 2  observation result
+  OBX-1  Set id: 2
+  OBX-2  Value type: CWE = coded with exceptions
+  OBX-3  Observation identifier: FIND1^Synthetic finding^99HUB
+      OBX-3.1 identifier: FIND1
+      OBX-3.2 text: Synthetic finding
+      OBX-3.3 coding system: 99HUB
+  OBX-4  Observation sub-id: 1
+  OBX-5  Observation value: SF01^Synthetic finding present^99HUB
+      OBX-5.1 identifier: SF01
+      OBX-5.2 text: Synthetic finding present
+      OBX-5.3 coding system: 99HUB
+  OBX-11 Observation result status: F = final
+NTE  notes and comments
+  NTE-1  Set id: 1
+  NTE-3  Comment: Synthetic note on the finding.
+OBX 3  observation result
+  OBX-1  Set id: 3
+  OBX-2  Value type: TX = text
+  OBX-3  Observation identifier: RPT^Report Text
+      OBX-3.1 identifier: RPT
+      OBX-3.2 text: Report Text
+  OBX-5  Observation value: Synthetic structured report. Measurement within range.
+  OBX-11 Observation result status: F = final

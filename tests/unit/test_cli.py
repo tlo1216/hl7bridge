@@ -164,34 +164,14 @@ def test_usage_error_from_argparse_exits_2(capsys):
 
 
 @pytest.mark.parametrize(
-    ("old", "new"),
-    [
-        (["serve"], "listen"),
-        (["fhir-sync"], "fhir sync"),
-        (["fhir-probe"], "fhir probe"),
-        (["load-studies", "--dicom", "x"], "load studies"),
-        (["load-outbound", "--path", "x"], "load outbound"),
-    ],
+    "old", ["serve", "fhir-sync", "fhir-probe", "load-studies", "load-outbound"]
 )
-def test_old_names_still_parse(old, new):
-    args = cli.build_parser().parse_args(old)
-    assert args.command == new
-
-
-def test_old_name_warns_and_runs(tmp_path, capsys, sample_db):
-    path = tmp_path / "out.jsonl"
-    line = {
-        "hospital_id": "HOSPA",
-        "control_id": "R1",
-        "accession": "SACCA0001",
-        "sent_at_utc": "2026-10-07T12:00:00+00:00",
-    }
-    path.write_text(json.dumps(line) + "\n", encoding="utf-8")
-    rc = cli.main(["load-outbound", "--db", str(sample_db), "--path", str(path)])
-    err = capsys.readouterr().err
-    assert rc == EXIT_OK
-    assert "warning: 'load-outbound' is now 'hl7bridge load outbound'" in err
-    assert "0.4.0" in err
+def test_names_deprecated_in_0_3_are_gone(old, capsys):
+    """0.3.x kept the old names with a warning; 0.4.0 removes them."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_parser().parse_args([old])
+    assert excinfo.value.code == EXIT_USAGE
+    assert "invalid choice" in capsys.readouterr().err
 
 
 # -- defaults: profiles and database ------------------------------------------------

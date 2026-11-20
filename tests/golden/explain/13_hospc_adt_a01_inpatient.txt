@@ -1,0 +1,48 @@
+MSH  message header
+  MSH-1  Field separator: |
+  MSH-2  Encoding characters: ^~\&
+  MSH-3  Sending application: ADT
+  MSH-4  Sending facility: HOSPC
+  MSH-5  Receiving application: HL7BRIDGE
+  MSH-6  Receiving facility: HUB
+  MSH-7  Message date and time: 20261007120000-0400
+  MSH-9  Message type: ADT^A01
+      MSH-9.1 message code: ADT
+      MSH-9.2 trigger event: A01
+  MSH-10 Message control id: SMPC0005
+  MSH-11 Processing id: T = training
+  MSH-12 Version: 2.5
+EVN  event type
+  EVN-1  Event type code: A01
+  EVN-2  Recorded date and time: 20261007120000-0400
+PID  patient identification
+  PID-1  Set id: 1
+  PID-3  Patient identifier list: SC1003^^^HOSPC^MR
+      PID-3.1 id number: SC1003
+      PID-3.4 assigning authority: HOSPC
+      PID-3.5 identifier type: MR
+  PID-5  Patient name: ZZZSAMPLE^FOUR^Q
+      PID-5.1 family name: ZZZSAMPLE
+      PID-5.2 given name: FOUR
+      PID-5.3 second given name or initial: Q
+  PID-7  Date of birth: 19650412
+  PID-8  Administrative sex: M = male
+  PID-11 Patient address: 1 SAMPLE WAY^^SYNTHTOWN^ZZ^00000^ZZ
+      PID-11.1 street address: 1 SAMPLE WAY
+      PID-11.3 city: SYNTHTOWN
+      PID-11.4 state or province: ZZ
+      PID-11.5 postal code: 00000
+      PID-11.6 country: ZZ
+  PID-13 Home phone: 555-0100^PRN^PH
+      PID-13.1 number: 555-0100
+      PID-13.2 use code: PRN
+      PID-13.3 equipment type: PH
+PV1  patient visit
+  PV1-1  Set id: 1
+  PV1-2  Patient class: I = inpatient
+  PV1-3  Assigned location: WARD1^101^A
+      PV1-3.1 point of care: WARD1
+      PV1-3.2 room: 101
+      PV1-3.3 bed: A
+  PV1-19 Visit number: SV0001
+  PV1-44 Admit date and time: 20261007115500-0400
