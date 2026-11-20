@@ -52,15 +52,27 @@ real deployment:
 
 ## Update, 0.4.0
 
-- The message path (`hl7bridge.v2fhir`, used by `to-fhir`) maps every OBX
-  to an Observation and posts one transaction Bundle per message, with
-  conditional-update entries and `urn:uuid` references. A transaction fits
+- The message path (`hl7bridge.v2fhir`, used by `to-fhir`) maps every
+  structured OBX to an Observation and posts one transaction Bundle per
+  message, with `urn:uuid` references. Narrative OBX (TX, FT) is the
+  report text in `conclusion` and `presentedForm`. A transaction fits
   there because one message is one unit: either all of it is committed or
   none of it is, and `to-fhir --post` checks the answer entry by entry.
-  `fhir sync` keeps the sequential upserts of decision 4.
+- Only ADT writes the Patient; ORM and ORU create it when missing
+  (`ifNoneExist`). Patient from ADT, Encounter and ServiceRequest are
+  merged into the server's current version before they are written (an
+  empty v2 field means "no change"), with `If-Match` on the version read.
+  A correction sets each Observation it no longer carries to
+  `entered-in-error`. All of this is in `fhir/post.py`.
+- `fhir sync` rebuilds Patient, Encounter, ServiceRequest, Observation and
+  DiagnosticReport from the stored messages through the same mapping and
+  the same post, one transaction per message, so the two paths write
+  identical content and never undo each other. Only ImagingStudy is still
+  built from store rows, as an upsert (decision 4).
 - Both paths share the code tables (sex, patient class, report status,
   order status) and the identifier keys, so they update the same
-  resources. Status maps follow the IG's vocabulary maps; a code outside a
+  resources. A key value holding a FHIR token special character (`,` `|`
+  `\` `$`) or a control character is refused, never escaped. Status maps follow the IG's vocabulary maps; a code outside a
   table is refused. A sex code outside table 0001 used to become
   `unknown` on the store path and is now refused, with the row skipped
   and reported.

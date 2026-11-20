@@ -12,16 +12,16 @@
 | Try it | `doctor` | Check Python, profiles, time zones, database, port and the FHIR server |
 | Messages | `explain [PATH]` | Print a message one field per line with field names, components and code meanings; `--all` shows empty fields; `-` reads stdin |
 | Messages | `lint [PATH]` | Check messages against the hospital profiles |
-| Messages | `send [PATH]` | Send a file, a folder or stdin (`-`) over MLLP and show the ACKs; `--repeat N`, `--rate PER_SECOND`, `--expect CODE` |
-| Messages | `replay` | Resend quarantined (default) or stored (`--from store`) messages, oldest first and byte for byte; `--only-reason`, `--since`, `--hospital`, `--limit`, `--dry-run` |
+| Messages | `send [PATH]` | Send a file, a folder or stdin (`-`) over MLLP, one frame per message, and show the ACKs; `--repeat N`, `--rate PER_SECOND`, `--expect CODE` |
+| Messages | `replay` | Resend quarantined (default) or stored (`--from store`) messages, oldest first, byte for byte and each distinct one once; reads a version 2 or 3 store; `--only-reason`, `--since`, `--hospital`, `--limit`, `--dry-run` |
 | Messages | `synth --out DIR` | Generate a synthetic day with a defect manifest |
 | Listener | `listen` | Run the MLLP listener |
 | Reports | `reconcile` | Orders versus imaging studies |
 | Reports | `ack-report` | Delivery status of outbound reports |
 | Reports | `tat --month YYYY-MM` | Turnaround-time statistics |
 | Reports | `summary` | Message and quarantine counters |
-| FHIR | `to-fhir [PATH]` | Convert messages to FHIR transaction Bundles: print one, `--out DIR` for several, `--post` to send them |
-| FHIR | `fhir sync` | Post the store to a FHIR server |
+| FHIR | `to-fhir [PATH]` | Convert messages to FHIR transaction Bundles: print one, `--out DIR` for several, `--post` to send them (`--skip-failures` to post when some do not map) |
+| FHIR | `fhir sync` | Post the store to a FHIR server, rebuilt from the stored messages as `to-fhir --post` would |
 | FHIR | `fhir probe` | Read-only server check |
 | Data | `load studies --dicom DIR` | Load DICOM study metadata |
 | Data | `load outbound --path FILE` | Load the outbound report log |
@@ -145,9 +145,17 @@ could do that print only their class name.
 | Bad month | The usage line, then `error: argument --month: '2026-13' is not a month in the form YYYY-MM` (exit 2) |
 | Missing input file | `error: --path missing.jsonl is not a file.` (and `--dicom DIR is not a folder.`) |
 | Not loopback (`send`, `replay`) | `warning: sending to 192.0.2.10, which is not loopback. MLLP has no encryption; anyone on the network path can read these messages.` |
-| `send --expect AE` | A summary line `  expected AE: 1 of 1`; exit 1 when any ACK differs |
+| `send --expect AE` | A summary line `  expected AE: 1 of 1`; exit 1 when any ACK differs. Each ACK other than the expected code is listed |
+| `send`, input not HL7 | `error: x.hl7 does not start with an MSH segment; nothing sent.` |
+| Replay of a retried message | `skipping 1 duplicate(s): the same bytes as an older row` (the oldest copy is sent) |
+| Bad `--since` | `error: --since 'yesterday' is not an ISO 8601 timestamp.` |
 | Message not HL7 (`explain`) | `error: bad.hl7: not parseable as HL7 v2.` (exit 1; nothing from the file is quoted) |
 | Mapping refused (`to-fhir`) | `error: a.hl7: PID-8: code not in table 0001 (administrative sex); refusing to guess` (the field position and a fixed reason, never the value; exit 1) |
+| Key with a search character | `error: a.hl7: PID-3: holds a character that cannot be part of a FHIR search key` |
+| Bad escape | `error: a.hl7: OBX-5: holds a malformed escape sequence` |
+| Not UTF-8 (`to-fhir`) | `error: bad.hl7: not valid UTF-8; not converted.` (`explain` shows such bytes as U+FFFD instead) |
+| `--post` with a failure | `nothing posted: 1 message(s) could not be mapped; fix them, or pass --skip-failures to post the rest.` (exit 1) |
+| Older report after a newer one | `error: b.hl7 holds an older version of the same report as a.hl7 (OBR-22, then OBR-25); posting it after would undo the newer one. Post the messages in the order they were sent, or leave the older one out.` (nothing posted) |
 | Several messages, no `--out` | `error: 15 messages need a folder for their Bundles. Pass --out DIR, or --post to send them.` |
 | Bundle file exists | `error: bundles/a.json already exists; to-fhir never overwrites a file. Pass --out with a new folder.` |
 | `to-fhir --post` with no server | `error: to-fhir --post writes to a FHIR server, so it needs one named. Pass --fhir-base URL or set HL7BRIDGE_FHIR_BASE.` |

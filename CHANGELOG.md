@@ -13,10 +13,81 @@ profile format may still change between minor versions.
   `fhir-probe`, `load-studies` and `load-outbound` now exit 2 as unknown
   commands. Use `listen`, `fhir sync`, `fhir probe`, `load studies` and
   `load outbound`. `scripts/demo.sh` is removed; use `hl7bridge demo`.
-- The database schema is version 3 (a visits table, the report's own
-  OBR-4 code and OBR-7 time, and a reference to the stored message on
-  every report row). There is still no migration: a version 2 database
-  gives the "old schema" message, and demo databases can be made again.
+- The database schema is version 3. New: the `encounters` table (PV1 of
+  A01, A04 and A08 by PV1-19, with `last_message_id`); on `reports`, the
+  report's own OBR-4 (`procedure_code`, `procedure_description`,
+  `code_system`), its OBR-7 time (`observed_at_utc`) and `message_id`, the
+  `messages` row it came from; on `report_events`, `message_id`. The
+  `messages` and `quarantine` tables did not change. There is still no
+  migration: a version 2 database gives the "old schema" message for every
+  command except `replay`, which reads it so its messages can be resent
+  into a new store. Demo databases can be made again.
+- `fhir sync` now rebuilds Patient, Encounter, ServiceRequest, Observation
+  and DiagnosticReport from the stored messages (`messages.raw`) through
+  the same mapping and post as `to-fhir --post`: every accepted ADT A01,
+  A04 and A08 and every ORM in received order, then for each report the
+  ORU it came from (`reports.message_id`). The two paths write identical
+  resources, so neither undoes the other. What this changes for sync:
+  - DiagnosticReport gains `result` (one Observation per structured OBX),
+    and `basedOn` is a logical reference by the accession identifier
+    (type ServiceRequest, ACSN) instead of `ServiceRequest/<id>`.
+  - Patient gains address and telecom from PID-11 and PID-13, and is
+    merged, never overwritten (see below). ServiceRequest from a cancel
+    keeps the NW's `authoredOn`.
+  - A message that cannot be mapped is skipped and listed by message type
+    and store row (`ADT^A08 HOSPC/message 12: PID-8: ...`), instead of a
+    patient or visit row. A message for a patient merged by A40 is left
+    out and counted, as merged patients were before.
+  - The report counts Observations, and the Observations a correction
+    retired.
+  - ImagingStudy is still built from the `studies` rows.
+  The row mappers in `hl7bridge.fhir.mapper` stay for library callers;
+  `fhir sync` uses only `imaging_study_resource` now.
+- Only ADT writes the Patient. In ORM and ORU Bundles the Patient entry is
+  a conditional create (`POST` with `ifNoneExist`): created when missing,
+  never changed, so a thin PID in a result no longer erases the address
+  and phone an ADT wrote. Patient from ADT, Encounter and ServiceRequest
+  are merged into the server's current version when posted (read by
+  identifier, the message's elements laid over it, written to
+  `<Type>/<id>` with `If-Match`): an empty v2 field means "no change", so
+  an A08 without PV1-44 keeps the admit time, and a discharge stays
+  finished. A change between the read and the write fails the transaction
+  (HAPI answers 409); more than one resource with the key is refused.
+- A corrected report that no longer carries a result sets that
+  Observation to `entered-in-error` when posted, in the same transaction;
+  Observations of another report or another system are never touched.
+  Results posted by a development build of 0.4.0 under the older key form
+  (`<accession>/<code>/<sub-id>`, `set-<n>`) are retired by the next
+  post of their report.
+- Every identifier used in a conditional URL (PID-3, PV1-19, the
+  accession, each result key part) is refused when it holds `,` `|` `\`
+  `$` or a control character, after HL7 unescaping. A comma made the
+  search an OR that could update another patient.
+- PID-3: when any repetition carries an identifier type (PID-3.5), the
+  first one typed MR is the MRN, and a typed list without MR is refused
+  (AE `missing_mrn` at ingest). Untyped PID-3 still uses the first
+  repetition. The store and the FHIR mapping use the same rule.
+- A time with no offset is read in the MSH-7 offset when MSH-7 has one,
+  then in the hospital's zone, as HL7 v2 defines it. This applies at
+  ingest (stored order and report times) and in the FHIR mapping. A date
+  with no time is written as a FHIR date where the element allows it, and
+  refused for `DiagnosticReport.issued` (an instant) instead of padded to
+  midnight.
+- `to-fhir` decodes input as strict UTF-8: a file that is not UTF-8 is an
+  error, not U+FFFD. `explain` still shows such bytes as U+FFFD.
+- `to-fhir --post` posts nothing when any message fails to map, since a
+  later message can depend on it; `--skip-failures` posts the rest. It
+  also refuses a run that would post an older version of a report (by
+  OBR-22, then OBR-25) after a newer one.
+- An ORM with more than one order (ORC and OBR pair) is refused by the
+  FHIR mapping instead of mapping the first.
+- `send` sends each message of a file or stdin in its own MLLP frame (a
+  new message starts at each MSH), and refuses input that does not start
+  with MSH. It used to put a batch file in one frame.
+- `replay` sends each distinct stored message once (the oldest copy) and
+  says how many duplicates it skipped.
+- `send --expect CODE` lists each ACK whose code differs from CODE
+  (it listed every one that was not AA).
 - `fhir sync` refuses codes it cannot map instead of defaulting them. A
   patient whose sex code is not in table 0001 used to be posted with
   gender `unknown`; it is now skipped and listed with the field and the
@@ -45,14 +116,18 @@ profile format may still change between minor versions.
   resources. PID to Patient (identifier, name, birth date, sex, address,
   telecom), PV1 to Encounter for ADT A01, A04 and A08 (one mapping; an A08
   updates the same Encounter), ORC and OBR to ServiceRequest, OBR to
-  DiagnosticReport, and every OBX to an Observation linked from
-  `DiagnosticReport.result`: NM to `valueQuantity` (UCUM only when OBX-6
-  says so), ST, TX and FT to `valueString`, CE and CWE to
-  `valueCodeableConcept`, DT, DTM and TS to `valueDateTime`, OBX-7 to the
-  reference range text, OBX-8 to interpretation, OBX-11 to status, OBX-14
-  to the effective time, and the NTE after an OBX to its note. Each result
-  is keyed `<accession>/<OBX-3.1>/<OBX-4>`, with `set-<OBX-1>` when OBX-4
-  is empty, so a resend updates in place. Codes go through tables that
+  DiagnosticReport, and every structured OBX to an Observation linked
+  from `DiagnosticReport.result`: NM to `valueQuantity` (UCUM only when
+  OBX-6 says so; the digits kept as sent), ST to `valueString`, CE and CWE
+  to `valueCodeableConcept`, DT, DTM and TS to `valueDateTime`, OBX-7 to
+  the reference range text, OBX-8 to interpretation, OBX-11 to status,
+  OBX-14 to the effective time, and the NTE after an OBX to its note.
+  Narrative OBX (TX, FT) is the report text in `conclusion` and
+  `presentedForm`, not an Observation per line. Text values and NTE-3 are
+  read a whole repetition at a time, so a stray `^` does not cut a line.
+  Each result is keyed `<accession>/<OBX-3.1>/sub/<OBX-4>`, or
+  `.../set/<OBX-1>` when OBX-4 is empty, so a resend updates in place and
+  an explicit sub-id never collides with a set id. Codes go through tables that
   follow the HL7 v2-to-FHIR IG's vocabulary maps; a code outside a table,
   an OBX-2 hl7bridge does not map, or an NM value that is not a plain
   number is refused with the field position and never guessed.
@@ -79,7 +154,15 @@ profile format may still change between minor versions.
   and an ORU with numeric, coded and text results and a note. HOSPC lists
   ADT^A01.
 - `MappingError`, whose text is built only from a field position and a
-  fixed reason; it has no argument for a value.
+  fixed reason; it has no argument for a value. A field with a malformed
+  escape sequence, a value the FHIR model refuses, and a timestamp out of
+  range are mapping errors too, with fixed reasons.
+- `hl7bridge.fhir.post`: the post `to-fhir --post` and `fhir sync` share
+  (merge, retire, the run-order check). `HapiClient.commit`,
+  `search_identifier` and `read_by_id`.
+- `hl7bridge.v2fhir.jsontext`: one JSON writer for files and posts that
+  keeps each decimal's digits (`12.50` stays `12.50`; `fhir.resources`
+  writes floats).
 - CI checks `docs/mapping.md` against the spec, runs `explain` and
   `to-fhir` from the installed wheel, and runs the new `to-fhir` HAPI
   system test beside the sync one.
@@ -92,6 +175,28 @@ profile format may still change between minor versions.
   that the folder comes from `mkdtemp` and is mode 0700 on POSIX.
 - `send_messages` takes `interval_s`, the pause between an ACK and the
   next send.
+
+### Fixed
+
+- python-hl7 logs a malformed escape sequence or a stray segment with the
+  whole field or segment text and a traceback. Its records are now
+  replaced by a fixed line on its own loggers and in the CLI handler, and
+  the FHIR mapping refuses such a field first.
+- Identifier searches and counts send `Cache-Control: no-cache`: HAPI
+  reuses a recent search result by default, so a merge could read an
+  answer from before the resource existed.
+- `fhir sync` skips an ImagingStudy whose identifier cannot be a search
+  key instead of stopping.
+- `replay --dry-run` strips control characters from stored fields, and a
+  bad `--since` names `--since` in the error (it said `--now`).
+
+### Security
+
+- SECURITY PATCH: certifi 2026.7.22 to 2026.10.23 in `uv.lock`, for
+  GHSA-6q48-6c7w-9gw2 (PYSEC-2026-4320, emSign root CAs with compromised
+  intermediate keys; fixed in 2026.10.18). certifi is a runtime dependency
+  through httpx. The build lock (`.github/requirements/build.txt`) holds
+  no certifi.
 
 ### Not changed, on purpose
 

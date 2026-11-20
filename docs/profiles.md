@@ -64,7 +64,7 @@ suggestion (`unknown key 'acession_field'. Did you mean 'accession_field'?`).
 | `fhir.identifier_systems.accession` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:accession` | The system for the accession identifier (type ACSN) on ServiceRequest, DiagnosticReport and ImagingStudy |
 | `fhir.identifier_systems.placer` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:placer` | The system for the placer order number (ORC-2, type PLAC) |
 | `fhir.identifier_systems.visit` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:visit` | The system for the visit number (PV1-19, type VN) on Encounter |
-| `fhir.identifier_systems.observation` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:observation` | The system for the result key `<accession>/<OBX-3.1>/<OBX-4 or set-N>` on Observation |
+| `fhir.identifier_systems.observation` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:observation` | The system for the result key `<accession>/<OBX-3.1>/sub/<OBX-4>` (or `.../set/<OBX-1>` when OBX-4 is empty) on Observation |
 
 Numbers may be written as integers or decimals; `profile show` prints them
 as decimals.

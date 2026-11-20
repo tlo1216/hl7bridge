@@ -6,7 +6,7 @@ orders against imaging studies, tracks delivery of the reports you send,
 reports turnaround times, and lints messages against per-hospital
 profiles. It explains a message field by field, sends and replays messages
 over MLLP, and maps ADT, orders and results to FHIR (Patient, Encounter,
-ServiceRequest, DiagnosticReport and one Observation per result), offline
+ServiceRequest, DiagnosticReport and one Observation per structured result), offline
 as transaction Bundles or straight to a server. A deterministic generator
 makes a full synthetic day of traffic with a labeled list of seeded
 defects, so every result can be checked against known answers.
@@ -186,18 +186,29 @@ unless `--all`. It reads a file, a folder or `-` for stdin, and takes
 `--json`.
 
 `to-fhir` turns each message into a FHIR transaction Bundle and prints it;
-it talks to no server. Every entry is a conditional update keyed on an
-identifier, so posting the same message twice changes nothing.
+it talks to no server. Every entry is keyed on an identifier, so posting
+the same message twice changes nothing. Only ADT writes the Patient; an
+order or a result creates it when it is missing and otherwise only refers
+to it. In HL7 v2 an empty field means "no change", so `--post` merges the
+Patient, Encounter and ServiceRequest into the server's current version
+(read, then written back with `If-Match`): a thin A08 never erases the
+address an A01 wrote. A corrected report that drops a result sets that
+Observation to `entered-in-error`. Narrative report lines (OBX-2 TX or FT)
+are the report's text, not Observations.
 `--out DIR` writes one Bundle per message (never over an existing file),
 and `--post --fhir-base URL` posts them in order and stops at the first one
 the server does not fully commit: the answer must be a
 `transaction-response` with every entry at 200 or 201, not only a 2xx
-status. What each field maps to, which page of the HL7 v2-to-FHIR guide it
+status. Nothing is posted when any message fails to map (`--skip-failures`
+posts the rest), or when a later file holds an older version of a report
+than an earlier one. `fhir sync` rebuilds the same resources from the
+stored messages through the same mapping, so the two paths agree. What each field maps to, which page of the HL7 v2-to-FHIR guide it
 follows and where hl7bridge differs is in [docs/mapping.md](docs/mapping.md),
 which is generated from the code. A code that is not in its table is
 refused with the field position; it is never guessed.
 
-`send` also reads stdin (`-`), sends a set several times with `--repeat`,
+`send` sends each message in its own MLLP frame (a file can hold several),
+reads stdin (`-`), sends a set several times with `--repeat`,
 paces itself with `--rate` (messages per second), and with `--expect AE`
 checks that a broken message is refused. `replay` resends what the store
 holds, oldest first and byte for byte:
@@ -210,7 +221,9 @@ hl7bridge replay --from store --since 2026-10-07T00:00:00+00:00 --rate 5
 
 By default it takes the quarantine (bytes that arrived outside MLLP
 framing are left out), so a message refused under an old profile can be
-sent again after the profile is fixed. It opens the store read-only and
+sent again after the profile is fixed. The same bytes quarantined twice go
+out once. It also reads a version 2 store, which is how an old store's
+messages reach a new one (there is no migration). It opens the store read-only and
 never changes a stored message: a retry carries the same MSH-7 and MSH-10.
 Neither `send` nor `replay` prints a value from the message; a host that is
 not loopback gets a warning, since MLLP has no encryption.
@@ -316,7 +329,7 @@ flowchart LR
     DB --> TRK
     DB --> MAP
     MAP -- "Patient, Encounter, ServiceRequest,<br/>DiagnosticReport, ImagingStudy<br/>(PHI: BAA-covered target in production)" --> HAPI
-    V2F["to-fhir<br/>message to transaction Bundle"] -- "plus Observation per OBX" --> HAPI
+    V2F["to-fhir<br/>message to transaction Bundle"] -- "plus Observation per structured OBX" --> HAPI
 ```
 
 Where PHI does and does not go:
