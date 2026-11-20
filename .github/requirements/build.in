@@ -1,0 +1,6 @@
+# Build tools for the pip install job in ci.yml, pinned with hashes.
+# Regenerate with:
+#   uv pip compile .github/requirements/build.in --generate-hashes --universal --python-version 3.12 -o .github/requirements/build.txt
+pip==26.3
+build==1.6.1
+hatchling==1.33.0

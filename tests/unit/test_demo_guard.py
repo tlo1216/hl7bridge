@@ -9,10 +9,14 @@ missing run.
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import shutil
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +24,7 @@ import pytest
 GUARD = Path(__file__).resolve().parents[2] / "scripts" / "demo_guard.sh"
 REPO_ROOT = GUARD.parents[1]
 MARKER = ".hl7bridge-demo"
+SHELL_MARKER_TEXT = "Created by scripts/demo.sh. Holds synthetic data only. Safe to delete."
 REQUIRE_BASH = os.environ.get("HL7BRIDGE_REQUIRE_BASH") == "1"
 GIT_BASH = Path(r"C:\Program Files\Git\bin\bash.exe")
 
@@ -155,7 +160,7 @@ def test_dotdot_component_is_refused(tmp_path, home, form, planted):
     keep = existing / "keep.txt"
     keep.write_text("keep", encoding="utf-8")
     if planted:
-        (existing / MARKER).write_text("planted", encoding="utf-8")
+        (existing / MARKER).write_text(SHELL_MARKER_TEXT + "\n", encoding="utf-8")
     result = run_guard(form, cwd=tmp_path, home=home)
     assert result.returncode != 0
     assert ".. component" in result.stderr
@@ -178,7 +183,7 @@ def test_protected_folders_are_refused_even_with_a_marker(tmp_path, home, which)
             "parent_of_cwd": cwd.parent,
             "parent_of_home": home.parent,
         }[which]
-        (target / MARKER).write_text("planted", encoding="utf-8")
+        (target / MARKER).write_text(SHELL_MARKER_TEXT + "\n", encoding="utf-8")
     sentinel = target / f"sentinel-{which}.txt"
     if which != "repo_root":
         sentinel.write_text("keep", encoding="utf-8")
@@ -202,7 +207,7 @@ def test_protected_folders_are_refused_in_another_spelling(tmp_path, home, which
     variant = _case_variant(target)
     if variant is None:
         pytest.skip("file system is case-sensitive; no second spelling exists")
-    (target / MARKER).write_text("planted", encoding="utf-8")
+    (target / MARKER).write_text(SHELL_MARKER_TEXT + "\n", encoding="utf-8")
     sentinel = target / "sentinel.txt"
     sentinel.write_text("keep", encoding="utf-8")
     result = run_guard(variant, cwd=cwd, home=home)
@@ -224,7 +229,7 @@ def test_a_file_is_refused(tmp_path, home):
 def test_link_is_refused_with_or_without_trailing_slash(tmp_path, home, suffix):
     real = tmp_path / "real"
     real.mkdir()
-    (real / MARKER).write_text("planted", encoding="utf-8")
+    (real / MARKER).write_text(SHELL_MARKER_TEXT + "\n", encoding="utf-8")
     (real / "keep.txt").write_text("keep", encoding="utf-8")
     link = tmp_path / "link"
     _make_dir_link(link, real)
@@ -233,3 +238,91 @@ def test_link_is_refused_with_or_without_trailing_slash(tmp_path, home, suffix):
     assert "symlink" in result.stderr
     assert (real / "keep.txt").exists()
     assert (real / MARKER).exists()
+
+
+def test_marker_written_by_the_python_demo_is_refused(tmp_path, home):
+    """`hl7bridge demo` deletes only the files its JSON marker lists. The
+    shell guard deletes whole folders, so it must not accept that marker."""
+    target = tmp_path / "pydemo"
+    target.mkdir()
+    (target / MARKER).write_text(json.dumps({"tool": "hl7bridge", "files": []}), encoding="utf-8")
+    keep = target / "keep.txt"
+    keep.write_text("keep", encoding="utf-8")
+    result = run_guard(target, cwd=tmp_path, home=home)
+    assert result.returncode != 0
+    assert "not written by scripts/demo.sh" in result.stderr
+    assert keep.exists()
+
+
+def test_the_shell_marker_is_written_and_accepted(tmp_path, home):
+    target = tmp_path / "demo"
+    assert run_guard(target, cwd=tmp_path, home=home).returncode == 0
+    first = (target / MARKER).read_text(encoding="utf-8").splitlines()[0]
+    assert first == SHELL_MARKER_TEXT
+
+
+def _port_open(port: int) -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.3)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _console_script() -> str:
+    """The installed ``hl7bridge`` entry point. On Windows it is a small
+    launcher .exe that starts Python as a child process: the shape of the bug."""
+    scripts = Path(sys.executable).parent
+    found = shutil.which("hl7bridge", path=str(scripts)) or shutil.which("hl7bridge")
+    assert found, "the hl7bridge console script is not installed"
+    return Path(found).as_posix()
+
+
+def test_stop_pid_ends_the_whole_process_tree(tmp_path):
+    """Reproduces the Windows case: $! is a launcher whose Python child holds
+    the port. A plain kill leaves the child listening; demo_stop_pid must
+    not. On Linux and macOS the launcher is the listener itself."""
+    assert BASH is not None, "HL7BRIDGE_REQUIRE_BASH=1 but no POSIX bash was found"
+    port = _free_port()
+    db = (tmp_path / "stop.db").as_posix()
+    script = (
+        # Backgrounding through eval, as scripts often do: then $! is a bash
+        # subshell, the launcher is its child and Python the grandchild.
+        'source "$1"; eval "$2" >"$5" 2>&1 & pid=$!; '
+        "for _ in $(seq 1 150); do "
+        '(exec 3<>"/dev/tcp/127.0.0.1/$3") 2>/dev/null && break; sleep 0.1; done; '
+        'demo_stop_pid "$pid"; echo stopped; '
+        # Check from inside the same session: once bash exits, Windows may
+        # end the orphan anyway, which would hide the bug.
+        "for _ in $(seq 1 20); do "
+        '(exec 3<>"/dev/tcp/127.0.0.1/$3") 2>/dev/null || { echo closed; exit 0; }; '
+        "sleep 0.25; done; "
+        "echo still-listening"
+    )
+    result = subprocess.run(
+        [
+            BASH,
+            "-c",
+            script,
+            "stop",
+            GUARD.as_posix(),
+            shlex.join([_console_script(), "-q", "listen", "--port", str(port), "--db", db]),
+            str(port),
+            db,
+            (tmp_path / "listen.log").as_posix(),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "stopped" in result.stdout
+    assert "closed" in result.stdout, "the listener outlived demo_stop_pid"
+    deadline = time.monotonic() + 10
+    while _port_open(port) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _port_open(port), "the listener outlived demo_stop_pid"

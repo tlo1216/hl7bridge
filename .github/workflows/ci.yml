@@ -1,7 +1,10 @@
 name: CI
 
+# Pushes to main, and pull requests. A branch with an open pull request
+# runs once (for the pull request), not twice.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -12,17 +15,24 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # One uv version everywhere. Change it here and in the Dockerfile together.
+  UV_VERSION: "0.13.9"
+
 # Actions are pinned by commit SHA; the comment names the release.
 jobs:
   checks:
-    name: format, lint, types, references
+    name: format, lint, types, references, licenses, ports
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The reference check reads every commit message.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
       - name: Sync dependencies (locked)
         run: uv sync --locked
@@ -32,8 +42,14 @@ jobs:
         run: uv run ruff check .
       - name: Mypy (strict on src and tools)
         run: uv run mypy
-      - name: Reference check
-        run: uv run python tools/check_references.py
+      - name: Reference check (tree and commit messages)
+        run: |
+          uv run python tools/check_references.py
+          uv run python tools/check_references.py --commits
+      - name: Runtime dependency licenses
+        run: uv run python tools/check_licenses.py
+      - name: Published ports are bound to 127.0.0.1
+        run: uv run python tools/check_ports.py
 
   tests:
     name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
@@ -52,6 +68,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
           python-version: ${{ matrix.python }}
       - name: Sync dependencies (locked)
@@ -76,30 +93,88 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Build the wheel, install it in a clean venv, run a smoke test
+      - name: Build the wheel with pinned tools, install it in a clean venv, smoke test
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip build
-          python -m build --wheel --outdir dist
+          # pip, build and hatchling come from a hashed lock file.
+          python -m pip install --require-hashes -r .github/requirements/build.txt
+          python -m build --wheel --no-isolation --outdir dist
           python -m venv "$RUNNER_TEMP/venv"
           if [ "$RUNNER_OS" = "Windows" ]; then BIN="$RUNNER_TEMP/venv/Scripts"; else BIN="$RUNNER_TEMP/venv/bin"; fi
           "$BIN/python" -m pip install dist/*.whl
           "$BIN/hl7bridge" --version
-          out="$RUNNER_TEMP/smoke"
-          "$BIN/hl7bridge" synth --out "$out/synth" --config config/hospitals
-          # The corpus holds seeded defects, so lint exits 1 by design.
+          # Run outside the checkout, so only what is inside the wheel is used.
+          work="$RUNNER_TEMP/smoke"
+          mkdir -p "$work" && cd "$work"
+          "$BIN/hl7bridge" init
+          "$BIN/hl7bridge" profile check
+          "$BIN/hl7bridge" doctor
+          "$BIN/hl7bridge" demo
+          "$BIN/hl7bridge" synth --out synth
+          # The corpus holds seeded defects, so lint exits 1 by design. The
+          # expected file count is read from the corpus, not hard-coded.
           status=0
-          "$BIN/hl7bridge" lint --dir "$out/synth/messages" --config config/hospitals > "$out/lint.txt" || status=$?
+          "$BIN/hl7bridge" lint synth/messages --json > lint.json || status=$?
           test "$status" -eq 1
-          grep -q "linted 139 files" "$out/lint.txt"
+          "$BIN/python" - <<'PY'
+          import json, pathlib
+          report = json.loads(pathlib.Path("lint.json").read_text())
+          files = len(list(pathlib.Path("synth/messages").rglob("*.hl7")))
+          assert report["files_checked"] == files > 0, (report["files_checked"], files)
+          assert report["error_count"] > 0
+          print(f"linted {files} files, {report['error_count']} errors (seeded)")
+          PY
+
+  readme:
+    name: README quickstart runs as written
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Sync dependencies (locked)
+        run: uv sync --locked
+      - name: README commands and CLI reference
+        run: uv run pytest tests/system/test_readme.py -q
+
+  docker:
+    name: image builds, runs as non-root, compose demo exits 0
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image (not pushed)
+        run: docker build -t hl7bridge:local .
+      - name: Runs as a non-root user
+        run: |
+          uid="$(docker run --rm --entrypoint id hl7bridge:local -u)"
+          echo "uid=$uid"
+          test "$uid" != "0"
+      - name: CLI works in the image
+        run: |
+          docker run --rm hl7bridge:local --version
+          docker run --rm hl7bridge:local demo
+      - name: Compose demo against HAPI
+        run: docker compose -f compose.demo.yaml up --build --exit-code-from demo --abort-on-container-exit
+      - name: Compose logs and clean up
+        if: always()
+        run: |
+          docker compose -f compose.demo.yaml logs --no-color | tail -n 200
+          docker compose -f compose.demo.yaml down -v
 
   fhir-system:
     name: FHIR system tests against HAPI
     runs-on: ubuntu-latest
     services:
       hapi:
-        image: hapiproject/hapi:v8.12.0-2
+        # hapiproject/hapi:v8.12.0-2, pinned by digest.
+        image: hapiproject/hapi:v8.12.0-2@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e
         ports:
           - 8080:8080
     steps:
@@ -108,6 +183,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
       - name: Sync dependencies (locked)
         run: uv sync --locked
@@ -129,3 +205,5 @@ jobs:
           HL7BRIDGE_FHIR_BASE: http://localhost:8080/fhir
           HL7BRIDGE_FHIR_REQUIRED: "1"
         run: uv run pytest tests/system/test_fhir_hapi.py -m fhir -q
+      - name: hl7bridge demo against HAPI
+        run: uv run hl7bridge demo --fhir-base http://localhost:8080/fhir

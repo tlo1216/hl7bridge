@@ -1,4 +1,4 @@
-# Deletion guard for scripts/demo.sh. Sourced, not run.
+# Deletion guard and process helper for scripts/demo.sh. Sourced, not run.
 #
 # The demo owns one disposable data folder. It proves ownership by creating
 # the folder itself with a plain mkdir, which fails if anything is already
@@ -16,6 +16,7 @@
 # Anything else stops the script with a message and deletes nothing.
 
 DEMO_MARKER=".hl7bridge-demo"
+DEMO_MARKER_TEXT="Created by scripts/demo.sh. Holds synthetic data only. Safe to delete."
 
 demo_die() {
     echo "demo.sh: $*" >&2
@@ -95,6 +96,15 @@ prepare_data_dir() {
         if [ ! -f "$real/$DEMO_MARKER" ] || [ -L "$real/$DEMO_MARKER" ]; then
             demo_die "refusing to delete $dir: it has no $DEMO_MARKER marker, so the demo did not create it. Remove it yourself or set DATA_DIR to a new folder."
         fi
+        # `hl7bridge demo` writes a JSON marker and deletes only the files it
+        # lists. This script deletes the whole folder, so it accepts only the
+        # marker it wrote itself.
+        local first_line=""
+        IFS= read -r first_line < "$real/$DEMO_MARKER" || true
+        case "$first_line" in
+            "$DEMO_MARKER_TEXT"*) ;;
+            *) demo_die "refusing to delete $dir: its $DEMO_MARKER marker was not written by scripts/demo.sh. Use hl7bridge demo with that folder, or set DATA_DIR to a new folder." ;;
+        esac
         rm -rf -- "$real"
         [ ! -e "$dir" ] || demo_die "could not remove $dir"
     fi
@@ -114,7 +124,23 @@ prepare_data_dir() {
     [ ! -L "$dir" ] || demo_die "refusing to use $dir: it is a symlink"
     (
         set -o noclobber
-        printf 'Created by scripts/demo.sh. Holds synthetic data only. Safe to delete.\n' \
-            > "$dir/$DEMO_MARKER"
+        printf '%s\n' "$DEMO_MARKER_TEXT" > "$dir/$DEMO_MARKER"
     ) || demo_die "cannot write the marker in $dir"
+}
+
+# Stop a background process started by demo.sh, and every process it
+# started. On Windows (Git Bash), $! names the launcher (uv, or the venv's
+# python.exe), and killing it leaves its Python child alive, still holding
+# the MLLP port; taskkill /T ends the whole tree.
+demo_stop_pid() {
+    local pid="$1" winpid=""
+    [ -n "$pid" ] || return 0
+    if demo_on_windows && [ -r "/proc/$pid/winpid" ]; then
+        winpid="$(cat "/proc/$pid/winpid" 2>/dev/null || true)"
+        if [ -n "$winpid" ]; then
+            taskkill //F //T //PID "$winpid" >/dev/null 2>&1 || true
+        fi
+    fi
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
 }

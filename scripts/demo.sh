@@ -4,6 +4,10 @@
 # Prereqs: uv sync; docker (for HAPI FHIR). Run from the repo root:
 #   ./scripts/demo.sh
 #
+# Without Docker or bash, `hl7bridge demo` runs the same steps in one
+# Python process, and `docker compose -f compose.demo.yaml up` runs them
+# with HAPI in containers.
+#
 # Steps: start HAPI, generate data, start the MLLP listener, replay the
 # day, load DICOM metadata and the outbound log, then print the
 # reconciliation report, the ACK report, the quarantine summary, and sync
@@ -28,7 +32,9 @@ SEED="${SEED:-42}"
 MLLP_PORT="${MLLP_PORT:-2575}"
 FHIR_BASE_GIVEN="${FHIR_BASE:+yes}"
 FHIR_BASE="${FHIR_BASE:-http://127.0.0.1:8080/fhir}"
-HAPI_IMAGE="hapiproject/hapi:v8.12.0-2"
+# Pinned by digest: the tag can be moved, the digest cannot.
+HAPI_IMAGE="hapiproject/hapi:v8.12.0-2@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e"
+PROFILES="$REPO_ROOT/src/hl7bridge/profiles"
 HAPI_CONTAINER="hl7bridge-hapi"
 
 run() { uv run hl7bridge "$@"; }
@@ -75,13 +81,15 @@ else
 fi
 
 echo "== 1. Generate synthetic day (seed=$SEED) =="
-run synth --out "$DATA_DIR/synth" --config config/hospitals --seed "$SEED"
+run synth --out "$DATA_DIR/synth" --config "$PROFILES" --seed "$SEED"
 REPORT_NOW="$(MANIFEST="$DATA_DIR/synth/manifest.json" uv run python -c 'import json,os;print(json.load(open(os.environ["MANIFEST"]))["report_now_utc"])')"
 
 echo "== 2. Start MLLP listener =="
-uv run hl7bridge serve --db "$DB" --config config/hospitals --port "$MLLP_PORT" &
+uv run hl7bridge listen --db "$DB" --config "$PROFILES" --port "$MLLP_PORT" &
 LISTENER_PID=$!
-trap 'kill "$LISTENER_PID" 2>/dev/null || true; wait "$LISTENER_PID" 2>/dev/null || true' EXIT
+# On Windows, $! is the uv wrapper; demo_stop_pid ends the whole process
+# tree, so the Python listener does not outlive the script.
+trap 'demo_stop_pid "$LISTENER_PID"' EXIT
 # Wait until our listener answers. If it exits first (port taken in the
 # meantime, bad config), stop before sending anything.
 for _ in $(seq 1 60); do
@@ -93,29 +101,30 @@ port_answers "$MLLP_PORT" || demo_die "the MLLP listener never answered on 127.0
 kill -0 "$LISTENER_PID" 2>/dev/null || demo_die "the MLLP listener exited during startup; see its message above"
 
 echo "== 3. Replay the day over MLLP =="
-run send --dir "$DATA_DIR/synth/messages" --port "$MLLP_PORT"
+# send exits 1 when any message gets AE or AR; the seeded defects do.
+run send "$DATA_DIR/synth/messages" --port "$MLLP_PORT" || [ "$?" -eq 1 ]
 
 echo "== 4. Load DICOM metadata and outbound report log =="
-run load-studies --db "$DB" --config config/hospitals --dicom "$DATA_DIR/synth/dicom"
-run load-outbound --db "$DB" --config config/hospitals --path "$DATA_DIR/synth/outbound_reports.jsonl"
+run load studies --db "$DB" --config "$PROFILES" --dicom "$DATA_DIR/synth/dicom"
+run load outbound --db "$DB" --config "$PROFILES" --path "$DATA_DIR/synth/outbound_reports.jsonl"
 
 echo "== 5. Reconciliation report (as of $REPORT_NOW) =="
-run reconcile --db "$DB" --config config/hospitals --now "$REPORT_NOW"
+run reconcile --db "$DB" --config "$PROFILES" --now "$REPORT_NOW"
 
 echo "== 6. Report delivery / ACK report =="
-run ack-report --db "$DB" --config config/hospitals --now "$REPORT_NOW"
+run ack-report --db "$DB" --config "$PROFILES" --now "$REPORT_NOW"
 
 echo "== 7. Ingest summary (quarantine counts are the seeded defects) =="
 run summary --db "$DB"
 
 echo "== 7b. Lint the raw message corpus (findings are the seeded defects) =="
-run lint --dir "$DATA_DIR/synth/messages" --config config/hospitals || true
+run lint "$DATA_DIR/synth/messages" --config "$PROFILES" || true
 
 echo "== 7c. Turnaround-time report for 2026-10 =="
-run tat --db "$DB" --config config/hospitals --month 2026-10
+run tat --db "$DB" --config "$PROFILES" --month 2026-10
 
 echo "== 8. Sync to FHIR at $FHIR_BASE =="
-run fhir-sync --db "$DB" --config config/hospitals --fhir-base "$FHIR_BASE"
+run fhir sync --db "$DB" --config "$PROFILES" --fhir-base "$FHIR_BASE"
 
 echo "== 9. Spot-check HAPI =="
 for resource in Patient ServiceRequest DiagnosticReport ImagingStudy; do
