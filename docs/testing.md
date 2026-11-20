@@ -29,8 +29,8 @@ environment.
 | `test_fhir_mapper.py`, `test_fhir_client.py` | FHIR mapping and the conditional-update client against a mock transport |
 | `test_phi_logging.py` | No PHI in logs or error text, on every path (below) |
 | `test_cli.py` | CLI behavior: `--version`, a clear message when the port is taken |
-| `test_demo_guard.py` | `scripts/demo.sh` deletes only a folder it created (needs bash; skips without it) |
-| `test_check_references.py` | The reference check catches every pattern and does not match itself |
+| `test_demo_guard.py` | `scripts/demo.sh` deletes only a folder it created: `..` paths, symlinks and junctions with or without trailing slashes, other spellings of protected folders, spaces (needs bash; skips without it unless `HL7BRIDGE_REQUIRE_BASH=1`, which CI sets) |
+| `test_check_references.py` | The reference check's matching works on stand-in words and the tool does not match itself; with `HL7BRIDGE_REFCHECK_SAMPLES` set, every real rule catches a local sample |
 
 ### The PHI gate
 
@@ -44,13 +44,23 @@ report phrase in the synthetic store, plus hand-made canaries planted in:
 - an exception message at the listener boundary,
 - FHIR server bodies that echo the request (400 OperationOutcome, 412),
   transport errors and timeouts,
-- loader input that fails validation.
+- the reason phrase, `Location` header and other headers of a real HTTP
+  server on 127.0.0.1, so httpcore's own DEBUG records are exercised,
+- invalid DICOM values (a bad UI and a bad TM), which pydicom reports
+  through both logging and `warnings`,
+- loader input that fails validation, and outbound log lines naming an
+  unknown hospital,
+- ACK text for rejected messages, and a listener boundary whose quarantine
+  write fails too.
 
 It runs ingest over the whole corpus, both loaders, a full FHIR sync through
 a mock transport (creates, updates and skipped rows), each FHIR failure,
-`fhir-probe`, and `hl7bridge fhir-sync` through `main()` with the real
-logging setup. Each test also asserts that logging happened, so none can
-pass by being silent.
+`fhir-probe`, and the CLI through `main()` with the real logging setup and
+error boundary. Error text is checked as the full formatted traceback, so a
+chained cause cannot hide a value. Each test also asserts that logging
+happened, so none can pass by being silent. An autouse fixture removes the
+hl7bridge filters from the HTTP client loggers before each test, so no test
+passes on a filter an earlier test left behind.
 
 ## System tests (`tests/system/`)
 

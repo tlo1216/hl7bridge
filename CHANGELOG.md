@@ -10,12 +10,35 @@ profile format may still change between minor versions.
 ### Security
 
 - Patient identifiers no longer reach logs or error text. The CLI holds the
-  `httpx` and `httpcore` loggers at WARNING, and a filter strips the query
-  string from every URL in their records, so the MRN or accession in a FHIR
-  conditional-update URL is never printed, even at DEBUG.
-- Pipeline log lines carry the store row id and a 12-digit hash of MSH-10
-  instead of MSH-10 itself. Sender-written message types outside the
+  `httpx`, `httpcore` and `pydicom` loggers at WARNING. HTTP client records,
+  from `httpx`, `httpcore` and every logger below them, are rebuilt from a
+  safe field list (method, URL with no query or user info, HTTP version,
+  status, trace event name), so reason phrases and headers such as
+  `Location` are never printed, even at DEBUG. The filter sits on those
+  loggers and on the CLI's handler. Every other record loses URL queries
+  and user info, its traceback included.
+- Pipeline log lines carry the store row id instead of MSH-10. MSH-10 is
+  not logged in any form. Sender-written message types outside the
   hospital profile are not logged.
+- The CLI has one error boundary: each failure prints a single line, with
+  no chained cause. Errors whose text can quote input print the class name
+  and stack frames only. Loader and FHIR client errors are raised without
+  a chained cause.
+- pydicom's validation messages (logging and `warnings`) are captured while
+  a DICOM file is read and turned into a loader error that names the
+  hospital folder and file position, not the value or the file name.
+- ACKs for rejected messages carry the reason code and the field name in
+  MSA-3, never the rejected value. The MSH-9 trigger is echoed only when
+  well formed.
+- OperationOutcome issue codes outside the FHIR IssueType value set print
+  as `unrecognized-code`.
+- User names and passwords in a `--fhir-base` URL are never printed.
+- `load-outbound` now takes `--config` and rejects lines that name an
+  unconfigured hospital. `ack-report` counts outbound reports for a
+  hospital no longer configured in an `UNCONFIGURED HOSPITAL` line instead
+  of failing with the control id in the message.
+- The listener answers AR even when the quarantine write fails too, and
+  logs only type names for both failures.
 - `FhirPostError` text holds the status, the URL path and a fixed reason. The
   URL query and the server body are kept on the object, never in the
   message. The CLI prints OperationOutcome issue codes only.
@@ -26,7 +49,11 @@ profile format may still change between minor versions.
   in the report on stdout.
 - Loader errors no longer quote the values they rejected.
 - `scripts/demo.sh` publishes HAPI on 127.0.0.1 only, and deletes its data
-  folder only if the folder holds the marker file the script wrote.
+  folder only if the folder holds the marker file the script wrote. It
+  creates that folder with a plain `mkdir` before marking it, refuses `..`
+  components and symlinks with trailing slashes, compares protected folders
+  by file identity, and stops if the MLLP port is taken or an unknown FHIR
+  server answers at the default address.
 
 ### Added
 
@@ -36,7 +63,9 @@ profile format may still change between minor versions.
   `docs/testing.md`.
 - `LICENSE` (Apache-2.0), `NOTICE`, `CONTRIBUTING.md`, `SECURITY.md`, issue
   and pull request templates.
-- CI on Ubuntu, Windows and macOS.
+- CI: checks on Ubuntu; tests on Ubuntu and Windows for every push and
+  pull request, plus macOS for pushes to `main` and manual runs; the demo
+  guard tests may not skip in CI.
 
 ### Changed
 

@@ -41,8 +41,15 @@ python -m pip install -e .
 hl7bridge --version
 ```
 
-If PowerShell will not run `Activate.ps1`, skip it and call
-`.venv\Scripts\hl7bridge.exe` instead of `hl7bridge`.
+If PowerShell will not run `Activate.ps1`, skip activation and name the
+venv's own Python for the install, so the package lands in `.venv`:
+
+```
+.venv\Scripts\python.exe -m pip install -e .
+.venv\Scripts\hl7bridge.exe --version
+```
+
+Then call `.venv\Scripts\hl7bridge.exe` instead of `hl7bridge`.
 
 ### Without uv, macOS or Linux
 
@@ -94,7 +101,7 @@ Git ignores. Run them from the repo root.
 
    ```
    hl7bridge load-studies --db data/quick/bridge.db --config config/hospitals --dicom data/quick/synth/dicom
-   hl7bridge load-outbound --db data/quick/bridge.db --path data/quick/synth/outbound_reports.jsonl
+   hl7bridge load-outbound --db data/quick/bridge.db --config config/hospitals --path data/quick/synth/outbound_reports.jsonl
    hl7bridge summary --db data/quick/bridge.db
    hl7bridge reconcile --db data/quick/bridge.db --config config/hospitals --now 2026-10-08T12:00:00+00:00
    hl7bridge ack-report --db data/quick/bridge.db --config config/hospitals --now 2026-10-08T12:00:00+00:00
@@ -127,12 +134,22 @@ It prints:
 Safety notes for the demo script:
 
 - It publishes HAPI on `127.0.0.1:8080` only, never on other interfaces.
+- It stops before sending anything if another program already listens on
+  the MLLP port (`MLLP_PORT`, default 2575), and if its own listener does
+  not come up.
+- It reuses a FHIR server that already answers only when that server is
+  its own `hl7bridge-hapi` container or you set `FHIR_BASE` yourself.
+  Otherwise it stops rather than write synthetic patients into someone
+  else's server.
 - Its data folder (`DATA_DIR`, default `data/demo`) is disposable and owned
-  by the script. The script writes a `.hl7bridge-demo` marker file in it
-  and deletes the folder on the next run only if that marker is there. It
-  refuses symlinks, your home folder, the repo root and the current folder.
-  If you ran an older version of the script, delete `data/demo` yourself
-  once.
+  by the script. The script creates the folder itself, which fails if
+  anything is already there, writes a `.hl7bridge-demo` marker file in it,
+  and deletes the folder on a later run only if that marker is there. It
+  refuses paths with a `..` component, symlinks (with or without a trailing
+  slash), drive roots, and your home folder, the repo root, the current
+  folder or any folder that holds one of them, compared by file identity
+  so another spelling of the same folder is refused too. If you ran an
+  older version of the script, delete `data/demo` yourself once.
 
 ## Architecture: the boundaries data crosses
 
@@ -172,7 +189,7 @@ flowchart LR
     MLLP --> ACK
     ACK -- "AA" --> DB
     ACK -- "AE / AR + reason" --> Q
-    ACK -. "ACK back to sender<br/>(control IDs only, no PHI)" .-> RIS_A
+    ACK -. "ACK back to sender<br/>(routing fields, codes, field names)" .-> RIS_A
     DB --> REC
     DB --> TRK
     DB --> MAP
@@ -185,17 +202,21 @@ Where PHI does and does not go:
 | --- | --- | --- |
 | Hospital to MLLP listener | Yes | VPN or TLS in any real deployment |
 | Store (SQLite) and quarantine | Yes | Quarantine keeps raw bytes for diagnosis |
-| ACKs back to hospitals | No | Control IDs, codes and reason text only |
+| ACKs back to hospitals | No new PHI | The sender's own routing fields (MSH-3, MSH-4, MSH-10) echoed back, the ACK code, and MSA-3 text that is a reason code plus a field name (`bad_timestamp: PID-7`), never the rejected value |
 | Reports on stdout | Yes | Reports are the product: they name accessions, MRNs and study UIDs |
-| Log output and error text | **Never** | Store row ids, a short hash of MSH-10, hospital ids, configured message types, counts and reason codes; URL queries are stripped and HTTP client logs are held at WARNING; enforced by `tests/unit/test_phi_logging.py` |
+| Log output and error text | **Never** | Store row ids, hospital ids, configured message types, counts and reason codes. MSH-10 is not logged, not even as a hash. HTTP client records are rebuilt from safe fields (method, URL with no query or user info, version, status); pydicom's own messages are captured and replaced; the CLI prints one sanitized line per error and no chained causes. Enforced by `tests/unit/test_phi_logging.py` |
 | FHIR server | Yes | BAA-covered, access-controlled target in production |
 
 The PHI test captures the root logger at DEBUG, so third-party loggers
 count too, and checks ingest, the loaders, FHIR sync, FHIR failures (4xx
-bodies that echo the identifier, 412, transport errors, timeouts),
-`fhir-probe`, hostile MSH-10 and MSH-9 values, parse errors, internal
-errors and the CLI's own logging setup. Error text shows file paths you
-passed in, never values read from a message or a server response.
+bodies that echo the identifier, 412, transport errors, timeouts), a real
+HTTP server whose reason phrase and `Location` header echo the identifier,
+invalid DICOM values, `fhir-probe`, hostile MSH-10 and MSH-9 values, parse
+errors, internal errors, ACK text and the CLI's own logging and error
+handling. Error text is checked as the full traceback. It shows paths you
+passed in, never values read from a message, a DICOM file name or a server
+response. User names and passwords in a `--fhir-base` URL are never
+printed.
 
 ## ACK decision table
 
@@ -280,8 +301,11 @@ uv run python tools/check_references.py
 ```
 
 Without uv, `python -m pip install -e . pytest ruff mypy types-pyyaml`
-gives the same tools. CI runs these on Ubuntu, Windows and macOS. The
-FHIR system tests run against a HAPI container in CI; locally they skip
+gives the same tools. In CI, format, lint, type and reference checks run on
+Ubuntu. The test suite runs on Ubuntu and Windows (Python 3.12 and 3.13) for
+every push and pull request, and on macOS too for pushes to `main` and
+manual runs. The wheel install check runs on Ubuntu and Windows. The FHIR
+system tests run against a HAPI container on Ubuntu; locally they skip
 unless `HL7BRIDGE_FHIR_BASE` is set. What each test covers is in
 [docs/testing.md](docs/testing.md), and the design rules the tests enforce
 are in [docs/principles.md](docs/principles.md). Decisions are recorded in

@@ -24,12 +24,16 @@ Enforced by: `tests/unit/test_pipeline.py`, `tests/system/test_mllp_end_to_end.p
 
 ## 3. No PHI in logs or error text
 
-Log records carry store row ids, a short hash of the sender's control id,
-hospital ids, message types from configuration, counts and reason codes.
-They never carry names, MRNs, birth dates, accessions, study UIDs, report
-text or the raw control id. Error messages name a status, a path and a
-fixed reason, never a field value or a server body. HTTP client logs are
-held at WARNING and URL query strings are stripped from every record.
+Log records carry store row ids, hospital ids, message types from
+configuration, counts and reason codes. They never carry names, MRNs, birth
+dates, accessions, study UIDs, report text or the control id, not even as a
+hash: a hash of a short identifier is reversed by trying every candidate.
+Error messages name a status, a path and a fixed reason, never a field value
+or a server body, and they are raised without a chained cause that could
+quote one. The CLI prints one sanitized line per error. HTTP client records
+are rebuilt from an allowlist of safe fields, URL queries and user info are
+stripped from every other record, and pydicom's own validation messages are
+captured and replaced. ACKs name a reason code and a field, never the value.
 
 Reports printed to stdout are the product and do show identifiers such as
 accessions and MRNs.
