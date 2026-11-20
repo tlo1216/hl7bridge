@@ -201,10 +201,11 @@ def prepare(client: HapiClient, mapped: MappedMessage) -> dict[str, Any]:
     for entry in entries:
         if mapped.policies.get(entry["fullUrl"]) == MERGE:
             _merge_entry(client, entry)
-    if mapped.message_type == "ORU^R01":
-        report = next(
-            e["resource"] for e in entries if e["resource"]["resourceType"] == "DiagnosticReport"
-        )
+    report = next(
+        (e["resource"] for e in entries if e["resource"]["resourceType"] == "DiagnosticReport"),
+        None,
+    )
+    if report is not None:
         keep = {
             _key(e["resource"]) for e in entries if e["resource"]["resourceType"] == "Observation"
         }

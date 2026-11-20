@@ -353,6 +353,51 @@ def test_a_correction_retires_the_results_it_no_longer_carries(registry):
     assert not any(c.retired for c in again)
 
 
+FULL_PID = (
+    "PID|1||SA9001^^^HOSPA^MR||ZZZSAMPLE^NINE||19800101|F|||1 TEST RD^^TESTVILLE^ZZ^00000||555-0101"
+)
+THIN_PID = "PID|1||SA9001^^^HOSPA^MR||ZZZSAMPLE^NINE"
+
+
+def _with_pid(text: str, pid: str, control: str) -> str:
+    lines = [pid if line.startswith("PID|") else line for line in text.split("\r")]
+    out = "\r".join(lines)
+    return out.replace("|SMPA0002|", f"|{control}|").replace("|SMPA0003|", f"|{control}|")
+
+
+def _received_order_messages(superseded: bool) -> list[str]:
+    """No ADT. A full-PID ORU arrives first, then a thin-PID ORM. With
+    ``superseded`` the first ORU is a preliminary that a thin final replaces."""
+    first = _with_pid(_sample("03_hospa_oru_r01_final.hl7"), FULL_PID, "SMPA0901")
+    texts = [first.replace("|CR|F", "|CR|P") if superseded else first]
+    texts.append(_with_pid(_sample("02_hospa_orm_o01.hl7"), THIN_PID, "SMPA0902"))
+    if superseded:
+        texts.append(_with_pid(_sample("03_hospa_oru_r01_final.hl7"), THIN_PID, "SMPA0903"))
+    return texts
+
+
+@pytest.mark.parametrize("superseded", [False, True])
+def test_sync_and_direct_post_keep_the_same_patient(tmp_path, registry, superseded):
+    texts = _received_order_messages(superseded)
+    conn = connect(tmp_path / "order.db")
+    pipeline = IngestPipeline(registry, conn)
+    for text in texts:
+        pipeline.handle_bytes(text.encode())
+    assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == len(texts)
+    synced = _sync(conn, registry)[1]
+    conn.close()
+    direct = FakeFhir()
+    _post(direct, registry, *texts)
+    key = "urn:hl7bridge:hospa:mrn|SA9001"
+    want = direct.by_key("Patient", key)
+    got = synced.by_key("Patient", key)
+    for element in ("name", "gender", "birthDate", "address", "telecom"):
+        assert got.get(element) == want.get(element), element
+    assert got["address"][0]["city"] == "TESTVILLE"
+    report = synced.by_key("DiagnosticReport", "urn:hl7bridge:hospa:accession|SACCA0001")
+    assert report["status"] == "final"
+
+
 def test_retiring_never_touches_another_reports_or_systems_results(registry):
     server = FakeFhir()
     _post(server, registry, STRUCTURED)

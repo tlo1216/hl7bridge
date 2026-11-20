@@ -35,7 +35,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import quote
 
@@ -233,6 +233,20 @@ def _report_resources(ctx: MapContext, patient_ref: str) -> list[Resource]:
     return [*observations, report]
 
 
+def patient_only(mapped: MappedMessage) -> MappedMessage:
+    """``mapped`` cut down to its Patient entry (always the first). ``fhir
+    sync`` posts this for an ORU that a later version replaced, so the
+    Patient is created when a direct post would have created it."""
+    first = (mapped.bundle.entry or [])[0]
+    return replace(
+        mapped,
+        bundle=Bundle(type="transaction", entry=[first]),
+        policies={str(first.fullUrl): mapped.policies[str(first.fullUrl)]},
+        accession="",
+        observation_system="",
+    )
+
+
 def bundle_json(mapped: MappedMessage) -> dict[str, Any]:
     """The Bundle as a JSON-ready dict, empty elements left out, decimals
     kept as ``Decimal`` (write it with ``jsontext.dumps``)."""
@@ -249,5 +263,6 @@ __all__ = [
     "bundle_json",
     "full_url",
     "message_to_bundle",
+    "patient_only",
     "search_query",
 ]

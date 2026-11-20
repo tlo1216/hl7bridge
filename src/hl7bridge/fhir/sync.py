@@ -6,10 +6,15 @@ the same post as ``to-fhir --post`` (``hl7bridge.v2fhir`` and
 ``fhir/post.py``), so the two paths write identical content and never undo
 each other:
 
-1. every accepted ADT^A01, A04 and A08 and every ORM^O01, in the order they
-   were received, as ``to-fhir --post`` would post them (merges included);
-2. for each stored report, the ORU it came from (``reports.message_id``),
-   which is the latest version the store accepted.
+every accepted ADT^A01, A04, A08, ORM^O01 and ORU^R01, in one pass in the
+order they were received (``messages.id``), as ``to-fhir --post`` would post
+them. Only ADT changes a Patient, and ORM and ORU create it when it is
+missing, so the order across message types decides which message creates
+it: keeping the received order keeps the demographics a direct post keeps.
+For each stored report only the ORU it came from (``reports.message_id``,
+the latest version the store accepted) is posted whole. Any other ORU (an
+older version) posts its Patient entry only, at its place in the order, so
+it creates the Patient exactly when a direct post of it would have.
 
 ImagingStudy has no message; it is still built from the ``studies`` rows,
 and refers to the Patient and ServiceRequest posted above.
@@ -32,7 +37,7 @@ from dataclasses import dataclass, field
 from ..config import HospitalRegistry, IdentifierSystems
 from ..errors import FhirMappingError, MappingError
 from ..v2fhir import message_to_bundle
-from ..v2fhir.bundle import ADT_EVENTS, MappedMessage
+from ..v2fhir.bundle import ADT_EVENTS, MappedMessage, patient_only
 from .client import HapiClient
 from .mapper import imaging_study_resource
 from .post import post_mapped
@@ -47,6 +52,7 @@ KINDS = (
 )
 NO_SUBJECT = "no resolvable subject patient"
 ORDER_TYPE = "ORM^O01"
+REPORT_TYPE = "ORU^R01"
 
 log = logging.getLogger(__name__)
 
@@ -83,17 +89,14 @@ def sync_to_fhir(
     patient_ids: dict[tuple[str, str], str] = {}
     order_ids: dict[tuple[str, str], str] = {}
 
-    types = (*ADT_EVENTS, ORDER_TYPE)
+    types = (*ADT_EVENTS, ORDER_TYPE, REPORT_TYPE)
     marks = ", ".join("?" for _ in types)
     rows = conn.execute(
         f"SELECT id, hospital_id, message_type, raw FROM messages"  # the marks are fixed "?" only
         f" WHERE message_type IN ({marks}) ORDER BY id",
         types,
     ).fetchall()
-    rows += conn.execute(
-        "SELECT m.id, m.hospital_id, m.message_type, m.raw FROM reports r"
-        " JOIN messages m ON m.id = r.message_id ORDER BY r.hospital_id, r.accession"
-    ).fetchall()
+    current = {int(r["message_id"]) for r in conn.execute("SELECT message_id FROM reports")}
 
     for row in rows:
         key_text = f"{row['hospital_id']}/message {row['id']}"
@@ -103,6 +106,8 @@ def sync_to_fhir(
             # The reason names the field and the table, never the value.
             report.skipped.append((row["message_type"], key_text, str(exc)))
             continue
+        if mapped.message_type == REPORT_TYPE and int(row["id"]) not in current:
+            mapped = patient_only(mapped)
         mrn = _patient_key(mapped)
         if (mapped.hospital_id, mrn) in merged:
             report.merged_away += 1

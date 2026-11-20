@@ -47,9 +47,13 @@ def client():
 @pytest.fixture
 def run(tmp_path) -> tuple[HospitalRegistry, str]:
     """The bundled profiles with identifier systems of this run only."""
+    return _fresh_registry(tmp_path)
+
+
+def _fresh_registry(tmp_path: Path) -> tuple[HospitalRegistry, str]:
     tag = uuid.uuid4().hex[:12]
     folder = tmp_path / "profiles"
-    folder.mkdir()
+    folder.mkdir(parents=True)
     for source in BUNDLED_PROFILES.glob("*.yaml"):
         text = source.read_text(encoding="utf-8")
         text += "fhir:\n  identifier_systems:\n" + "".join(
@@ -262,3 +266,40 @@ def test_retiring_skips_a_result_whose_parsed_accession_differs(client, run):
     assert [c.key.partition("|")[2] for c in done if c.retired] == ["SACCA0002/FIND1/sub/1"]
     kept = client.read_by_id("Observation", str(created.server_id))
     assert kept is not None and kept["status"] == "final"
+
+
+def test_sync_keeps_the_patient_a_direct_post_keeps(client, run, tmp_path: Path):
+    """No ADT: a full-PID ORU, then a thin-PID ORM, then a thin final that
+    replaces the first ORU. Direct posting and a sync of a store holding the
+    same messages (under fresh systems) leave the same Patient."""
+    registry, root = run
+    full = "PID|1||SA9001^^^HOSPA^MR||ZZZSAMPLE^NINE||19800101|F|||1 TEST RD^^TESTVILLE^ZZ^00000"
+    thin = "PID|1||SA9001^^^HOSPA^MR||ZZZSAMPLE^NINE"
+
+    def with_pid(name: str, pid: str, control: str) -> str:
+        lines = [pid if line.startswith("PID|") else line for line in _sample(name).split("\r")]
+        text = "\r".join(lines)
+        return text.replace("|SMPA0002|", f"|{control}|").replace("|SMPA0003|", f"|{control}|")
+
+    texts = [
+        with_pid("03_hospa_oru_r01_final.hl7", full, "SMPA0901").replace("|CR|F", "|CR|P"),
+        with_pid("02_hospa_orm_o01.hl7", thin, "SMPA0902"),
+        with_pid("03_hospa_oru_r01_final.hl7", thin, "SMPA0903"),
+    ]
+    _post(client, registry, *texts)
+    want = _one(client, "Patient", f"{root}:hospa:mrn", "SA9001")
+
+    other_registry, other_root = _fresh_registry(tmp_path / "other")
+    conn = connect(tmp_path / "order.db")
+    pipeline = IngestPipeline(other_registry, conn)
+    for text in texts:
+        pipeline.handle_bytes(text.encode())
+    report = sync_to_fhir(conn, other_registry, client)
+    conn.close()
+    assert report.skipped == []
+    got = _one(client, "Patient", f"{other_root}:hospa:mrn", "SA9001")
+    for element in ("name", "gender", "birthDate", "address"):
+        assert got.get(element) == want.get(element), element
+    assert got["address"][0]["city"] == "TESTVILLE"
+    final = _one(client, "DiagnosticReport", f"{other_root}:hospa:accession", "SACCA0001")
+    assert final["status"] == "final"
