@@ -7,6 +7,10 @@ conditional creates (``ifNoneExist``), updates by id with ``If-Match``,
 and ``urn:uuid`` references resolved to ``<Type>/<id>``. A failed
 ``If-Match`` or a conditional update that matches more than one resource
 fails the whole transaction, as on HAPI. Decimals are kept as Decimal.
+Searches and conditional creates honour ``_tag``. Transactions take
+``DELETE <Type>/<id>`` too, refused (and the whole transaction with them)
+when a resource that stays still refers to the one deleted, as HAPI's
+referential integrity check does.
 """
 
 from __future__ import annotations
@@ -57,6 +61,28 @@ class FakeFhir:
             )
         ]
 
+    def by_tag(self, kind: str, tag: str) -> list[dict[str, Any]]:
+        system, _, code = tag.partition("|")
+        return [
+            r
+            for r in self.all(kind)
+            if any(
+                t.get("system") == system and t.get("code") == code
+                for t in r.get("meta", {}).get("tag", [])
+            )
+        ]
+
+    def search(self, kind: str, params: dict[str, str]) -> list[dict[str, Any]]:
+        if "identifier" in params:
+            system, _, value = params["identifier"].partition("|")
+            found = self.by_identifier(kind, system, value)
+        else:
+            found = self.all(kind)
+        if "_tag" in params:
+            tagged = {r["id"] for r in self.by_tag(kind, params["_tag"])}
+            found = [r for r in found if r["id"] in tagged]
+        return found
+
     def by_key(self, kind: str, key: str) -> dict[str, Any]:
         system, _, value = key.partition("|")
         found = self.by_identifier(kind, system, value)
@@ -89,8 +115,7 @@ class FakeFhir:
         kind = parts[-1]
         params = dict(request.url.params)
         if request.method == "GET":
-            system, _, value = params.get("identifier", "").partition("|")
-            found = self.by_identifier(kind, system, value)
+            found = self.search(kind, params)
             if params.get("_summary") == "count":
                 return _response(200, {"resourceType": "Bundle", "total": len(found)})
             count = int(params.get("_count", "100"))
@@ -122,14 +147,33 @@ class FakeFhir:
         ids = itertools.count(next(self._ids))
         plan: list[tuple[str, str, int, dict[str, Any] | None]] = []
         placeholders: dict[str, str] = {}
+        deletes: list[tuple[str, str]] = []
+        for entry in body["entry"]:
+            req = entry["request"]
+            if req["method"] == "DELETE":
+                kind, _, server_id = req["url"].partition("/")
+                if server_id not in self.data.get(kind, {}):
+                    return _outcome(404, "not-found")
+                deletes.append((kind, server_id))
+        if deletes:
+            gone = {f"{k}/{i}" for k, i in deletes}
+            for kind, resources in self.data.items():
+                for server_id, resource in resources.items():
+                    if f"{kind}/{server_id}" not in gone and _refers_to(resource, gone):
+                        return _outcome(409, "conflict")
+            for kind, server_id in deletes:
+                del self.data[kind][server_id]
+            answers = [{"response": {"status": "204 No Content"}} for _ in deletes]
+            return _response(
+                200, {"resourceType": "Bundle", "type": "transaction-response", "entry": answers}
+            )
         for entry in body["entry"]:
             req, resource = entry["request"], entry["resource"]
             kind = resource["resourceType"]
             url = urlsplit(req["url"])
             if req["method"] == "POST":
-                query = parse_qs(req.get("ifNoneExist", ""))
-                system, _, value = query["identifier"][0].partition("|")
-                found = self.by_identifier(kind, system, value)
+                query = {k: v[0] for k, v in parse_qs(req.get("ifNoneExist", "")).items()}
+                found = self.search(kind, query)
                 if found:
                     plan.append((kind, found[0]["id"], 200, None))
                 else:
@@ -174,6 +218,16 @@ class FakeFhir:
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self)
+
+
+def _refers_to(value: Any, targets: set[str]) -> bool:
+    if isinstance(value, dict):
+        return any(
+            (k == "reference" and v in targets) or _refers_to(v, targets) for k, v in value.items()
+        )
+    if isinstance(value, list):
+        return any(_refers_to(v, targets) for v in value)
+    return False
 
 
 def _resolve(value: Any, placeholders: dict[str, str]) -> Any:

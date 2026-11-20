@@ -193,6 +193,9 @@ class FhirPostError(BridgeError):
         self.body = body
         self.reason = reason
         self.path = _url_path(url)
+        # The httpx transport error class when the request never got an
+        # answer (ConnectError, ReadTimeout, ReadError...), else "".
+        self.transport = ""
         if status_code:
             text = f"FHIR server returned {status_code} for {self.path}"
         else:

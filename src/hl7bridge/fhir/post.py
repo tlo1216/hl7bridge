@@ -12,8 +12,11 @@ is sent, two things are read from the server and folded into it:
    when the message has it and is kept when it does not. The write goes
    to ``<Type>/<id>`` with ``If-Match`` on the version read, so a change
    made between the read and the write fails the transaction instead of
-   being lost. No current resource: the conditional update creates it.
-   More than one: refused, never "first match wins".
+   being lost. No current resource: a conditional create (``POST`` with
+   ``ifNoneExist``) makes it, and an answer of 200 instead of 201 (another
+   writer created it between the search and the write) fails the post
+   with a "send again" reason, so a concurrent create is never overwritten
+   unmerged. More than one: refused, never "first match wins".
 2. **Retire** (ORU). A corrected report can drop a result. The current
    DiagnosticReport's ``result`` list is read, and each Observation in it
    whose key parses to this report's accession and that the new version no
@@ -21,15 +24,17 @@ is sent, two things are read from the server and folded into it:
    ``If-Match``) in the same transaction. Observations with another
    system or another report's key are never touched.
 
-``check_run_order`` refuses a run that would post an older version of a
-report after a newer one (by OBR-22, then by status).
+3. **Stale results** (ORU). A report older than the one on the server (by
+   OBR-22, then by status, ``is_older``) raises StaleResultError and
+   nothing is sent. ``check_run_order`` applies the same rule inside one
+   run, before anything is posted.
 """
 
 from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -68,6 +73,52 @@ _REFERENCE = re.compile(r"(?:^|/)Observation/([A-Za-z0-9.\-]{1,64})(?:/_history/
 
 class PostOrderError(BridgeError):
     """A run would post an older version of a report after a newer one."""
+
+
+class StaleResultError(BridgeError):
+    """The server holds a newer version of the report than the message."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the server holds a newer version of this report (OBR-22, then OBR-25);"
+            " the older one was not posted.",
+            hint="Send the newest version, or leave the older one out.",
+        )
+
+
+class ConcurrentWriteError(FhirPostError):
+    """Another writer created a resource between our search and our write."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(
+            0,
+            kind,
+            reason=f"another writer created the {kind} first; nothing of it was merged, send again",
+        )
+
+
+def parse_instant(value: object) -> datetime | None:
+    """A FHIR instant or dateTime from JSON or a model, or None."""
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or "T" not in value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def is_older(
+    new_issued: datetime | None, new_status: str, cur_issued: datetime | None, cur_status: str
+) -> bool:
+    """True when a report version (issued, status) is older than the
+    current one: an earlier OBR-22, or with the same or no OBR-22 a lower
+    status rank. The same version is not older, so a resend passes."""
+    if new_issued is not None and cur_issued is not None and new_issued != cur_issued:
+        return new_issued < cur_issued
+    return STATUS_RANK.get(new_status, 0) < STATUS_RANK.get(cur_status, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +186,15 @@ def _merge_entry(client: HapiClient, entry: dict[str, Any]) -> None:
     kind = new["resourceType"]
     current = _one(client, kind, _key(new))
     if current is None:
-        return  # the conditional update creates it
+        # Create only if it is still missing at commit; post_mapped checks
+        # that the answer is 201.
+        ident = new["identifier"][0]
+        entry["request"] = {
+            "method": "POST",
+            "url": kind,
+            "ifNoneExist": search_query(ident["system"], ident["value"]),
+        }
+        return
     merged = merge_resource(current, new)
     server_id = current["id"]
     entry["resource"] = merged
@@ -155,12 +214,31 @@ def result_accession(value: str) -> str | None:
     return parts[0]
 
 
-def _retire_entries(
-    client: HapiClient, mapped: MappedMessage, report: dict[str, Any], keep: set[str]
-) -> list[dict[str, Any]]:
-    current = _one(client, "DiagnosticReport", _key(report))
+def check_not_stale(current: dict[str, Any] | None, report: dict[str, Any]) -> None:
+    """Raise StaleResultError when ``report`` is older than ``current``."""
     if current is None:
-        return []
+        return
+    if is_older(
+        parse_instant(report.get("issued")),
+        str(report.get("status", "")),
+        parse_instant(current.get("issued")),
+        str(current.get("status", "")),
+    ):
+        raise StaleResultError
+
+
+def retire_entries(
+    client: HapiClient,
+    mapped: MappedMessage,
+    current: dict[str, Any],
+    keep: set[str],
+    *,
+    owned: Callable[[dict[str, Any]], bool] = lambda _obs: True,
+) -> list[dict[str, Any]]:
+    """Entries that set to entered-in-error each result of ``current`` (the
+    report on the server) that is this report's own and that ``keep``
+    (the new version's result keys) no longer holds. ``owned`` can narrow
+    "own" further (direct mode: the run's tag)."""
     retire: list[dict[str, Any]] = []
     for ref in current.get("result", []):
         match = _REFERENCE.search(str(ref.get("reference", "")))
@@ -176,6 +254,8 @@ def _retire_entries(
             and result_accession(str(i.get("value", ""))) == mapped.accession
         ]
         if not ours or any(f"{i['system']}|{i['value']}" in keep for i in ours):
+            continue
+        if not owned(obs):
             continue
         obs = copy.deepcopy(obs)
         obs["status"] = RETIRED
@@ -206,18 +286,37 @@ def prepare(client: HapiClient, mapped: MappedMessage) -> dict[str, Any]:
         None,
     )
     if report is not None:
-        keep = {
-            _key(e["resource"]) for e in entries if e["resource"]["resourceType"] == "Observation"
-        }
-        entries.extend(_retire_entries(client, mapped, report, keep))
+        current = _one(client, "DiagnosticReport", _key(report))
+        check_not_stale(current, report)
+        if current is not None:
+            keep = {
+                _key(e["resource"])
+                for e in entries
+                if e["resource"]["resourceType"] == "Observation"
+            }
+            entries.extend(retire_entries(client, mapped, current, keep))
     return body
+
+
+def check_created(body: dict[str, Any], results: Sequence[EntryResult], creates: set[int]) -> None:
+    """Raise ConcurrentWriteError when an entry planned as a create (its
+    search found nothing) was answered 200: another writer made it first."""
+    for n in creates:
+        if results[n].code != 201:
+            raise ConcurrentWriteError(str(body["entry"][n]["resource"]["resourceType"]))
 
 
 def post_mapped(client: HapiClient, mapped: MappedMessage) -> list[Committed]:
     """Prepare and post one message. Raises FhirPostError unless the server
     committed every entry (``HapiClient.commit``)."""
     body = prepare(client, mapped)
+    creates = {
+        n
+        for n, entry in enumerate(body["entry"])
+        if mapped.policies.get(entry["fullUrl"]) == MERGE and entry["request"]["method"] == "POST"
+    }
     results: list[EntryResult] = client.commit(body)
+    check_created(body, results, creates)
     mapped_count = len(mapped.bundle.entry or [])
     return [
         Committed(r.kind, _key(entry["resource"]), r.code, r.server_id, retired=n >= mapped_count)
@@ -228,7 +327,7 @@ def post_mapped(client: HapiClient, mapped: MappedMessage) -> list[Committed]:
 @dataclass(frozen=True, slots=True)
 class _Version:
     label: str
-    rank: int
+    status: str
     issued: datetime | None
 
 
@@ -250,31 +349,32 @@ def check_run_order(items: Sequence[tuple[str, MappedMessage]]) -> None:
         ident = report.identifier[0]  # type: ignore[attr-defined]
         key = f"{ident.system}|{ident.value}"
         issued = report.issued  # type: ignore[attr-defined]
-        version = _Version(label, STATUS_RANK.get(str(report.status), 0), issued)  # type: ignore[attr-defined]
+        version = _Version(label, str(report.status), issued)  # type: ignore[attr-defined]
         before = latest.get(key)
-        if before is not None:
-            if before.issued is not None and issued is not None and issued != before.issued:
-                older = issued < before.issued
-            else:
-                older = version.rank < before.rank
-            if older:
-                raise PostOrderError(
-                    f"{label} holds an older version of the same report as {before.label}"
-                    " (OBR-22, then OBR-25); posting it after would undo the newer one.",
-                    hint="Post the messages in the order they were sent,"
-                    " or leave the older one out.",
-                )
+        if before is not None and is_older(issued, version.status, before.issued, before.status):
+            raise PostOrderError(
+                f"{label} holds an older version of the same report as {before.label}"
+                " (OBR-22, then OBR-25); posting it after would undo the newer one.",
+                hint="Post the messages in the order they were sent, or leave the older one out.",
+            )
         latest[key] = version
 
 
 __all__ = [
     "OWNED",
     "Committed",
+    "ConcurrentWriteError",
     "PostOrderError",
+    "StaleResultError",
+    "check_created",
+    "check_not_stale",
     "check_run_order",
+    "is_older",
     "merge_resource",
+    "parse_instant",
     "post_mapped",
     "prepare",
     "result_accession",
+    "retire_entries",
     "search_query",
 ]

@@ -40,7 +40,7 @@ from ..v2fhir import message_to_bundle
 from ..v2fhir.bundle import ADT_EVENTS, MappedMessage, patient_only
 from .client import HapiClient
 from .mapper import imaging_study_resource
-from .post import post_mapped
+from .post import StaleResultError, post_mapped
 
 KINDS = (
     "Patient",
@@ -51,6 +51,7 @@ KINDS = (
     "ImagingStudy",
 )
 NO_SUBJECT = "no resolvable subject patient"
+STALE = "the server holds a newer version of this report; not posted"
 ORDER_TYPE = "ORM^O01"
 REPORT_TYPE = "ORU^R01"
 
@@ -112,7 +113,12 @@ def sync_to_fhir(
         if (mapped.hospital_id, mrn) in merged:
             report.merged_away += 1
             continue
-        for done in post_mapped(client, mapped):
+        try:
+            committed = post_mapped(client, mapped)
+        except StaleResultError:
+            report.skipped.append((row["message_type"], key_text, STALE))
+            continue
+        for done in committed:
             if done.retired:
                 report.retired += 1
                 continue

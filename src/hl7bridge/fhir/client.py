@@ -82,9 +82,9 @@ class HapiClient:
         try:
             return self._client.request(method, url, **kwargs)
         except httpx.TransportError as exc:
-            raise FhirPostError(
-                0, url, str(exc), reason=f"transport error ({type(exc).__name__})"
-            ) from None
+            err = FhirPostError(0, url, str(exc), reason=f"transport error ({type(exc).__name__})")
+            err.transport = type(exc).__name__
+        raise err from None
 
     def upsert(self, resource: Resource) -> tuple[str, str]:
         """Conditional update keyed on the resource's first identifier.
@@ -125,13 +125,16 @@ class HapiClient:
         entry. See ``commit``."""
         return [(r.kind, r.code) for r in self.commit(resource_dict(bundle))]
 
-    def commit(self, body: dict[str, Any]) -> list[EntryResult]:
+    def commit(
+        self, body: dict[str, Any], *, ok_codes: tuple[int, ...] = (200, 201)
+    ) -> list[EntryResult]:
         """POST a transaction Bundle (a dict from ``jsontext``) and check
         that all of it was committed.
 
         A 2xx status alone is not enough. The answer must be a Bundle of
         type ``transaction-response`` with exactly one entry per request
-        entry, and every entry status must be 200 or 201. Anything else
+        entry, and every entry status must be in ``ok_codes`` (200 or 201
+        unless the caller says otherwise; a delete answers 204). Anything else
         raises FhirPostError, whose text holds counts and positions only.
         Returns one EntryResult per entry, in request order.
         """
@@ -168,10 +171,14 @@ class HapiClient:
             status = reply.get("status")
             match = _ENTRY_STATUS.match(status) if isinstance(status, str) else None
             code = int(match.group(1)) if match else 0
-            if code not in (200, 201):
+            if code not in ok_codes:
                 raise FhirPostError(200, url, reason=f"entry {i} was not committed")
             resource = sent.get("resource") if isinstance(sent, dict) else None
             kind = str(resource.get("resourceType", "?")) if isinstance(resource, dict) else "?"
+            if kind == "?" and isinstance(sent, dict):
+                # A delete has no resource: the type is the first part of its URL.
+                req_url = (sent.get("request") or {}).get("url", "")
+                kind = str(req_url).split("/", 1)[0].split("?", 1)[0] or "?"
             location = reply.get("location")
             found = _LOCATION.search(location) if isinstance(location, str) else None
             server_id = found.group(2) if found and found.group(1) == kind else None
@@ -219,6 +226,66 @@ class HapiClient:
         if paged and len(found) < 2:
             found = found * 2  # more on a next page: at least two, never "the first"
         return found
+
+    def search_bundle(self, resource_type: str, params: dict[str, str]) -> dict[str, Any]:
+        """One search page as a Bundle dict (decimals kept), read fresh
+        (no-cache). Raises FhirPostError for any answer that is not one."""
+        response = self._send(
+            "GET",
+            f"{self.base_url}/{resource_type}",
+            params=params,
+            headers={"Cache-Control": "no-cache"},
+        )
+        return self._bundle(response)
+
+    def _bundle(self, response: httpx.Response) -> dict[str, Any]:
+        if response.status_code != 200:
+            raise FhirPostError(response.status_code, str(response.url), response.text)
+        try:
+            body = loads(response.content)
+        except ValueError:
+            raise FhirPostError(200, str(response.url), reason="the answer is not JSON") from None
+        if not isinstance(body, dict) or body.get("resourceType") != "Bundle":
+            raise FhirPostError(200, str(response.url), reason="the answer is not a Bundle")
+        return body
+
+    def search_all(
+        self, resource_type: str, params: dict[str, str], *, max_pages: int = 100
+    ) -> list[dict[str, Any]]:
+        """Every resource of ``resource_type`` a search returns, across pages.
+
+        A ``next`` link is followed only when it points under this client's
+        base URL; any other link, or more than ``max_pages`` pages, raises
+        FhirPostError, so a partial list is never taken for the whole."""
+        body = self.search_bundle(resource_type, params)
+        found: list[dict[str, Any]] = []
+        for _ in range(max_pages):
+            found.extend(
+                e["resource"]
+                for e in body.get("entry") or []
+                if isinstance(e, dict)
+                and isinstance(e.get("resource"), dict)
+                and e["resource"].get("resourceType") == resource_type
+            )
+            nxt = next(
+                (
+                    link.get("url")
+                    for link in body.get("link") or []
+                    if isinstance(link, dict) and link.get("relation") == "next"
+                ),
+                None,
+            )
+            if nxt is None:
+                return found
+            if not isinstance(nxt, str) or not nxt.startswith(
+                (self.base_url + "?", self.base_url + "/")
+            ):
+                raise FhirPostError(
+                    200, resource_type, reason="a next page link points off this server"
+                )
+            response = self._send("GET", nxt, headers={"Cache-Control": "no-cache"})
+            body = self._bundle(response)
+        raise FhirPostError(200, resource_type, reason=f"more than {max_pages} result pages")
 
     def read_by_id(self, resource_type: str, server_id: str) -> dict[str, Any] | None:
         """``GET <type>/<id>``; None when the server has no such resource."""

@@ -580,3 +580,38 @@ def test_a_non_200_answer_is_an_error_without_the_body(registry):
 def test_an_answer_that_is_not_json_is_an_error(registry):
     with pytest.raises(FhirPostError, match="not JSON"):
         _commit(registry, lambda _r: httpx.Response(200, text="<html>"))
+
+
+def test_a_post_older_than_the_report_on_the_server_is_refused(registry):
+    from hl7bridge.fhir.post import StaleResultError
+
+    server = FakeFhir()
+    _post(server, registry, _corrected(STRUCTURED))
+    before = len(server.transactions)
+    with _client(server) as client, pytest.raises(StaleResultError):
+        post_mapped(client, message_to_bundle(STRUCTURED, registry))
+    assert len(server.transactions) == before
+    report = server.by_key("DiagnosticReport", "urn:hl7bridge:hospa:accession|SACCA0002")
+    assert report["status"] == "corrected"
+
+
+def test_a_merge_create_that_another_writer_won_is_refused_not_overwritten(registry):
+    from hl7bridge.fhir.post import ConcurrentWriteError
+
+    server = FakeFhir()
+    theirs = {
+        "resourceType": "Encounter",
+        "status": "planned",
+        "identifier": [{"system": "urn:hl7bridge:hospc:visit", "value": "SV0001"}],
+    }
+
+    def interfere(body):
+        server._write("Encounter", "theirs", theirs)
+        server.before_commit = None
+        return None
+
+    server.before_commit = interfere
+    with _client(server) as client, pytest.raises(ConcurrentWriteError):
+        post_mapped(client, message_to_bundle(_sample("13_hospc_adt_a01_inpatient.hl7"), registry))
+    assert server.data["Encounter"]["theirs"]["status"] == "planned"
+    assert server.data["Encounter"]["theirs"]["meta"]["versionId"] == "1"
