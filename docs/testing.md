@@ -77,10 +77,11 @@ passes on a filter an earlier test left behind.
 | `test_fhir_hapi.py` | Against a live HAPI server: post everything twice, prove idempotency and corrected-report update in place |
 | `test_to_fhir_hapi.py` | Against a live HAPI server, under identifier systems made fresh for the run: every sample Bundle posted twice; every entry committed, the second round all 200 with counts unchanged; the structured report links its two Observations; the A08 left the Encounter finished |
 | `test_post_merge_hapi.py` | Against a live HAPI server, under fresh systems: a thin ORU leaves the Patient as the ADT wrote it; an A08 without PV1-44 keeps the admit time and a later one keeps the discharge; a correction sets the result it dropped to `entered-in-error`; a stale `If-Match` fails the whole transaction; `fhir sync` after `to-fhir --post` of the same messages changes no resource |
+| `test_direct_hapi.py` | Against a live HAPI server, the direct listener's failure boundaries: A04, ORM and ORU commit in the run and the Patient keeps version 1; A08 gets AR; a committed transaction whose answer is lost or times out gets AE and the resend changes no count; the same message on two MLLP connections, and two control ids for one report on two threads, leave one set; a late older report is `stale_result`; two Patients with one MRN are `ambiguous_patient`; two runs keep their own copies; a key match without the run tag is `outside_run` and left alone; `fhir reset` removes one run only, and a refused entry deletes nothing |
 | `test_readme.py` | The README blocks marked `readme-test` run as written in a fresh folder, and every `hl7bridge` command in the README and `docs/cli.md` parses |
 
 The HAPI tests skip unless `HL7BRIDGE_FHIR_BASE` points at a server. CI
-starts HAPI as a service container and sets `HL7BRIDGE_FHIR_REQUIRED=1`, so
+runs them against HAPI 8.12.0-2 and 8.8.0-1, each a service container, and sets `HL7BRIDGE_FHIR_REQUIRED=1`, so
 a missing server fails the job instead of skipping.
 
 ## Golden files

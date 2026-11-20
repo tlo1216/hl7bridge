@@ -15,13 +15,15 @@
 | Messages | `send [PATH]` | Send a file, a folder or stdin (`-`) over MLLP, one frame per message, and show the ACKs; `--repeat N`, `--rate PER_SECOND`, `--expect CODE` |
 | Messages | `replay` | Resend quarantined (default) or stored (`--from store`) messages, oldest first, byte for byte and each distinct one once; reads a version 2 or 3 store; `--only-reason`, `--since`, `--hospital`, `--limit`, `--dry-run` |
 | Messages | `synth --out DIR` | Generate a synthetic day with a defect manifest |
-| Listener | `listen` | Run the MLLP listener |
+| Listener | `listen` | Run the MLLP listener into the store; `--target fhir` writes each message to a FHIR server as one transaction and ACKs after the commit (see below) |
 | Reports | `reconcile` | Orders versus imaging studies |
 | Reports | `ack-report` | Delivery status of outbound reports |
 | Reports | `tat --month YYYY-MM` | Turnaround-time statistics |
 | Reports | `summary` | Message and quarantine counters |
 | FHIR | `to-fhir [PATH]` | Convert messages to FHIR transaction Bundles: print one, `--out DIR` for several, `--post` to send them (`--skip-failures` to post when some do not map) |
 | FHIR | `fhir sync` | Post the store to a FHIR server, rebuilt from the stored messages as `to-fhir --post` would |
+| FHIR | `fhir reset --run-id NAME` | Delete one lab run's Observations, DiagnosticReports, ServiceRequests and Encounters; dry run unless `--yes` and the run id typed back; never a Patient |
+| FHIR | `from-fhir --patient ID` | Write sample A04, A08, ORM and ORU messages for a Patient on a FHIR server (`--report ID`: an ORU for a DiagnosticReport) |
 | FHIR | `fhir probe` | Read-only server check |
 | Data | `load studies --dicom DIR` | Load DICOM study metadata |
 | Data | `load outbound --path FILE` | Load the outbound report log |
@@ -30,6 +32,80 @@
 
 Every report command, and `lint`, `doctor` and the `profile` commands,
 take `--json`. JSON goes to stdout; status lines go to stderr.
+
+## Direct to FHIR: `listen --target fhir`
+
+```
+hl7bridge listen --target fhir --fhir-base http://127.0.0.1:8080/fhir --run-id lab-a --config lab-profiles
+```
+
+Each message becomes one FHIR transaction Bundle, posted before the ACK
+goes back. AA means the server committed all of it: the answer was a
+`transaction-response` Bundle with one entry per request and every entry
+200 or 201. Anything less is AE, and the sender keeps the message and
+sends it again; every write is keyed, so a resend updates in place. The
+full ACK table is in `src/hl7bridge/ingest/direct.py` and ADR-0004.
+
+- **Patients are read only.** Every loaded profile must say
+  `fhir.patient_policy: match_only`. The listener finds the Patient by
+  MRN (PID-3, its system from `mrn_by_authority` by PID-3.4, else `mrn`).
+  None, several (counted over every result page), an inactive one or one
+  replaced by another is AE. ADT^A08 and ADT^A40 get AR
+  `patient_read_only`. Supported: ADT^A01, ADT^A04 (an Encounter), ORM^O01
+  and ORU^R01.
+- **A run id is required** (`--run-id` or `HL7BRIDGE_RUN_ID`, 1 to 32
+  letters, digits or `-`). Every identifier written gets the system
+  `<profile system>/run/<run id>`, the value from the message stays as a
+  second identifier with `use: secondary`, and every resource carries
+  the lab tag (`fhir.tag`) and the run tag (`<lab tag system>/lab-run`,
+  code = run id). A key that matches a resource without this run's tag is
+  AE `outside_run` and nothing is written.
+- **One writer per key.** While a transaction is in flight the listener
+  holds a lock per key, and per message identity, so two copies of one
+  message on two connections run one after the other. A resource a
+  search did not find is made by a conditional create that must answer
+  201; one found is written by id with `If-Match`.
+- **Message identity** is hospital, MSH-3, MSH-4 and MSH-10 within the
+  run, plus a hash of the whole message. The same bytes again get AA and
+  write nothing; anything else under the same identity, a restamped MSH-7
+  included, gets AE `control_id_conflict`.
+- **MSH-11** must be in `fhir.allowed_processing_ids` (default T and D):
+  production traffic (P) gets AR.
+- **A late older report** (by OBR-22, then OBR-25) gets AE `stale_result`
+  and writes nothing. `to-fhir --post` and `fhir sync` refuse it too.
+- The log of every arrival, which is also the quarantine (AE and AR rows
+  keep their bytes), is its own SQLite file: `--db`, default
+  `./hl7bridge-direct.db`. It is never a store database.
+- `--fhir-timeout SECONDS` (default 10) bounds each FHIR request; a
+  timeout is AE. The FHIR calls run in a worker thread, so one slow
+  request does not hold up other connections.
+- `--mapping-module FILE` loads mapping hooks (below).
+
+## Lab runs: `fhir reset` and `from-fhir`
+
+`hl7bridge fhir reset --run-id lab-a` lists how many resources of each type
+carry run `lab-a`'s tag and deletes nothing. With `--yes` it asks for the
+run id to be typed back, then deletes them all in one transaction: if the
+server refuses any delete, none happens and the command exits 1. It never
+searches or deletes a Patient, and there is no scope wider than one run.
+
+`hl7bridge from-fhir --patient 123 --hospital WINTEHR --out msgs` reads one
+Patient and writes `01_adt_a04.hl7`, `02_adt_a08.hl7`, `03_orm_o01.hl7` and
+`04_oru_r01.hl7` with its MRN in PID-3 (the identifier typed MR, else the
+first; the command says which). MSH-11 is T. Files are never overwritten.
+`--report 456` writes one ORU^R01 for a DiagnosticReport and its
+Observations instead.
+
+## Mapping hooks
+
+`--mapping-module FILE` (on `listen --target fhir` and `to-fhir`) loads a
+Python file that may define `sex_code(pid8)`, `abnormal_flag(obx8)` and
+`observation_time(obx14, zone)`. Each replaces one mapping step; what it
+returns is checked, and an exception or a value outside the FHIR value
+set is a mapping error naming the field. Any other public function in the
+file is refused. The file runs as code inside hl7bridge: use it for a
+loopback teaching lab, never a shared listener. The command warns on
+stderr when it loads one.
 
 ### Removed in 0.4.0
 

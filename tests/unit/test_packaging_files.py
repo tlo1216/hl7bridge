@@ -18,6 +18,7 @@ import yaml
 from hl7bridge import __version__
 from hl7bridge.config import (
     IDENTIFIER_KINDS,
+    KNOWN_FHIR_KEYS,
     KNOWN_KEYS,
     KNOWN_LINT_KEYS,
     KNOWN_RECONCILE_KEYS,
@@ -107,7 +108,8 @@ def test_profiles_doc_covers_every_key():
     expected |= {f"reconcile.{k}" for k in KNOWN_RECONCILE_KEYS}
     expected |= {f"tat.{k}" for k in KNOWN_TAT_KEYS}
     expected |= {f"lint.{k}" for k in KNOWN_LINT_KEYS}
-    expected |= {f"fhir.identifier_systems.{k}" for k in IDENTIFIER_KINDS}
+    expected |= {f"fhir.identifier_systems.{k}" for k in (*IDENTIFIER_KINDS, "mrn_by_authority")}
+    expected |= {f"fhir.{k}" for k in KNOWN_FHIR_KEYS - {"identifier_systems"}}
     expected -= {"reconcile", "tat", "lint", "fhir"}
     assert documented == expected
 

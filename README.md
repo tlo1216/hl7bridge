@@ -228,6 +228,42 @@ never changes a stored message: a retry carries the same MSH-7 and MSH-10.
 Neither `send` nor `replay` prints a value from the message; a host that is
 not loopback gets a warning, since MLLP has no encryption.
 
+## Direct to FHIR for a teaching lab
+
+`listen --target fhir` is the engine for a lab where students send HL7 v2
+into a FHIR server whose patients already exist. Each message becomes one
+transaction, and the ACK goes back only after the server committed all of
+it:
+
+```
+hl7bridge listen --target fhir --fhir-base http://127.0.0.1:8080/fhir --run-id lab-a --config lab-profiles
+hl7bridge from-fhir --patient 123 --hospital WINTEHR --out msgs --fhir-base http://127.0.0.1:8080/fhir --config lab-profiles
+hl7bridge send msgs --port 2575
+hl7bridge fhir reset --run-id lab-a --fhir-base http://127.0.0.1:8080/fhir --config lab-profiles
+```
+
+- Patients are matched by MRN and never created or changed: the profile
+  says `patient_policy: match_only`, A08 and A40 get AR, and no match,
+  several matches (counted over every page) or a merged-away Patient get
+  AE. Matching is where interfaces file results on the wrong patient, so
+  "pick the first" is never an option.
+- Every write belongs to one run. The run id is required; it is part of
+  every identifier written and of a tag on every resource, and a key that
+  matches a resource outside the run is refused. `fhir reset` deletes one
+  run's resources, after a dry run and the run id typed back, and never a
+  Patient.
+- AA only on a validated commit; AE for anything the sender can retry (a
+  timeout, a lost answer, an unknown patient, a stale result). A resend
+  updates in place. The same message on two connections at once is
+  written once. MSH-11 P (production) gets AR.
+- `from-fhir` writes sample messages for a Patient on the server, since
+  the server's patients have no v2 messages. `--mapping-module FILE`
+  swaps in three mapping steps (sex code, abnormal flag, OBX-14 time) for
+  a student exercise; it runs Python, so it is for a loopback lab only.
+
+The example profile is `src/hl7bridge/profiles/examples/wintehr.yaml`.
+[docs/cli.md](docs/cli.md) has the details and ADR-0004 the reasons.
+
 ## Step by step on a synthetic day
 
 The same steps the demo runs, one command each. They write to `data/quick`
@@ -368,7 +404,8 @@ output.
 ## ACK decision table
 
 Every inbound message gets exactly one explicit decision (tested row by row
-in `tests/unit/test_pipeline.py`):
+in `tests/unit/test_pipeline.py`; direct mode has its own table in
+`src/hl7bridge/ingest/direct.py`):
 
 | Condition | ACK | Destination |
 | --- | --- | --- |

@@ -66,8 +66,18 @@ suggestion (`unknown key 'acession_field'. Did you mean 'accession_field'?`).
 | `fhir.identifier_systems.visit` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:visit` | The system for the visit number (PV1-19, type VN) on Encounter |
 | `fhir.identifier_systems.observation` | `urn:` or `http(s)` URI | `urn:hl7bridge:<hospital_id lower case>:observation` | The system for the result key `<accession>/<OBX-3.1>/sub/<OBX-4>` (or `.../set/<OBX-1>` when OBX-4 is empty) on Observation |
 
+| `fhir.identifier_systems.mrn_by_authority` | map of PID-3.4 authority to URI | `{}` | Direct mode picks the MRN system by the assigning authority, so two authorities in one feed match the right Patients |
+| `fhir.patient_policy` | `create` or `match_only` | `create` | `listen --target fhir` takes `match_only` only: it finds Patients by MRN and never writes one |
+| `fhir.tag` | `{system: URI, code: token}` | `{system: urn:hl7bridge:tag, code: hl7v2-lab}` in direct mode | The lab tag on every direct write; the run tag's system is this system plus `/lab-run` |
+| `fhir.allowed_processing_ids` | list of MSH-11 codes | `[T, D]` | Direct mode refuses any other MSH-11 with AR, so production traffic never reaches a lab server |
+
 Numbers may be written as integers or decimals; `profile show` prints them
 as decimals.
+
+`resend_ignores` is not a key: a resend that differs in any field, MSH-7
+included, is a conflict, never a duplicate. The example profile for a
+teaching lab is `src/hl7bridge/profiles/examples/wintehr.yaml`; it is not
+among the bundled profiles that load by default.
 
 An identifier system may not hold `|`, `,`, `$`, a backslash or a space:
 FHIR token searches treat them as separators, and the conditional update

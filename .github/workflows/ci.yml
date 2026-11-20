@@ -185,13 +185,22 @@ jobs:
           docker compose -f compose.demo.yaml down -v
 
   fhir-system:
-    name: FHIR system tests against HAPI
+    name: FHIR system tests against HAPI ${{ matrix.hapi.tag }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each image pinned by digest. 8.8.0-1 is the oldest HAPI the
+        # direct listener is tested against; 8.12.0-2 the newest.
+        hapi:
+          - tag: v8.12.0-2
+            image: hapiproject/hapi:v8.12.0-2@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e
+          - tag: v8.8.0-1
+            image: hapiproject/hapi:v8.8.0-1@sha256:34c86fd5805df77c2b9d9c10538050b16ac3dc244352da0ebe4717f931330775
     services:
       hapi:
-        # hapiproject/hapi:v8.12.0-2, pinned by digest.
-        image: hapiproject/hapi:v8.12.0-2@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e
+        image: ${{ matrix.hapi.image }}
         # Loopback only, like every published port in this repository.
         ports:
           - "127.0.0.1:8080:8080"
@@ -222,6 +231,6 @@ jobs:
         env:
           HL7BRIDGE_FHIR_BASE: http://127.0.0.1:8080/fhir
           HL7BRIDGE_FHIR_REQUIRED: "1"
-        run: uv run pytest tests/system/test_fhir_hapi.py tests/system/test_to_fhir_hapi.py -m fhir -q
+        run: uv run pytest tests/system -m fhir -q
       - name: hl7bridge demo against HAPI
         run: uv run hl7bridge demo --fhir-base http://127.0.0.1:8080/fhir

@@ -5,6 +5,69 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
+## [0.5.0] - Unreleased
+
+### Added
+
+- `listen --target fhir`: the direct-to-FHIR listener. Each message is one
+  FHIR transaction, and the ACK goes back after the commit: AA only for a
+  validated `transaction-response`, AE for anything a resend or a fix can
+  cure (unreachable server, timeout, lost answer, mapping error, patient
+  matching, run ownership, stale result), AR for what it cannot (a type
+  the listener does not take, MSH-11 outside `allowed_processing_ids`,
+  unparseable input). The table is in `ingest/direct.py`; the reasons in
+  ADR-0004. The FHIR calls run in a worker thread with a per-request
+  timeout (`--fhir-timeout`).
+- Patient matching by MRN (`fhir/match.py`): the count is over the whole
+  result (`_total=accurate`, `Bundle.total`, a `next` link), and none,
+  several, an inactive Patient or one replaced by another is AE. The
+  Patient is never written in direct mode; A08 and A40 get AR
+  `patient_read_only`.
+- Run ownership: `--run-id` (or `HL7BRIDGE_RUN_ID`) is required; every
+  identifier written is namespaced by the run, every resource carries the
+  lab tag and the run tag, and a key that matches a resource outside the
+  run is AE `outside_run`.
+- One writer per key: per-identity and per-key locks while a transaction
+  is in flight, so the same message on two connections leaves one set.
+- Message identity for direct mode: hospital, MSH-3, MSH-4 and MSH-10 in
+  the run, plus a hash of the whole message. The same bytes are a
+  duplicate (AA, nothing written); any change, MSH-7 included, is AE
+  `control_id_conflict`. `resend_ignores` is not a profile key.
+- `fhir reset --run-id NAME`: deletes one run's Observations,
+  DiagnosticReports, ServiceRequests and Encounters in one transaction,
+  after a dry run and the run id typed back. Never a Patient, never more
+  than one run.
+- `from-fhir --patient ID` writes sample A04, A08, ORM and ORU messages
+  for a Patient on a FHIR server (`--report ID`: an ORU for a
+  DiagnosticReport and its Observations).
+- `--mapping-module FILE` on `listen --target fhir` and `to-fhir`: mapping
+  hooks for `sex_code`, `abnormal_flag` and `observation_time`, with their
+  results checked. For loopback teaching labs only; the command warns.
+- Profile keys `fhir.patient_policy`, `fhir.tag`,
+  `fhir.allowed_processing_ids` and
+  `fhir.identifier_systems.mrn_by_authority`, and an example lab profile
+  in `profiles/examples/wintehr.yaml` (not loaded by default).
+
+### Changed
+
+- The synthetic generator writes MSH-11 `T` (training) instead of `P`.
+- `to-fhir --post` and `fhir sync` refuse a report older than the one on
+  the server (OBR-22, then status); sync lists it as skipped.
+- A merged resource (Patient from ADT, Encounter, ServiceRequest) that a
+  search did not find is now made by a conditional create that must answer
+  201. If another writer created it in between, the post fails with "send
+  again" instead of overwriting it unmerged.
+
+### Fixed
+
+- A correction retires only results whose key parses to the report's own
+  accession, and a narrative ORU whose accession holds `/` is refused like
+  a structured one, so no report can retire another report's results.
+- `fhir sync` replays the stored ADT, ORM and ORU messages in the order
+  they arrived, across types. An ORU that a later version replaced posts
+  its Patient entry only. Sync and a direct post now keep the same Patient
+  demographics when no ADT came first.
+
 ## [0.4.0] - Unreleased
 
 ### Breaking changes
