@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import re
 import sqlite3
 import traceback
 from collections.abc import Callable
@@ -35,7 +36,6 @@ from typing import TYPE_CHECKING
 from ..config import HospitalConfig, HospitalRegistry
 from ..errors import HL7ParseError, MessageValidationError, TimestampError
 from ..hl7time import parse_hl7_ts
-from ..logsafety import short_hash
 from ..store import utc_iso
 from ..store.repo import (
     AckInRow,
@@ -78,6 +78,7 @@ Clock = Callable[[], datetime]
 VALID_REPORT_STATUSES = ("P", "F", "C")
 VALID_ACK_CODES = ("AA", "AE", "AR")
 SUPPORTED_ORDER_CONTROLS = ("NW", "CA")
+_TRIGGER_RE = re.compile(r"[A-Z][A-Z0-9]{2}")
 
 
 _PARSE_ACK_TEXT = {
@@ -98,11 +99,16 @@ class IngestPipeline:
     """Parses, validates, stores, and ACKs one message at a time.
 
     PHI discipline: log statements in this class carry only store row ids,
-    a short hash of MSH-10, hospital ids, message types from configuration,
-    byte lengths and reason codes. MSH-10 itself is written by the sender and
-    can hold anything, so it is never logged; the raw value stays in the
-    database and in reports. Patient names, MRNs and report text go to the
+    hospital ids, message types from configuration, byte lengths and reason
+    codes. MSH-10 is written by the sender and can hold anything, so it is
+    never logged, not even as a hash (a hash of a short identifier can be
+    reversed by trying every candidate); the store row id joins a log line
+    to the stored message. Patient names, MRNs and report text go to the
     database, never to the log.
+
+    ACK text back to the sender is a reason code plus, where one applies,
+    the name of the field that failed (``bad_timestamp: PID-7``). The
+    rejected value itself goes to the quarantine row only.
     """
 
     def __init__(
@@ -145,6 +151,9 @@ class IngestPipeline:
         msh4, msh6 = get_facilities(message)
         version = get_version(message)
         trigger = get_field(message, "MSH-9", component=2)
+        if not _TRIGGER_RE.fullmatch(trigger):
+            # Echoed into the ACK's MSH-9, so only a well-formed event code.
+            trigger = ""
         reply_app = get_field(message, "MSH-3")
         reply_facility = msh4
 
@@ -163,8 +172,10 @@ class IngestPipeline:
             )
 
         if not control_id:
-            decision = AckDecision("AR", ackmod.REASON_MISSING_CONTROL_ID, "MSH-10 is empty")
-            self._quarantine(None, decision, raw, received)
+            decision = AckDecision(
+                "AR", ackmod.REASON_MISSING_CONTROL_ID, "MSH-10 is empty", ack_text="MSH-10"
+            )
+            self._reject_routing(None, decision, raw, received)
             return respond(decision)
 
         hospital = self.registry.match_facility(msh4, msh6)
@@ -173,8 +184,9 @@ class IngestPipeline:
                 "AR",
                 ackmod.REASON_UNKNOWN_HOSPITAL,
                 f"MSH-4={msh4!r} MSH-6={msh6!r} match no configured hospital",
+                ack_text="MSH-4/MSH-6",
             )
-            self._quarantine(None, decision, raw, received)
+            self._reject_routing(None, decision, raw, received)
             return respond(decision)
 
         is_ack = msg_type == "ACK" or msg_type.startswith("ACK^")
@@ -183,8 +195,9 @@ class IngestPipeline:
                 "AR",
                 ackmod.REASON_UNEXPECTED_TYPE,
                 f"{msg_type!r} not in expected types for {hospital.hospital_id}",
+                ack_text="MSH-9",
             )
-            self._quarantine(hospital.hospital_id, decision, raw, received)
+            self._reject_routing(hospital.hospital_id, decision, raw, received)
             return respond(decision)
 
         try:
@@ -201,13 +214,12 @@ class IngestPipeline:
                     self._dispatch(hospital, message, msg_type, control_id, received)
         except MessageValidationError as exc:
             # The transaction above rolled back: no partial domain writes.
-            decision = AckDecision("AE", exc.reason, exc.detail)
+            decision = AckDecision("AE", exc.reason, exc.detail, ack_text=exc.field)
             quarantine_id = self._quarantine(hospital.hospital_id, decision, raw, received)
             log.warning(
-                "message rejected hospital=%s quarantine_id=%d ctl_hash=%s type=%s reason=%s",
+                "message rejected hospital=%s quarantine_id=%d type=%s reason=%s",
                 hospital.hospital_id,
                 quarantine_id,
-                short_hash(control_id),
                 _log_type(hospital, msg_type),
                 exc.reason,
             )
@@ -215,11 +227,10 @@ class IngestPipeline:
 
         row_id = message_row_id(self.conn, hospital_id=hospital.hospital_id, control_id=control_id)
         log.info(
-            "%s hospital=%s message_id=%d ctl_hash=%s type=%s",
+            "%s hospital=%s message_id=%d type=%s",
             "duplicate message re-acked" if outcome == "duplicate" else "message accepted",
             hospital.hospital_id,
             row_id,
-            short_hash(control_id),
             _log_type(hospital, msg_type),
         )
         return respond(AckDecision("AA", "accepted"))
@@ -231,30 +242,55 @@ class IngestPipeline:
         try:
             return self.handle_bytes(payload).encode("utf-8")
         except Exception as exc:  # noqa: BLE001  server boundary, logged below
+            # Keep the type and the frames only. The exception message can
+            # quote field values, so it is dropped here, and the rest of the
+            # handling runs outside this block so no later error carries it
+            # as __context__.
+            error_type = type(exc).__name__
+            frames = "".join(traceback.format_tb(exc.__traceback__)).rstrip()
+        return self._internal_error_ack(payload, error_type, frames)
+
+    def _internal_error_ack(self, payload: bytes, error_type: str, frames: str) -> bytes:
+        """Quarantine and AR for a frame that raised. Never raises itself: a
+        failing clock or store still ends in an AR to the sender."""
+        try:
             now = self.clock()
-            decision = AckDecision("AR", ackmod.REASON_INTERNAL_ERROR, "unhandled error; see log")
+        except Exception:  # noqa: BLE001  server boundary
+            now = datetime.now(UTC)
+        decision = AckDecision(
+            "AR", ackmod.REASON_INTERNAL_ERROR, "unhandled error; see log", ack_text="see log"
+        )
+        quarantine_id: int | None = None
+        quarantine_error = ""
+        try:
             quarantine_id = self._quarantine(None, decision, payload, utc_iso(now))
-            # Exception type and stack frames only. The exception message can
-            # quote field values, so it is not logged; the frames show code.
+        except Exception as q_exc:  # noqa: BLE001  server boundary, logged below
+            quarantine_error = type(q_exc).__name__
+        log.error(
+            "internal error handling frame quarantine_id=%s bytes=%d error=%s\n%s",
+            quarantine_id if quarantine_id is not None else "none",
+            len(payload),
+            error_type,
+            frames,
+        )
+        if quarantine_error:
             log.error(
-                "internal error handling frame quarantine_id=%d bytes=%d error=%s\n%s",
-                quarantine_id,
-                len(payload),
-                type(exc).__name__,
-                "".join(traceback.format_tb(exc.__traceback__)).rstrip(),
+                "quarantine write failed error=%s; the frame is neither stored nor"
+                " quarantined, AR sent",
+                quarantine_error,
             )
-            return build_ack(
-                decision=decision,
-                original_control_id="UNKNOWN",
-                ack_control_id=self._next_ack_id(),
-                sending_app=self.sending_app,
-                sending_facility=self.sending_facility,
-                receiving_app="UNKNOWN",
-                receiving_facility="UNKNOWN",
-                trigger_event="",
-                version="2.3",
-                now=now,
-            ).encode("utf-8")
+        return build_ack(
+            decision=decision,
+            original_control_id="UNKNOWN",
+            ack_control_id=self._next_ack_id(),
+            sending_app=self.sending_app,
+            sending_facility=self.sending_facility,
+            receiving_app="UNKNOWN",
+            receiving_facility="UNKNOWN",
+            trigger_event="",
+            version="2.3",
+            now=now,
+        ).encode("utf-8")
 
     async def handle_junk(self, data: bytes) -> None:
         """Quarantine bytes received outside MLLP framing. No ACK possible."""
@@ -282,7 +318,9 @@ class IngestPipeline:
             len(raw),
         )
         return build_ack(
-            decision=AckDecision("AR", ackmod.REASON_PARSE_ERROR, _PARSE_ACK_TEXT[cause]),
+            decision=AckDecision(
+                "AR", ackmod.REASON_PARSE_ERROR, detail, ack_text=_PARSE_ACK_TEXT[cause]
+            ),
             original_control_id="UNKNOWN",
             ack_control_id=self._next_ack_id(),
             sending_app=self.sending_app,
@@ -292,6 +330,19 @@ class IngestPipeline:
             trigger_event="",
             version="2.3",
             now=now,
+        )
+
+    def _reject_routing(
+        self, hospital_id: str | None, decision: AckDecision, raw: bytes, received: str
+    ) -> None:
+        """Quarantine a message rejected before validation (no control id,
+        unknown hospital, unexpected type) and say so in the log."""
+        quarantine_id = self._quarantine(hospital_id, decision, raw, received)
+        log.warning(
+            "message rejected hospital=%s quarantine_id=%d reason=%s",
+            hospital_id or "-",
+            quarantine_id,
+            decision.reason,
         )
 
     def _quarantine(
@@ -313,7 +364,9 @@ class IngestPipeline:
         try:
             return utc_iso(parse_hl7_ts(value, default_tz=hospital.tzinfo))
         except TimestampError as exc:
-            raise MessageValidationError(ackmod.REASON_BAD_TIMESTAMP, f"{field}: {exc}") from exc
+            raise MessageValidationError(
+                ackmod.REASON_BAD_TIMESTAMP, f"{field}: {exc}", field=field
+            ) from None
 
     def _dispatch(
         self,
@@ -337,19 +390,22 @@ class IngestPipeline:
             raise MessageValidationError(
                 ackmod.REASON_NO_HANDLER,
                 f"no handler implemented for expected type {msg_type!r}",
+                field="MSH-9",
             )
 
     def _extract_patient(self, hospital: HospitalConfig, message: hl7.Message) -> PatientRow:
         mrn = get_field(message, "PID-3", repetition=1, component=1)
         if not mrn:
-            raise MessageValidationError(ackmod.REASON_MISSING_MRN, "PID-3 is empty")
+            raise MessageValidationError(ackmod.REASON_MISSING_MRN, "PID-3 is empty", field="PID-3")
         birth_raw = get_field(message, "PID-7")
         birth_date: str | None = None
         if birth_raw:
             try:
                 parsed = parse_hl7_ts(birth_raw, default_tz=hospital.tzinfo)
             except TimestampError as exc:
-                raise MessageValidationError(ackmod.REASON_BAD_TIMESTAMP, f"PID-7: {exc}") from exc
+                raise MessageValidationError(
+                    ackmod.REASON_BAD_TIMESTAMP, f"PID-7: {exc}", field="PID-7"
+                ) from None
             birth_date = parsed.date().isoformat()
         return PatientRow(
             hospital_id=hospital.hospital_id,
@@ -369,7 +425,7 @@ class IngestPipeline:
             merged_mrn = get_field(message, "MRG-1", repetition=1, component=1)
             if not merged_mrn:
                 raise MessageValidationError(
-                    ackmod.REASON_MISSING_MERGE_MRN, "ADT^A40 without MRG-1"
+                    ackmod.REASON_MISSING_MERGE_MRN, "ADT^A40 without MRG-1", field="MRG-1"
                 )
             event_raw = get_field(message, "MSH-7")
             merged_at = self._parse_ts(hospital, event_raw, "MSH-7") if event_raw else received
@@ -387,6 +443,7 @@ class IngestPipeline:
             raise MessageValidationError(
                 ackmod.REASON_MISSING_ACCESSION,
                 f"{hospital.accession_field} is empty (per {hospital.hospital_id} config)",
+                field=hospital.accession_field,
             )
         return accession
 
@@ -394,7 +451,7 @@ class IngestPipeline:
         order_control = get_field(message, "ORC-1")
         if order_control not in SUPPORTED_ORDER_CONTROLS:
             raise MessageValidationError(
-                ackmod.REASON_UNSUPPORTED_ORDER_CONTROL, f"ORC-1={order_control!r}"
+                ackmod.REASON_UNSUPPORTED_ORDER_CONTROL, f"ORC-1={order_control!r}", field="ORC-1"
             )
         accession = self._accession(hospital, message)
         patient = self._extract_patient(hospital, message)
@@ -403,7 +460,9 @@ class IngestPipeline:
         ordered_raw = get_field(message, "ORC-9") or get_field(message, "MSH-7")
         if not ordered_raw:
             raise MessageValidationError(
-                ackmod.REASON_BAD_TIMESTAMP, "no order timestamp in ORC-9 or MSH-7"
+                ackmod.REASON_BAD_TIMESTAMP,
+                "no order timestamp in ORC-9 or MSH-7",
+                field="ORC-9/MSH-7",
             )
         ordered_at = self._parse_ts(hospital, ordered_raw, "ORC-9/MSH-7")
 
@@ -458,6 +517,7 @@ class IngestPipeline:
             raise MessageValidationError(
                 ackmod.REASON_UNKNOWN_REPORT_STATUS,
                 f"OBR-25={status!r} not one of {VALID_REPORT_STATUSES}; refusing to guess",
+                field="OBR-25",
             )
         patient = self._extract_patient(hospital, message)
         upsert_patient(self.conn, patient)
@@ -500,11 +560,15 @@ class IngestPipeline:
         msa_control = get_field(message, "MSA-2")
         if not msa_code or not msa_control:
             raise MessageValidationError(
-                ackmod.REASON_MISSING_MSA, f"MSA-1={msa_code!r} MSA-2={msa_control!r}"
+                ackmod.REASON_MISSING_MSA,
+                f"MSA-1={msa_code!r} MSA-2={msa_control!r}",
+                field="MSA-1/MSA-2",
             )
         if msa_code not in VALID_ACK_CODES:
             raise MessageValidationError(
-                ackmod.REASON_MISSING_MSA, f"MSA-1={msa_code!r} not one of {VALID_ACK_CODES}"
+                ackmod.REASON_MISSING_MSA,
+                f"MSA-1={msa_code!r} not one of {VALID_ACK_CODES}",
+                field="MSA-1",
             )
         reason = get_field(message, "MSA-3") or get_field(message, "ERR-1") or None
         insert_ack_in(

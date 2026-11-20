@@ -1,14 +1,67 @@
 """Exception hierarchy. Every failure path raises one of these; nothing is swallowed."""
 
 import json
-import re
 from urllib.parse import urlsplit
 
-_ISSUE_CODE_RE = re.compile(r"[a-z][a-z-]{0,39}")
+# The FHIR R4 / R4B IssueType value set
+# (http://hl7.org/fhir/R4B/valueset-issue-type.html). A server can put any
+# text in issue.code; only these exact codes are ever shown.
+FHIR_ISSUE_TYPES = frozenset(
+    {
+        "invalid",
+        "structure",
+        "required",
+        "value",
+        "invariant",
+        "security",
+        "login",
+        "unknown",
+        "expired",
+        "forbidden",
+        "suppressed",
+        "processing",
+        "not-supported",
+        "duplicate",
+        "multiple-matches",
+        "not-found",
+        "deleted",
+        "too-long",
+        "code-invalid",
+        "extension",
+        "too-costly",
+        "business-rule",
+        "conflict",
+        "transient",
+        "lock-error",
+        "no-store",
+        "exception",
+        "timeout",
+        "incomplete",
+        "throttled",
+        "informational",
+    }
+)
+UNRECOGNIZED_ISSUE_CODE = "unrecognized-code"
+
+
+def _url_path(url: str) -> str:
+    """The path of ``url`` only: no scheme, host, user info, query or fragment."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return "[unparseable URL]"
+    return path or "/"
 
 
 class BridgeError(Exception):
-    """Base class for all hl7bridge errors."""
+    """Base class for all hl7bridge errors.
+
+    ``quotes_input`` is True for the classes whose message can quote a
+    sender-written value (a timestamp, a broken segment). The CLI prints the
+    message of every other class, and only the class name for these.
+    """
+
+    quotes_input: bool = False
 
 
 class ConfigError(BridgeError):
@@ -17,6 +70,8 @@ class ConfigError(BridgeError):
 
 class HL7ParseError(BridgeError):
     """Payload could not be parsed as an HL7 v2 message at all."""
+
+    quotes_input = True
 
 
 class UnknownHospitalError(BridgeError):
@@ -27,17 +82,26 @@ class MessageValidationError(BridgeError):
     """Message parsed but failed validation for its type.
 
     ``reason`` is a stable machine-readable code (e.g. ``missing_accession``)
-    used in the quarantine table and in tests; ``detail`` is human context.
+    used in the quarantine table, the ACK and the log. ``field`` names the
+    HL7 field that failed (``PID-7``); it is fixed text from the code, never
+    from the message, so it may go back to the sender in the ACK.
+    ``detail`` is human context that can quote the rejected value, so it is
+    written to the quarantine row only.
     """
 
-    def __init__(self, reason: str, detail: str = "") -> None:
+    quotes_input = True
+
+    def __init__(self, reason: str, detail: str = "", *, field: str = "") -> None:
         self.reason = reason
         self.detail = detail
+        self.field = field
         super().__init__(f"{reason}: {detail}" if detail else reason)
 
 
 class TimestampError(BridgeError):
     """HL7 timestamp missing, malformed, or of insufficient precision."""
+
+    quotes_input = True
 
 
 class FhirMappingError(BridgeError):
@@ -59,7 +123,7 @@ class FhirPostError(BridgeError):
         self.url = url
         self.body = body
         self.reason = reason
-        self.path = urlsplit(url).path or url.split("?", 1)[0]
+        self.path = _url_path(url)
         if status_code:
             text = f"FHIR server returned {status_code} for {self.path}"
         else:
@@ -75,8 +139,11 @@ class FhirPostError(BridgeError):
     def issue_codes(self) -> list[str]:
         """OperationOutcome ``issue.code`` values from the body, if any.
 
-        Only values shaped like FHIR codes (lower case letters and hyphens)
-        are returned, so a body cannot smuggle free text through here.
+        A code from the FHIR IssueType value set is returned as is. Any other
+        value becomes the fixed text ``unrecognized-code``, so a body cannot
+        smuggle free text (a lower-cased surname, say) through here. A body
+        of the wrong shape (``issue`` not a list, entries not objects)
+        yields no codes instead of an exception.
         """
         try:
             payload = json.loads(self.body)
@@ -84,9 +151,16 @@ class FhirPostError(BridgeError):
             return []
         if not isinstance(payload, dict) or payload.get("resourceType") != "OperationOutcome":
             return []
+        issues = payload.get("issue")
+        if not isinstance(issues, list):
+            return []
         codes: list[str] = []
-        for issue in payload.get("issue") or []:
-            code = issue.get("code") if isinstance(issue, dict) else None
-            if isinstance(code, str) and _ISSUE_CODE_RE.fullmatch(code) and code not in codes:
-                codes.append(code)
+        for issue in issues:
+            if not isinstance(issue, dict) or "code" not in issue:
+                continue
+            raw = issue["code"]
+            code = raw if isinstance(raw, str) and raw in FHIR_ISSUE_TYPES else None
+            shown = code or UNRECOGNIZED_ISSUE_CODE
+            if shown not in codes:
+                codes.append(shown)
         return codes

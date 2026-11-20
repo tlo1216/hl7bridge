@@ -6,8 +6,10 @@ match updates in place (200), more than one is a server-side 412 that we
 surface as an error instead of papering over.
 
 Those query strings carry MRNs and accessions, so the client installs a
-filter that strips URL queries from httpx and httpcore log records, and
-FhirPostError never puts the query or the server body in its message.
+filter that rebuilds httpx and httpcore log records from safe fields only,
+and FhirPostError never puts the query or the server body in its message.
+Transport errors are raised ``from None``: the httpx exception text holds
+the full URL, query included, and would print in any traceback.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import httpx
 from fhir.resources.R4B.resource import Resource
 
 from ..errors import FhirPostError
-from ..logsafety import install_third_party_redaction
+from ..logsafety import install_third_party_redaction, safe_url
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +64,7 @@ class HapiClient:
         except httpx.TransportError as exc:
             raise FhirPostError(
                 0, url, str(exc), reason=f"transport error ({type(exc).__name__})"
-            ) from exc
+            ) from None
 
     def upsert(self, resource: Resource) -> tuple[str, str]:
         """Conditional update keyed on the resource's first identifier.
@@ -125,7 +127,11 @@ class HapiClient:
             response = self._client.get(f"{self.base_url}/metadata")
         except httpx.TransportError as exc:
             # Probe failure is an expected outcome, but never a silent one.
-            log.warning("FHIR /metadata probe failed for %s: %s", self.base_url, type(exc).__name__)
+            log.warning(
+                "FHIR /metadata probe failed for %s: %s",
+                safe_url(self.base_url),
+                type(exc).__name__,
+            )
             return False
         return response.status_code == 200
 
@@ -141,7 +147,7 @@ class HapiClient:
                 f"{self.base_url}/metadata",
                 str(exc),
                 reason=f"transport error ({type(exc).__name__})",
-            ) from exc
+            ) from None
         summary: dict[str, Any] = {"status_code": response.status_code}
         if response.status_code == 200:
             body = response.json()

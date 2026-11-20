@@ -10,7 +10,10 @@ States:
 The first ACK (by received time) decides the terminal state; later ACKs are
 counted as duplicates, and a later ACK that disagrees with the first is
 reported as a conflict, never silently reconciled. ACKs whose control id
-matches nothing we sent are listed separately, never dropped.
+matches nothing we sent are listed separately, never dropped. Outbound
+reports whose hospital is no longer configured cannot be judged against a
+timeout; they are counted in their own loud bucket, never dropped, and never
+named (the control id is MSH-10, which can hold anything).
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ class OutboundOutcome:
 class AckReport:
     outcomes: list[OutboundOutcome] = field(default_factory=list)
     unknown_acks: list[sqlite3.Row] = field(default_factory=list)
+    unconfigured: list[sqlite3.Row] = field(default_factory=list)
 
     def by_state(self, hospital_id: str | None = None) -> dict[str, list[OutboundOutcome]]:
         result: dict[str, list[OutboundOutcome]] = {state: [] for state in STATES}
@@ -69,10 +73,8 @@ def track_acks(conn: sqlite3.Connection, registry: HospitalRegistry, now: dateti
     for row in outbound:
         hospital = registry.by_id.get(row["hospital_id"])
         if hospital is None:
-            raise ValueError(
-                f"outbound report {row['control_id']!r} references unconfigured hospital "
-                f"{row['hospital_id']!r}"
-            )
+            report.unconfigured.append(row)
+            continue
         key = (row["hospital_id"], row["control_id"])
         acks = acks_by_key.get(key, [])
         if not acks:
@@ -110,12 +112,21 @@ def track_acks(conn: sqlite3.Connection, registry: HospitalRegistry, now: dateti
         if key not in outbound_keys:
             report.unknown_acks.extend(acks)
 
-    assert len(report.outcomes) == len(outbound), "terminal-state partition broken"
+    assert len(report.outcomes) + len(report.unconfigured) == len(outbound), (
+        "terminal-state partition broken"
+    )
     return report
 
 
 def render_ack_text(report: AckReport, registry: HospitalRegistry) -> str:
     lines: list[str] = []
+    if report.unconfigured:
+        lines.append(
+            f"UNCONFIGURED HOSPITAL: {len(report.unconfigured)} outbound report(s) name a"
+            " hospital that is not in the config folder, so no state can be given."
+            " Restore the profile or reload the outbound log."
+        )
+        lines.append("")
     for hosp_id in sorted(registry.by_id):
         states = report.by_state(hosp_id)
         lines.append(f"== {hosp_id} ==")

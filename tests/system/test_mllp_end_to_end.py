@@ -38,7 +38,7 @@ def flow(tmp_path_factory):
     from hl7bridge.ingest.loaders import load_outbound, load_studies
 
     load_studies(conn, registry, out / "dicom")
-    load_outbound(conn, out / "outbound_reports.jsonl")
+    load_outbound(conn, registry, out / "outbound_reports.jsonl")
     yield conn, registry, manifest, acks
     conn.close()
 

@@ -38,5 +38,5 @@ def ingest_corpus(
 
         ack_codes.append(get_field(parse_hl7(ack), "MSA-1"))
     load_studies(conn, registry, out / "dicom")
-    load_outbound(conn, out / "outbound_reports.jsonl")
+    load_outbound(conn, registry, out / "outbound_reports.jsonl")
     return conn, pipeline, ack_codes

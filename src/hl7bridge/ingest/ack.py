@@ -32,9 +32,15 @@ REASON_INTERNAL_ERROR = "internal_error"
 
 @dataclass(frozen=True, slots=True)
 class AckDecision:
+    """``reason`` is 'accepted' or a REASON_* code. ``detail`` can quote the
+    rejected value and goes to the quarantine row only. ``ack_text`` is
+    fixed text from the code (usually a field name such as ``PID-7``) that
+    may go back to the sender; it never holds a sender-written value."""
+
     code: AckCode
-    reason: str  # 'accepted' or a REASON_* quarantine code
+    reason: str
     detail: str = ""
+    ack_text: str = ""
 
 
 def build_ack(
@@ -53,7 +59,8 @@ def build_ack(
     """Render an original-mode ACK. For unparseable input the caller passes
     original_control_id='UNKNOWN' so the rejection is still addressable."""
     ts = format_hl7_ts(now, include_offset=True)
-    msa_text = decision.detail or decision.reason
+    # MSA-3 is the reason code and the fixed ack_text, never the detail.
+    msa_text = f"{decision.reason}: {decision.ack_text}" if decision.ack_text else decision.reason
     ack_type = f"ACK^{trigger_event}" if trigger_event else "ACK"
     msh = "|".join(
         [

@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import sys
+import traceback
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -20,13 +21,13 @@ from pathlib import Path
 from . import __version__
 from .acks import render_ack_text, track_acks
 from .config import HospitalRegistry
-from .errors import FhirPostError
+from .errors import BridgeError, FhirPostError
 from .fhir import HapiClient, render_sync_text, sync_to_fhir
 from .ingest import IngestPipeline, send_messages, serve
 from .ingest.loaders import load_outbound, load_studies
 from .ingest.parser import get_field, parse_hl7
 from .lint import lint_directory, render_lint_text
-from .logsafety import configure_logging
+from .logsafety import configure_logging, safe_url
 from .reconcile import reconcile, render_reconcile_text
 from .store import connect, message_counts, quarantine_summary
 from .synth import generate, verify_manifest
@@ -42,7 +43,10 @@ def _registry(args: argparse.Namespace) -> HospitalRegistry:
 def _now_arg(value: str | None) -> datetime:
     if value is None:
         return datetime.now(UTC)
-    dt = datetime.fromisoformat(value)
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        raise SystemExit(f"--now {value!r} is not an ISO 8601 timestamp") from None
     if dt.tzinfo is None:
         raise SystemExit(f"--now {value!r} must carry a UTC offset, e.g. 2026-10-08T12:00:00+00:00")
     return dt
@@ -85,7 +89,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         raise SystemExit(
             f"cannot listen on {args.host}:{args.port}: {reason}. Is another listener"
             " running? Stop it or pick a free port with --port."
-        ) from exc
+        ) from None
     return 0
 
 
@@ -118,7 +122,7 @@ def cmd_load_studies(args: argparse.Namespace) -> int:
 
 def cmd_load_outbound(args: argparse.Namespace) -> int:
     conn = connect(args.db)
-    n = load_outbound(conn, Path(args.path))
+    n = load_outbound(conn, _registry(args), Path(args.path))
     print(f"outbound report entries loaded: {n}")
     return 0
 
@@ -177,7 +181,7 @@ def cmd_fhir_probe(args: argparse.Namespace) -> int:
 def _fhir_probe(args: argparse.Namespace) -> int:
     with HapiClient(args.fhir_base, extra_headers=_fhir_headers()) as client:
         summary = client.capability_summary()
-        print(f"server: {args.fhir_base}")
+        print(f"server: {safe_url(args.fhir_base)}")
         print(f"  HTTP {summary['status_code']}")
         if summary["status_code"] != 200:
             # Status and OperationOutcome codes only; the body is not echoed.
@@ -202,7 +206,9 @@ def cmd_fhir_sync(args: argparse.Namespace) -> int:
     conn = connect(args.db)
     with HapiClient(args.fhir_base, extra_headers=_fhir_headers()) as client:
         if not client.metadata_ok():
-            raise SystemExit(f"FHIR server at {args.fhir_base} is not answering /metadata")
+            raise SystemExit(
+                f"FHIR server at {safe_url(args.fhir_base)} is not answering /metadata"
+            )
         try:
             report = sync_to_fhir(conn, _registry(args), client)
         except FhirPostError as exc:
@@ -259,6 +265,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("load-outbound", cmd_load_outbound, help="load the outbound report log")
     p.add_argument("--db", required=True)
+    p.add_argument("--config", required=True)
     p.add_argument("--path", required=True)
 
     p = add("reconcile", cmd_reconcile, help="order-to-image reconciliation report")
@@ -299,13 +306,38 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _report_error(exc: BaseException) -> int:
+    """The CLI error boundary. Prints one line per failure and no chained
+    causes: a cause can quote the rejected input. A BridgeError whose class
+    can quote input, and any exception from outside hl7bridge, print the
+    class name and the stack frames (code, not data) only."""
+    if isinstance(exc, BridgeError) and not exc.quotes_input:
+        print(f"hl7bridge: error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"hl7bridge: error: {type(exc).__name__} (message withheld: it can quote input)",
+        file=sys.stderr,
+    )
+    frames = "".join(traceback.format_tb(exc.__traceback__)).rstrip()
+    if frames:
+        print(frames, file=sys.stderr)
+    return 1 if isinstance(exc, BridgeError) else 2
+
+
 def main(argv: list[str] | None = None) -> int:
-    # Root at INFO, httpx and httpcore at WARNING, URL queries stripped from
-    # every record. See logsafety.py for why.
+    # Root at INFO, httpx, httpcore and pydicom at WARNING, URL queries and
+    # user info stripped from every record. See logsafety.py for why.
     configure_logging(logging.INFO)
     args = build_parser().parse_args(argv)
-    result: int = args.func(args)
-    return result
+    try:
+        result: int = args.func(args)
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as exc:  # noqa: BLE001  CLI boundary, reported below
+        status = _report_error(exc)
+    else:
+        return result
+    return status
 
 
 if __name__ == "__main__":
