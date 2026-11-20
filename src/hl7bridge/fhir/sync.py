@@ -26,10 +26,11 @@ patient's own messages are posted too, exactly as ``to-fhir --post`` posts
 them, so the two paths agree; nothing is moved onto the survivor. Chains
 (A to B, then B to C) are posted edge by edge. An A40 that the server's
 current state contradicts (the merged-away Patient already replaced by
-another, or a survivor that is itself merged away), or a message that cannot
-be mapped (a code not in its table, say), is SKIPPED LOUDLY: counted,
-listed with the field and reason, and
-surfaced in the rendered report. A sync that skipped anything never
+another, or a survivor that is itself merged away), a message that cannot
+be mapped (a code not in its table, say), and a report older than the
+version the server holds are the three reasons a message is SKIPPED LOUDLY:
+counted, listed with the field and reason, and surfaced in the rendered
+report. A sync that skipped anything never
 looks like a clean one. Identifier systems come from each hospital's
 profile.
 """

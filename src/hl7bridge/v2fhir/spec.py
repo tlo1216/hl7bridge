@@ -156,11 +156,12 @@ ROWS: tuple[SpecRow, ...] = (
         " PID-3, must match). One PID, one MRG and one repetition; the same MRN as PID-3, an"
         " empty or HL7-null MRN are refused. The Patient is set inactive and linked"
         " replaced-by to the survivor (PID). The IG (1.0.0) has no MRG-to-Patient map and no"
-        " ADT_A40 message map; its only MRG map, segment-mrg-to-account, targets Account and"
-        " leaves MRG-1 unmapped. A post merges this into the current Patient (existing links"
-        " stay, a contradicting or reversed merge is refused), or writes a bare inactive one"
-        " when the server has none; the offline Bundle makes it a conditional create. The"
-        " survivor gets no link.",
+        " ADT_A40 message map; its only MRG map, segment-mrg-to-account"
+        " (https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-mrg-to-account.html), maps"
+        " MRG-3 to Account.identifier and leaves MRG-1 unmapped. A post merges this into the"
+        " current Patient (existing links stay, a contradicting or reversed merge is refused), or"
+        " writes a bare inactive one when the server has none; the offline Bundle makes it a"
+        " conditional create. The survivor gets no link.",
     ),
     # PV1 to Encounter
     SpecRow(

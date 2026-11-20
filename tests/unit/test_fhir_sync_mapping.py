@@ -864,12 +864,44 @@ def test_a_merged_patient_created_by_another_writer_is_a_retryable_conflict(regi
         )
 
     server.before_commit = race
-    with pytest.raises(ConcurrentWriteError, match="send again"):
+    assert server.by_key("Patient", f"{_HOSPC_MRN}|SC1001")["name"][0]["family"] == "KEEPER"
+    with pytest.raises(ConcurrentWriteError, match="may already be updated") as caught:
         _post(server, registry, _a40())
+    assert caught.value.exit_code == 1
+    # The transaction committed: the survivor changed, the link is missing.
+    assert server.by_key("Patient", f"{_HOSPC_MRN}|SC1001")["name"][0]["family"] == "ZZZSAMPLE"
+    assert "link" not in server.by_key("Patient", _GONE)
     # The resend completes the merge.
     _post(server, registry, _a40())
     assert _links(server, "SC1002")[0]["type"] == "replaced-by"
     assert len(server.all("Patient")) == 2
+
+
+def test_a_survivor_created_by_another_writer_mid_merge_also_says_partial(registry):
+    server = FakeFhir()  # neither Patient is on the server: both are creates
+
+    def race(body):
+        server.before_commit = None
+        server._write(
+            "Patient",
+            "theirs",
+            {"resourceType": "Patient", "identifier": [{"system": _HOSPC_MRN, "value": "SC1001"}]},
+        )
+
+    server.before_commit = race
+    with pytest.raises(ConcurrentWriteError, match="may already be updated"):
+        _post(server, registry, _a40())
+    _post(server, registry, _a40())
+    assert _links(server, "SC1002")[0]["type"] == "replaced-by"
+
+
+def test_a_refused_merge_and_a_lost_race_exit_with_findings(registry, capsys):
+    from hl7bridge import cli
+    from hl7bridge.errors import EXIT_FINDINGS
+
+    for exc in (MergeRefusedError("fixed reason"), ConcurrentWriteError("Patient", partial=True)):
+        assert exc.exit_code == EXIT_FINDINGS
+        assert cli._report_error(exc, debug=False) == EXIT_FINDINGS
 
 
 def test_the_batch_post_refuses_an_a40_for_a_match_only_profile(registry):
@@ -880,21 +912,76 @@ def test_the_batch_post_refuses_an_a40_for_a_match_only_profile(registry):
     assert server.requests == []
 
 
-def test_sync_and_to_fhir_agree_when_the_merged_patient_has_other_messages(store, registry):
+def _merged_store(tmp_path, registry, *extra: str):
+    """A store in which SC1002 exists before the A40, so the store marks it
+    merged into SC1001; ``extra`` messages follow the A40."""
+    conn = connect(tmp_path / "merged.db")
+    pipeline = IngestPipeline(registry, conn)
+    for text in (_a08("SC1002", "OLDNAME"), _a08("SC1001", "KEEPER"), _a40(), *extra):
+        pipeline.handle_bytes(text.encode())
+    row = conn.execute("SELECT merged_into_mrn FROM patients WHERE mrn = 'SC1002'").fetchone()
+    assert row["merged_into_mrn"] == "SC1001", "the store must hold SC1002 as merged"
+    return conn
+
+
+def test_sync_and_to_fhir_agree_when_the_merged_patient_has_other_messages(tmp_path, registry):
     """The merged-away patient's later A08 is posted by both paths."""
-    late = _a08("SC1002", "LATE")
-    IngestPipeline(registry, store).handle_bytes(late.encode())
-    _, synced = _sync(store, registry)
+    late = _a08("SC1002", "LATE").replace("|TA08SC1002|", "|TA08LATE|")  # a new control id
+    texts = [_a08("SC1002", "OLDNAME"), _a08("SC1001", "KEEPER"), _a40(), late]
+    conn = _merged_store(tmp_path, registry, late)
+    _, synced = _sync(conn, registry)
+    conn.close()
     posted = FakeFhir()
-    texts = []
-    for path in sorted(SAMPLES_DIR.glob("*.hl7")):
-        text = path.read_bytes().decode()
-        try:
-            message_to_bundle(text, registry)
-        except MappingError:
-            continue
-        texts.append(text)
-    _post(posted, registry, *texts, late)
+    _post(posted, registry, *texts)
     assert _normalized(posted) == _normalized(synced)
     gone = synced.by_key("Patient", _GONE)
     assert gone["name"][0]["family"] == "LATE" and gone["active"] is False
+    assert gone["link"][0]["type"] == "replaced-by"
+
+
+def test_sync_posts_the_imaging_study_of_a_merged_patient(tmp_path, registry):
+    from hl7bridge.store.repo import StudyRow, insert_study
+
+    conn = _merged_store(tmp_path, registry)
+    insert_study(
+        conn,
+        StudyRow(
+            study_uid="1.2.3.4.5",
+            hospital_id="HOSPC",
+            accession=None,
+            modality="CT",
+            patient_mrn="SC1002",
+            study_at_utc="2026-10-07T08:00:00Z",
+            source_file=None,
+        ),
+    )
+    conn.commit()
+    report, server = _sync(conn, registry)
+    conn.close()
+    assert not report.skipped
+    assert report.created["ImagingStudy"] == 1
+    gone = server.by_key("Patient", _GONE)
+    (study,) = server.all("ImagingStudy")
+    assert study["subject"]["reference"] == f"Patient/{gone['id']}"
+    assert not hasattr(report, "merged_away")
+
+
+def test_the_live_test_hook_prints_the_operation_outcome_issues():
+    from tests.system.conftest import operation_outcome_text
+
+    body = json.dumps(
+        {
+            "resourceType": "OperationOutcome",
+            "issue": [
+                {
+                    "severity": "error",
+                    "code": "processing",
+                    "diagnostics": "HAPI-0000: two writes to one id",
+                }
+            ],
+        }
+    )
+    text = operation_outcome_text(FhirPostError(400, "http://h/fhir", body))
+    assert "returned" not in text and "HAPI answered 400 for /fhir" in text
+    assert "error processing: HAPI-0000: two writes to one id" in text
+    assert "not JSON" in operation_outcome_text(FhirPostError(500, "http://h/fhir", "<html>"))

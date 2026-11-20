@@ -32,6 +32,17 @@ profile format may still change between minor versions.
   US Core. `listen --target fhir` still answers A40 with AR
   `patient_read_only`.
 
+### Changed
+
+- `fhir sync` no longer leaves a merged-away patient out. Its messages and
+  its ImagingStudy rows are posted like any other patient's, so the sync
+  and `to-fhir --post` agree; the "messages left out (patient merged into
+  another)" line of the report and `FhirSyncReport.merged_away` are gone.
+- `to-fhir --post` and `fhir sync` fail an ADT^A40 the server contradicts,
+  and a Patient another writer created mid-merge, with exit 1 (findings),
+  not exit 3 (connection error). A lost create on either side of a merge
+  says the merge may be only partly applied and to send again.
+
 ## [0.5.0] - 2026-11-20
 
 ### Added

@@ -23,9 +23,10 @@ is sent, two things are read from the server and folded into it:
    replaced by another Patient, a survivor that is inactive or merged away
    itself (a reversed merge), and two entries that resolve to one server
    resource are refused. A resend of a merge already there passes. If another
-   writer creates the merged-away Patient between the read and the commit,
-   the conditional create answers 200, the survivor update has committed, and
-   ``ConcurrentWriteError`` says to send again (a resend is safe).
+   writer creates either Patient between the read and the commit, the
+   conditional create answers 200, the other Patient's write has committed,
+   and ``ConcurrentWriteError`` says the merge may be partly applied and to
+   send again (a resend is safe).
 2. **Retire** (ORU). A corrected report can drop a result. The current
    DiagnosticReport's ``result`` list is read, and each Observation in it
    whose key parses to this report's accession and that the new version no
@@ -55,7 +56,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..errors import BridgeError, ConfigError, FhirPostError
+from ..errors import EXIT_FINDINGS, BridgeError, ConfigError, FhirPostError
 from ..v2fhir.bundle import MERGE, MERGE_EVENT, MappedMessage, bundle_json, full_url, search_query
 from ..v2fhir.observation import KEY_JOIN, SET_ID_PART, SUB_ID_PART
 from .client import EntryResult, HapiClient
@@ -109,13 +110,15 @@ class StaleResultError(BridgeError):
 class ConcurrentWriteError(FhirPostError):
     """Another writer created a resource between our search and our write."""
 
+    exit_code = EXIT_FINDINGS  # the server answered; a resend is the remedy
+
     def __init__(self, kind: str, *, partial: bool = False) -> None:
         reason = f"another writer created the {kind} first; nothing of it was merged, send again"
         if partial:
             reason = (
-                f"another writer created the {kind} while the merge was posted; it was not"
-                " linked and the surviving Patient may already be updated; send again (a"
-                " resend is safe)"
+                f"another writer created the {kind} while the merge was posted; the merge may"
+                " be only partly applied (the other Patient may already be updated, or the"
+                " link missing); send again (a resend is safe)"
             )
         super().__init__(0, kind, reason=reason)
 
@@ -124,6 +127,8 @@ class MergeRefusedError(FhirPostError):
     """An ADT^A40 that the server's current state does not allow, or that
     two entries resolve to one resource. Raised while preparing, so nothing
     was written; the reason is fixed text."""
+
+    exit_code = EXIT_FINDINGS  # a refusal of the message, not a connection failure
 
     def __init__(self, reason: str) -> None:
         super().__init__(0, "Patient", reason=reason)
@@ -424,9 +429,9 @@ def check_created(
     for n in creates:
         if results[n].code != 201:
             kind = str(body["entry"][n]["resource"]["resourceType"])
-            # An A40 writes the survivor in the same transaction, so a lost
-            # create of the merged-away Patient (entry 1) leaves it updated.
-            raise ConcurrentWriteError(kind, partial=merge_event and n == 1)
+            # An A40 writes both Patients in one transaction, so a lost
+            # create of either leaves the other updated.
+            raise ConcurrentWriteError(kind, partial=merge_event)
 
 
 def refuse_match_only(hospital_id: str, policy: str) -> None:

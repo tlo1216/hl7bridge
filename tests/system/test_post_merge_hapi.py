@@ -428,7 +428,7 @@ def test_the_server_rejects_two_writes_to_one_id_as_the_fake_does(client, run):
         "resource": patient,
         "request": {"method": "PUT", "url": f"Patient/{patient['id']}"},
     }
-    with pytest.raises(FhirPostError):
+    with pytest.raises(FhirPostError, match="returned 400"):
         client.commit({"resourceType": "Bundle", "type": "transaction", "entry": [entry, entry]})
 
 
