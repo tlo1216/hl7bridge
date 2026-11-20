@@ -29,13 +29,13 @@ import re
 import sqlite3
 import traceback
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from functools import partial
 from typing import TYPE_CHECKING
 
 from ..config import HospitalConfig, HospitalRegistry
 from ..errors import HL7ParseError, MessageValidationError, TimestampError
-from ..hl7time import parse_hl7_ts
+from ..hl7time import message_tz, parse_hl7_ts
 from ..store import utc_iso
 from ..store.repo import (
     AckInRow,
@@ -66,6 +66,7 @@ from .parser import (
     get_facilities,
     get_field,
     get_message_type,
+    get_mrn,
     get_version,
     parse_hl7,
 )
@@ -135,6 +136,10 @@ class IngestPipeline:
         self.sending_app = sending_app
         self.sending_facility = sending_facility
         self._ack_seq = itertools.count(1)
+        # The zone for times with no offset in the message being handled:
+        # MSH-7's offset when it has one, else the hospital's (HL7 v2 makes
+        # the MSH-7 offset the message default). Set per message in _dispatch.
+        self._message_tz: tzinfo | None = None
 
     # -- public entry points ------------------------------------------------
 
@@ -374,13 +379,28 @@ class IngestPipeline:
 
     def _parse_ts(self, hospital: HospitalConfig, value: str, field: str) -> str:
         try:
-            return utc_iso(parse_hl7_ts(value, default_tz=hospital.tzinfo))
+            return utc_iso(parse_hl7_ts(value, default_tz=self._message_tz or hospital.tzinfo))
         except TimestampError as exc:
             raise MessageValidationError(
                 ackmod.REASON_BAD_TIMESTAMP, f"{field}: {exc}", field=field
             ) from None
 
     def _dispatch(
+        self,
+        hospital: HospitalConfig,
+        message: hl7.Message,
+        msg_type: str,
+        control_id: str,
+        received: str,
+        message_id: int,
+    ) -> None:
+        self._message_tz = message_tz(get_field(message, "MSH-7"), hospital.tzinfo)
+        try:
+            self._dispatch_type(hospital, message, msg_type, control_id, received, message_id)
+        finally:
+            self._message_tz = None
+
+    def _dispatch_type(
         self,
         hospital: HospitalConfig,
         message: hl7.Message,
@@ -407,7 +427,15 @@ class IngestPipeline:
             )
 
     def _extract_patient(self, hospital: HospitalConfig, message: hl7.Message) -> PatientRow:
-        mrn = get_field(message, "PID-3", repetition=1, component=1)
+        # The same PID-3 choice as the FHIR mapping (parser.pick_mrn_repetition),
+        # so the store and FHIR key one patient on one MRN.
+        mrn = get_mrn(message)
+        if mrn is None:
+            raise MessageValidationError(
+                ackmod.REASON_MISSING_MRN,
+                "PID-3 has typed identifiers (PID-3.5) and none is MR",
+                field="PID-3",
+            )
         if not mrn:
             raise MessageValidationError(ackmod.REASON_MISSING_MRN, "PID-3 is empty", field="PID-3")
         birth_raw = get_field(message, "PID-7")

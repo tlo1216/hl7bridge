@@ -15,7 +15,7 @@ from fhir.resources.R4B.reference import Reference
 from fhir.resources.R4B.servicerequest import ServiceRequest
 
 from ..errors import MappingError
-from .common import MapContext, procedure_concept, timestamp, typed_identifier
+from .common import MapContext, check_key, procedure_concept, timestamp, typed_identifier
 from .tables import ORDER_STATUS
 
 
@@ -24,7 +24,7 @@ def accession_value(ctx: MapContext) -> str:
     accession = ctx.reader.get(field)
     if not accession:
         raise MappingError(field, "no accession in the field the hospital profile names")
-    return accession
+    return check_key(accession, field)
 
 
 def accession_identifier(ctx: MapContext) -> Identifier:
@@ -42,7 +42,12 @@ def procedure_code(ctx: MapContext) -> CodeableConcept | None:
 
 
 def orc_obr_to_service_request(ctx: MapContext, patient_ref: str) -> ServiceRequest:
+    """One ORC and OBR pair. ``authoredOn`` is written for a new order
+    (NW) only: a cancel (CA) is not when the order was written, and the
+    post keeps the time the NW set (the ServiceRequest is merged)."""
     r = ctx.reader
+    if r.count("ORC") != 1 or r.count("OBR") != 1:
+        raise MappingError("ORC/OBR", "an ORM must hold exactly one order (ORC and OBR)")
     control = r.get("ORC-1")
     if not control:
         raise MappingError("ORC-1", "no order control code")
@@ -51,7 +56,9 @@ def orc_obr_to_service_request(ctx: MapContext, patient_ref: str) -> ServiceRequ
     placer = r.get("ORC-2") or r.get("OBR-2")
     if placer:
         identifiers.append(typed_identifier("PLAC", ctx.hospital.systems.placer, placer))
-    authored = timestamp(ctx, "ORC-9") or timestamp(ctx, "MSH-7")
+    authored = None
+    if control == "NW":
+        authored = timestamp(ctx, "ORC-9") or timestamp(ctx, "MSH-7")
     kwargs: dict[str, Any] = {}
     code = procedure_code(ctx)
     if code is not None:

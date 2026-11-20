@@ -32,8 +32,9 @@
         "birthDate": "1975-03-15"
       },
       "request": {
-        "method": "PUT",
-        "url": "Patient?identifier=urn:hl7bridge:hospb:mrn|SB1001"
+        "method": "POST",
+        "url": "Patient",
+        "ifNoneExist": "identifier=urn:hl7bridge:hospb:mrn|SB1001"
       }
     },
     {

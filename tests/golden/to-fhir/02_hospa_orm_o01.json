@@ -32,8 +32,9 @@
         "birthDate": "1980-01-01"
       },
       "request": {
-        "method": "PUT",
-        "url": "Patient?identifier=urn:hl7bridge:hospa:mrn|SA1001"
+        "method": "POST",
+        "url": "Patient",
+        "ifNoneExist": "identifier=urn:hl7bridge:hospa:mrn|SA1001"
       }
     },
     {

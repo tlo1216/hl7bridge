@@ -32,18 +32,19 @@
         "birthDate": "1980-01-01"
       },
       "request": {
-        "method": "PUT",
-        "url": "Patient?identifier=urn:hl7bridge:hospa:mrn|SA1001"
+        "method": "POST",
+        "url": "Patient",
+        "ifNoneExist": "identifier=urn:hl7bridge:hospa:mrn|SA1001"
       }
     },
     {
-      "fullUrl": "urn:uuid:6f4c7ca0-599e-59e5-81bc-abdd90d2a54c",
+      "fullUrl": "urn:uuid:1fd44676-7f5a-5c2b-84ad-344e133cbb88",
       "resource": {
         "resourceType": "Observation",
         "identifier": [
           {
             "system": "urn:hl7bridge:hospa:observation",
-            "value": "SACCA0002/MEAS1/1"
+            "value": "SACCA0002/MEAS1/sub/1"
           }
         ],
         "status": "final",
@@ -85,17 +86,17 @@
       },
       "request": {
         "method": "PUT",
-        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0002/MEAS1/1"
+        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0002/MEAS1/sub/1"
       }
     },
     {
-      "fullUrl": "urn:uuid:b64425e1-8356-5adb-9fcc-6d05b8c18053",
+      "fullUrl": "urn:uuid:483c89cb-5529-5590-b6bd-016137b16cd3",
       "resource": {
         "resourceType": "Observation",
         "identifier": [
           {
             "system": "urn:hl7bridge:hospa:observation",
-            "value": "SACCA0002/FIND1/1"
+            "value": "SACCA0002/FIND1/sub/1"
           }
         ],
         "status": "final",
@@ -130,37 +131,7 @@
       },
       "request": {
         "method": "PUT",
-        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0002/FIND1/1"
-      }
-    },
-    {
-      "fullUrl": "urn:uuid:8f49df7d-5d63-527a-ac7e-2db517512970",
-      "resource": {
-        "resourceType": "Observation",
-        "identifier": [
-          {
-            "system": "urn:hl7bridge:hospa:observation",
-            "value": "SACCA0002/RPT/set-3"
-          }
-        ],
-        "status": "final",
-        "code": {
-          "coding": [
-            {
-              "code": "RPT",
-              "display": "Report Text"
-            }
-          ],
-          "text": "Report Text"
-        },
-        "subject": {
-          "reference": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a"
-        },
-        "valueString": "Synthetic structured report. Measurement within range."
-      },
-      "request": {
-        "method": "PUT",
-        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0002/RPT/set-3"
+        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0002/FIND1/sub/1"
       }
     },
     {
@@ -216,13 +187,10 @@
         "issued": "2026-10-07T19:00:00Z",
         "result": [
           {
-            "reference": "urn:uuid:6f4c7ca0-599e-59e5-81bc-abdd90d2a54c"
+            "reference": "urn:uuid:1fd44676-7f5a-5c2b-84ad-344e133cbb88"
           },
           {
-            "reference": "urn:uuid:b64425e1-8356-5adb-9fcc-6d05b8c18053"
-          },
-          {
-            "reference": "urn:uuid:8f49df7d-5d63-527a-ac7e-2db517512970"
+            "reference": "urn:uuid:483c89cb-5529-5590-b6bd-016137b16cd3"
           }
         ],
         "conclusion": "Synthetic structured report. Measurement within range.",

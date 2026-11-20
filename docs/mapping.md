@@ -19,11 +19,15 @@ Identifier systems come from the hospital profile (`fhir.identifier_systems`).
 | ADT^A01 | Patient, Encounter (when PV1-19 is valued) |
 | ADT^A04 | Patient, Encounter (when PV1-19 is valued) |
 | ADT^A08 | Patient, Encounter (when PV1-19 is valued) |
-| ORM^O01 | Patient, ServiceRequest |
-| ORU^R01 | Patient, Observation per OBX, DiagnosticReport |
+| ORM^O01 | Patient (created when missing), ServiceRequest |
+| ORU^R01 | Patient (created when missing), Observation per structured OBX, DiagnosticReport |
 
-Each resource is a conditional update keyed on its first identifier,
-inside one transaction Bundle. Anything not listed is refused.
+Each resource is keyed on its first identifier, inside one transaction
+Bundle. Observation and DiagnosticReport are conditional updates. Patient
+from ADT, Encounter and ServiceRequest are conditional updates that a post
+first merges into the current resource, because an empty v2 field means
+no change. Patient from ORM and ORU is a conditional create: only ADT
+writes the Patient. Anything not listed is refused.
 
 ## `message`
 
@@ -32,12 +36,13 @@ inside one transaction Bundle. Anything not listed is refused.
 | MSH-4 | (routing) | none | Sending facility, matched to a hospital profile. |
 | MSH-6 | (routing) | none | Receiving facility, tried when MSH-4 matches none. |
 | MSH-9 | (routing) | none | Message type and trigger. Must be one hl7bridge maps and one the profile lists. |
+| MSH-7 | (time zone) | none | Its UTC offset, when it has one, is the zone of every time in the message that has none, as HL7 v2 defines it. Without one the hospital profile's zone is used. |
 
 ## `pid_to_patient`
 
 | v2 | FHIR | IG map | Notes |
 | --- | --- | --- | --- |
-| PID-3 | Patient.identifier (MR) | [ConceptMap-segment-pid-to-patient](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pid-to-patient.html) | First repetition, component 1, with the profile's mrn system. The IG maps every repetition and takes the system from the assigning authority; hl7bridge reads one system per hospital. |
+| PID-3 | Patient.identifier (MR) | [ConceptMap-segment-pid-to-patient](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pid-to-patient.html) | Component 1 of the MRN repetition, with the profile's mrn system: the first repetition when none has a type code (PID-3.5), else the first one typed MR; a typed list with no MR is refused. The key; only ADT writes the Patient, and ORM and ORU create it when missing. The IG maps every repetition and takes the system from the assigning authority; hl7bridge reads one system per hospital. |
 | PID-5 | Patient.name | [ConceptMap-segment-pid-to-patient](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pid-to-patient.html) | First repetition: component 1 family, components 2 and 3 given. |
 | PID-7 | Patient.birthDate | [ConceptMap-segment-pid-to-patient](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pid-to-patient.html) | Date part only. The IG adds a birthTime extension for a longer value; not written. |
 | PID-8 | Patient.gender | [ConceptMap-segment-pid-to-patient](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pid-to-patient.html) | Through table 0001. |
@@ -50,8 +55,8 @@ inside one transaction Bundle. Anything not listed is refused.
 | --- | --- | --- | --- |
 | PV1-2 | Encounter.class, Encounter.status | [ConceptMap-segment-pv1-to-encounter](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pv1-to-encounter.html) | Class through table 0004 to v3 ActCode (R, B, C, N, U stay v2-0004 codes). Status through the table 0004 status map when PV1-45 is empty. |
 | PV1-19 | Encounter.identifier (VN) | [ConceptMap-segment-pv1-to-encounter](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pv1-to-encounter.html) | Component 1 with the profile's visit system; the key. No visit number, no Encounter. |
-| PV1-44 | Encounter.period.start | [ConceptMap-segment-pv1-to-encounter](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pv1-to-encounter.html) |  |
-| PV1-45 | Encounter.period.end | [ConceptMap-segment-pv1-to-encounter](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pv1-to-encounter.html) | When valued, Encounter.status is finished, as in the IG. |
+| PV1-44 | Encounter.period.start | [ConceptMap-segment-pv1-to-encounter](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pv1-to-encounter.html) | A time with no offset takes MSH-7's offset, else the hospital's zone; a date with no time stays a date. |
+| PV1-45 | Encounter.period.end | [ConceptMap-segment-pv1-to-encounter](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-pv1-to-encounter.html) | When valued, Encounter.status is finished, as in the IG. A post merges the Encounter into the current one, so an empty PV1-44 or PV1-45 changes nothing. |
 
 ## `orc_obr_to_service_request`
 
@@ -65,8 +70,8 @@ inside one transaction Bundle. Anything not listed is refused.
 | ORC-2 | ServiceRequest.identifier (ACSN) | none | Whichever of OBR-2, OBR-3, ORC-2, ORC-3 the profile names in accession_field. Written as an identifier with type ACSN and the profile's accession system, and used as the key. The IG writes OBR-3 and ORC-3 as a FILL identifier; hl7bridge keys imaging on the accession, wherever the site puts it. |
 | ORC-3 | ServiceRequest.identifier (ACSN) | none | Whichever of OBR-2, OBR-3, ORC-2, ORC-3 the profile names in accession_field. Written as an identifier with type ACSN and the profile's accession system, and used as the key. The IG writes OBR-3 and ORC-3 as a FILL identifier; hl7bridge keys imaging on the accession, wherever the site puts it. |
 | OBR-4 | ServiceRequest.code | none | Components 1 and 2. The coding system comes from the profile's procedure_code_system, not component 3, so both paths write one code. |
-| ORC-9 | ServiceRequest.authoredOn | [ConceptMap-segment-orc-to-servicerequest](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-orc-to-servicerequest.html) | Transaction time, in UTC. |
-| MSH-7 | ServiceRequest.authoredOn | none | Used when ORC-9 is empty, as the store does. |
+| ORC-9 | ServiceRequest.authoredOn | [ConceptMap-segment-orc-to-servicerequest](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-orc-to-servicerequest.html) | Transaction time, for a new order (NW) only; a cancel leaves the time the order was written. A time with no offset takes MSH-7's offset, else the hospital's zone; a date with no time stays a date. |
+| MSH-7 | ServiceRequest.authoredOn | none | Used when ORC-9 is empty, as the store does (NW only). |
 
 ## `obr_to_diagnostic_report`
 
@@ -76,26 +81,33 @@ inside one transaction Bundle. Anything not listed is refused.
 | OBR-3 | DiagnosticReport.identifier (ACSN) | none | Whichever of OBR-2, OBR-3, ORC-2, ORC-3 the profile names in accession_field. Written as an identifier with type ACSN and the profile's accession system, and used as the key. The IG writes OBR-3 and ORC-3 as a FILL identifier; hl7bridge keys imaging on the accession, wherever the site puts it. |
 | ORC-2 | DiagnosticReport.identifier (ACSN) | none | Whichever of OBR-2, OBR-3, ORC-2, ORC-3 the profile names in accession_field. Written as an identifier with type ACSN and the profile's accession system, and used as the key. The IG writes OBR-3 and ORC-3 as a FILL identifier; hl7bridge keys imaging on the accession, wherever the site puts it. |
 | ORC-3 | DiagnosticReport.identifier (ACSN) | none | Whichever of OBR-2, OBR-3, ORC-2, ORC-3 the profile names in accession_field. Written as an identifier with type ACSN and the profile's accession system, and used as the key. The IG writes OBR-3 and ORC-3 as a FILL identifier; hl7bridge keys imaging on the accession, wherever the site puts it. |
+| OBR-2 | DiagnosticReport.basedOn | none | A logical reference to the ServiceRequest by its accession identifier (type ServiceRequest, identifier ACSN). The ORU does not write the order, and no server lookup is needed. |
+| OBR-3 | DiagnosticReport.basedOn | none | A logical reference to the ServiceRequest by its accession identifier (type ServiceRequest, identifier ACSN). The ORU does not write the order, and no server lookup is needed. |
+| ORC-2 | DiagnosticReport.basedOn | none | A logical reference to the ServiceRequest by its accession identifier (type ServiceRequest, identifier ACSN). The ORU does not write the order, and no server lookup is needed. |
+| ORC-3 | DiagnosticReport.basedOn | none | A logical reference to the ServiceRequest by its accession identifier (type ServiceRequest, identifier ACSN). The ORU does not write the order, and no server lookup is needed. |
 | OBR-4 | DiagnosticReport.code | [ConceptMap-segment-obr-to-diagnosticreport](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obr-to-diagnosticreport.html) | As for ServiceRequest.code. No code gives the text Imaging report. |
-| OBR-7 | DiagnosticReport.effectiveDateTime | [ConceptMap-segment-obr-to-diagnosticreport](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obr-to-diagnosticreport.html) | OBR-8 is not read, so no effectivePeriod is written. |
-| OBR-22 | DiagnosticReport.issued | [ConceptMap-segment-obr-to-diagnosticreport](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obr-to-diagnosticreport.html) |  |
+| OBR-7 | DiagnosticReport.effectiveDateTime | [ConceptMap-segment-obr-to-diagnosticreport](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obr-to-diagnosticreport.html) | OBR-8 is not read, so no effectivePeriod is written. A time with no offset takes MSH-7's offset, else the hospital's zone; a date with no time stays a date. |
+| OBR-22 | DiagnosticReport.issued | [ConceptMap-segment-obr-to-diagnosticreport](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obr-to-diagnosticreport.html) | An instant: a date with no time is refused, never padded to midnight. |
 | OBR-25 | DiagnosticReport.status | [ConceptMap-segment-obr-to-diagnosticreport](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obr-to-diagnosticreport.html) | Through table 0123. Required. |
+| OBX-2 | DiagnosticReport.conclusion | none | TX and FT mark an OBX as narrative: report text, not a result. |
+| OBX-5 | DiagnosticReport.conclusion, DiagnosticReport.presentedForm | [ConceptMap-segment-obr-to-diagnosticreport](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obr-to-diagnosticreport.html) | The narrative OBX lines, every repetition read whole, joined with line breaks; the same text as a text/plain presentedForm. No Observation per line. |
+| (derived) | DiagnosticReport.result | [ConceptMap-segment-obr-to-diagnosticreport](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obr-to-diagnosticreport.html) | One reference per structured OBX. A post of a corrected report sets each Observation the report no longer carries to entered-in-error. |
 
 ## `obx_to_observation`
 
 | v2 | FHIR | IG map | Notes |
 | --- | --- | --- | --- |
-| OBX-1 | Observation.identifier | none | Set id, the last part of the key when OBX-4 is empty (set-<n>). |
-| OBX-2 | Observation.value[x] | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | Chooses the value element through the value type table. Required when OBX-5 has a value; an unknown type is refused. ST, TX and FT lines also form the report text. |
+| OBX-1 | Observation.identifier | none | Set id, the last part of the key <accession>/<OBX-3.1>/set/<OBX-1> when OBX-4 is empty. |
+| OBX-2 | Observation.value[x] | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | Chooses the value element through the value type table. Required when OBX-5 has a value; an unknown type is refused. TX and FT are narrative and not mapped here. |
 | OBX-3 | Observation.code | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | CE or CWE. Component 1 is part of the key. |
-| OBX-4 | Observation.identifier | none | Sub-id, the last part of the key <accession>/<OBX-3.1>/<OBX-4>. |
-| OBX-5 | Observation.value[x] | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | NM must be a plain number; text types join repetitions; other types may not repeat. |
+| OBX-4 | Observation.identifier | none | Sub-id, the last part of the key <accession>/<OBX-3.1>/sub/<OBX-4>. Key parts may not hold / or a FHIR search special character. |
+| OBX-5 | Observation.value[x] | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | NM must be a plain number, its digits kept as sent (12.50 stays 12.50); ST joins repetitions, each read whole; other types may not repeat. |
 | OBX-6 | Observation.valueQuantity unit | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | UCUM system and code only when component 3 is UCUM; otherwise the unit text alone. |
 | OBX-7 | Observation.referenceRange.text | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) |  |
 | OBX-8 | Observation.interpretation | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | Every repetition, through table 0078. |
 | OBX-11 | Observation.status | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | Through table 0085. Required; codes the IG map leaves unmapped are refused. |
-| OBX-14 | Observation.effectiveDateTime | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) |  |
-| NTE-3 | Observation.note.text | [ConceptMap-segment-nte-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-nte-to-observation.html) | Each NTE after an OBX, repetitions joined. An NTE before the first OBX is not mapped. |
+| OBX-14 | Observation.effectiveDateTime | [ConceptMap-segment-obx-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-obx-to-observation.html) | A time with no offset takes MSH-7's offset, else the hospital's zone; a date with no time stays a date. |
+| NTE-3 | Observation.note.text | [ConceptMap-segment-nte-to-observation](https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-nte-to-observation.html) | Each NTE after a structured OBX, repetitions read whole and joined. An NTE before the first OBX, or after a narrative one, is not mapped. |
 
 ## Code tables
 

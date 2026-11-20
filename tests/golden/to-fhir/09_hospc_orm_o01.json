@@ -32,8 +32,9 @@
         "birthDate": "1990-06-20"
       },
       "request": {
-        "method": "PUT",
-        "url": "Patient?identifier=urn:hl7bridge:hospc:mrn|SC1001"
+        "method": "POST",
+        "url": "Patient",
+        "ifNoneExist": "identifier=urn:hl7bridge:hospc:mrn|SC1001"
       }
     },
     {

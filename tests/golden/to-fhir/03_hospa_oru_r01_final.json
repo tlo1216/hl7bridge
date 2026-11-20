@@ -32,38 +32,9 @@
         "birthDate": "1980-01-01"
       },
       "request": {
-        "method": "PUT",
-        "url": "Patient?identifier=urn:hl7bridge:hospa:mrn|SA1001"
-      }
-    },
-    {
-      "fullUrl": "urn:uuid:8c493d2a-3ce2-55b3-8b86-2110ffadb884",
-      "resource": {
-        "resourceType": "Observation",
-        "identifier": [
-          {
-            "system": "urn:hl7bridge:hospa:observation",
-            "value": "SACCA0001/RPT/set-1"
-          }
-        ],
-        "status": "final",
-        "code": {
-          "coding": [
-            {
-              "code": "RPT",
-              "display": "Report Text"
-            }
-          ],
-          "text": "Report Text"
-        },
-        "subject": {
-          "reference": "urn:uuid:0f91cf09-96a6-5c86-b361-f08d6445db1a"
-        },
-        "valueString": "Synthetic sample report. No acute finding."
-      },
-      "request": {
-        "method": "PUT",
-        "url": "Observation?identifier=urn:hl7bridge:hospa:observation|SACCA0001/RPT/set-1"
+        "method": "POST",
+        "url": "Patient",
+        "ifNoneExist": "identifier=urn:hl7bridge:hospa:mrn|SA1001"
       }
     },
     {
@@ -117,11 +88,6 @@
         },
         "effectiveDateTime": "2026-10-07T15:30:00Z",
         "issued": "2026-10-07T17:00:00Z",
-        "result": [
-          {
-            "reference": "urn:uuid:8c493d2a-3ce2-55b3-8b86-2110ffadb884"
-          }
-        ],
         "conclusion": "Synthetic sample report. No acute finding.",
         "presentedForm": [
           {

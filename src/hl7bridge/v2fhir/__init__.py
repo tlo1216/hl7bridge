@@ -9,5 +9,6 @@ row mappers share. ``spec.py`` lists every field each mapper reads, and
 """
 
 from .bundle import SUPPORTED, MappedMessage, bundle_json, message_to_bundle
+from .jsontext import dumps as json_text
 
-__all__ = ["SUPPORTED", "MappedMessage", "bundle_json", "message_to_bundle"]
+__all__ = ["SUPPORTED", "MappedMessage", "bundle_json", "json_text", "message_to_bundle"]

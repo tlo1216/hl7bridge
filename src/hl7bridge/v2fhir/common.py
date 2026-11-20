@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
+from datetime import tzinfo
 
 from fhir.resources.R4B.codeableconcept import CodeableConcept
 from fhir.resources.R4B.coding import Coding
@@ -11,7 +13,7 @@ from fhir.resources.R4B.identifier import Identifier
 
 from ..config import HospitalConfig
 from ..errors import MappingError, TimestampError
-from ..hl7time import parse_hl7_ts
+from ..hl7time import is_date_only, parse_hl7_ts
 from ..store.db import utc_iso
 from .fields import FieldReader
 from .tables import CODING_SYSTEMS, V2_0203
@@ -20,12 +22,35 @@ from .tables import CODING_SYSTEMS, V2_0203
 # plain names are kept; anything else is refused, never cleaned up.
 _SYSTEM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}")
 OWN_CODING_SYSTEM = "urn:hl7bridge:coding-system:"
+# A FHIR token search (``identifier=<system>|<value>``) treats these as
+# syntax: ``,`` separates alternatives, ``|`` system and value, ``$``
+# composite parts, and ``\`` escapes the others.
+TOKEN_SPECIALS = (",", "|", "\\", "$")
 
 
 @dataclass(frozen=True, slots=True)
 class MapContext:
     hospital: HospitalConfig
     reader: FieldReader
+    # The default zone for times with no offset: MSH-7's offset when it
+    # has one, else the hospital's zone (``hl7time.message_tz``).
+    tz: tzinfo
+
+
+def check_key(value: str, field: str, *, segment: int = 1) -> str:
+    """Refuse an identifier value that goes into a conditional URL
+    (``<Type>?identifier=<system>|<value>``) when it holds a FHIR token
+    special character or a control character. The check runs on the value
+    after HL7 unescaping, so ``\\F\\`` (a ``|``) is caught too. A key is never
+    escaped or cleaned up: a value that cannot be searched for exactly
+    cannot keep a resend idempotent. Returns the value."""
+    if any(ch in value for ch in TOKEN_SPECIALS) or any(
+        unicodedata.category(ch) == "Cc" for ch in value
+    ):
+        raise MappingError(
+            field, "holds a character that cannot be part of a FHIR search key", segment=segment
+        )
+    return value
 
 
 def typed_identifier(type_code: str, system: str, value: str) -> Identifier:
@@ -94,15 +119,29 @@ def coded_concept(
     return CodeableConcept(coding=codings or None, text=text)
 
 
-def timestamp(ctx: MapContext, ref: str, *, seg: int = 1) -> str | None:
-    """An HL7 timestamp as an ISO 8601 UTC string, or None when empty. A
-    value with no offset is read in the hospital's time zone."""
+def timestamp(ctx: MapContext, ref: str, *, seg: int = 1, instant: bool = False) -> str | None:
+    """An HL7 timestamp for a FHIR dateTime (or, with ``instant``, an
+    instant), or None when empty.
+
+    A value with a time becomes an ISO 8601 UTC string. A value with no
+    offset is read in the message's zone: MSH-7's offset, else the
+    hospital's (``MapContext.tz``). A date with no time stays a date
+    (``2026-10-07``), as a FHIR dateTime allows; an instant needs a time,
+    so there a date alone is refused rather than padded to midnight.
+    """
     value = ctx.reader.get(ref, seg=seg)
     if not value:
         return None
     try:
-        return utc_iso(parse_hl7_ts(value, default_tz=ctx.hospital.tzinfo))
-    except TimestampError:
+        parsed = parse_hl7_ts(value, default_tz=ctx.tz)
+        if is_date_only(value):
+            if instant:
+                raise MappingError(
+                    ref, "has a date but no time; the FHIR element needs an instant", segment=seg
+                )
+            return parsed.date().isoformat()
+        return utc_iso(parsed)
+    except (TimestampError, OverflowError, ValueError):
         raise MappingError(ref, "not a valid HL7 timestamp", segment=seg) from None
 
 
@@ -111,6 +150,6 @@ def birth_date(ctx: MapContext, ref: str) -> str | None:
     if not value:
         return None
     try:
-        return parse_hl7_ts(value, default_tz=ctx.hospital.tzinfo).date().isoformat()
-    except TimestampError:
+        return parse_hl7_ts(value, default_tz=ctx.tz).date().isoformat()
+    except (TimestampError, OverflowError, ValueError):
         raise MappingError(ref, "not a valid HL7 date") from None

@@ -2,8 +2,10 @@
 
 Policy (UTC inside, aware timestamps only):
 - Every parsed timestamp is timezone-aware. If the value carries an explicit
-  ``+HHMM`` / ``-HHMM`` offset, that offset wins. Otherwise the hospital's
-  configured timezone is attached (this is per-hospital config, never a guess).
+  ``+HHMM`` / ``-HHMM`` offset, that offset wins. Otherwise the caller's
+  default zone is attached: the MSH-7 offset of the message when it has one
+  (``message_tz``; HL7 v2 makes it the message default), else the
+  hospital's configured timezone (per-hospital config, never a guess).
 - Minimum accepted precision is a full date (``YYYYMMDD``). Anything shorter,
   longer, or non-numeric raises :class:`TimestampError`. Nothing is coerced.
 - Local times that fall inside a DST transition resolve per PEP 495 with
@@ -64,6 +66,28 @@ def parse_hl7_ts(value: str, *, default_tz: tzinfo) -> datetime:
             raise TimestampError(f"invalid UTC offset in HL7 timestamp: {v!r}")
         return dt.replace(tzinfo=timezone(sign * timedelta(hours=hours, minutes=minutes)))
     return dt.replace(tzinfo=default_tz)
+
+
+def is_date_only(value: str) -> bool:
+    """True for a valid HL7 timestamp that holds a date and no time
+    (``YYYYMMDD``, with or without an offset)."""
+    m = _TS_RE.match(value.strip())
+    return m is not None and len(m.group("body")) == 8 and m.group("frac") is None
+
+
+def message_tz(msh7: str, fallback: tzinfo) -> tzinfo:
+    """The default time zone for a message's times. HL7 v2 makes the UTC
+    offset of MSH-7 the default for every time in the message that carries
+    none, so that offset wins over the hospital's configured zone. An
+    MSH-7 with no offset, or one that does not parse, leaves ``fallback``."""
+    m = _TS_RE.match(msh7.strip())
+    if m is None or m.group("off") is None:
+        return fallback
+    try:
+        parsed = parse_hl7_ts(msh7, default_tz=fallback)
+    except TimestampError:
+        return fallback
+    return parsed.tzinfo or fallback
 
 
 def format_hl7_ts(dt: datetime, *, include_offset: bool) -> str:

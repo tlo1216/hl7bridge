@@ -1,6 +1,7 @@
 """v2 to FHIR mapping (hl7bridge.v2fhir): golden Bundles, the mapping spec
-and its drift checks, the result key (observation_identifier), value types
-(obx_value), the code tables, and Encounter from PV1.
+and its drift checks, search keys, the result key (observation_identifier),
+value types (obx_value), text, times, the code tables, and Encounter from
+PV1.
 
 Golden files live in tests/golden/to-fhir. After an intended change, run
 with HL7BRIDGE_UPDATE_GOLDEN=1 once and review the diff.
@@ -18,7 +19,7 @@ import pytest
 from hl7bridge.config import HospitalRegistry
 from hl7bridge.errors import ConfigError, MappingError
 from hl7bridge.profiles import BUNDLED_PROFILES, SAMPLES_DIR
-from hl7bridge.v2fhir import bundle_json, message_to_bundle, tables
+from hl7bridge.v2fhir import bundle_json, json_text, message_to_bundle, tables
 from hl7bridge.v2fhir import spec as spec_module
 
 REPO = Path(__file__).resolve().parents[2]
@@ -126,7 +127,7 @@ def test_samples_map_to_their_golden_bundle(path, registry):
             message_to_bundle(_text(path), registry)
         assert str(info.value) == REFUSED_SAMPLES[path.name]
         return
-    got = json.dumps(bundle_json(message_to_bundle(_text(path), registry)), indent=2) + "\n"
+    got = json_text(bundle_json(message_to_bundle(_text(path), registry)), indent=2) + "\n"
     golden = GOLDEN / (path.stem + ".json")
     if UPDATE:
         golden.parent.mkdir(parents=True, exist_ok=True)
@@ -151,7 +152,15 @@ def test_entries_are_conditional_updates_with_resolvable_references(registry):
     )
     assert mapped["type"] == "transaction"
     urls = {e["fullUrl"] for e in mapped["entry"]}
-    for entry in mapped["entry"]:
+    patient, *rest = mapped["entry"]
+    ident = patient["resource"]["identifier"][0]
+    # An ORU never writes the Patient: it creates one only when none exists.
+    assert patient["request"] == {
+        "method": "POST",
+        "url": "Patient",
+        "ifNoneExist": f"identifier={ident['system']}|{ident['value']}",
+    }
+    for entry in rest:
         ident = entry["resource"]["identifier"][0]
         kind = entry["resource"]["resourceType"]
         assert entry["request"] == {
@@ -165,9 +174,96 @@ def test_entries_are_conditional_updates_with_resolvable_references(registry):
 
 
 def test_identifier_values_are_percent_encoded_in_the_request_url(registry):
-    text = _text(SAMPLES_DIR / "02_hospa_orm_o01.hl7").replace("SACCA0001", "ACC A?B")
+    text = _text(SAMPLES_DIR / "02_hospa_orm_o01.hl7").replace("SACCA0001", "ACC A?B&C")
+    text = text.replace("ACC A?B&C", "ACC A?B\\T\\C")
     entries = bundle_json(message_to_bundle(text, registry))["entry"]
-    assert entries[1]["request"]["url"].endswith("|ACC%20A%3FB")
+    assert entries[1]["request"]["url"].endswith("|ACC%20A%3FB%26C")
+
+
+def test_only_adt_writes_the_patient(registry):
+    for name, method in (
+        ("01_hospa_adt_a04.hl7", "PUT"),
+        ("02_hospa_orm_o01.hl7", "POST"),
+        ("03_hospa_oru_r01_final.hl7", "POST"),
+    ):
+        mapped = message_to_bundle(_text(SAMPLES_DIR / name), registry)
+        entry = bundle_json(mapped)["entry"][0]
+        assert entry["resource"]["resourceType"] == "Patient"
+        assert entry["request"]["method"] == method, name
+        assert mapped.policies[entry["fullUrl"]] == ("merge" if method == "PUT" else "create")
+
+
+# -- search keys: one check for every identifier in a conditional URL ----------------
+
+KEY_CASES = {
+    "PID-3": (_text(SAMPLES_DIR / "01_hospa_adt_a04.hl7"), "SA1001"),
+    "PV1-19": (_text(SAMPLES_DIR / "13_hospc_adt_a01_inpatient.hl7"), "SV0001"),
+    "OBR-3": (_text(SAMPLES_DIR / "02_hospa_orm_o01.hl7"), "SACCA0001"),  # accession, ORM
+    "ORC-3": (_text(SAMPLES_DIR / "06_hospb_oru_r01_prelim.hl7"), "SACCB0001"),  # accession, ORU
+}
+# Each special character as it arrives: plain, or escaped where HL7 needs it.
+KEY_SPECIALS = {",": ",", "$": "$", "|": "\\F\\", "\\": "\\E\\", "CR": "\\X0D\\"}
+
+
+@pytest.mark.parametrize("field", sorted(KEY_CASES))
+@pytest.mark.parametrize("special", sorted(KEY_SPECIALS))
+def test_search_keys_refuse_fhir_token_specials(field, special, registry):
+    """A comma would turn the conditional URL into an OR search that can
+    update another patient; the others split or escape the token."""
+    text, value = KEY_CASES[field]
+    bad = text.replace(value, f"{value[:2]}{KEY_SPECIALS[special]}{value[2:]}")
+    with pytest.raises(MappingError) as info:
+        message_to_bundle(bad, registry)
+    assert str(info.value) == f"{field}: holds a character that cannot be part of a FHIR search key"
+
+
+def test_the_bundle_guard_refuses_an_unchecked_key():
+    from hl7bridge.v2fhir.bundle import search_query
+
+    assert search_query("urn:x", "A B") == "identifier=urn:x|A%20B"
+    with pytest.raises(MappingError, match="identifier: holds a character"):
+        search_query("urn:x", "A,B")
+
+
+# -- PID-3: which repetition is the MRN ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pid3", "mrn"),
+    [
+        ("SA1001", "SA1001"),  # untyped: the first repetition
+        ("X1~SA1001", "X1"),
+        ("X1^^^HOSPA^PI~SA1001^^^HOSPA^MR", "SA1001"),  # typed: the MR one
+        ("SA1001^^^HOSPA^MR~SA1002^^^HOSPA^MR", "SA1001"),
+        ("~SA1001^^^HOSPA^MR", "SA1001"),
+    ],
+)
+def test_the_mrn_is_the_mr_typed_repetition(pid3, mrn, registry):
+    text = _text(SAMPLES_DIR / "01_hospa_adt_a04.hl7").replace("SA1001^^^HOSPA^MR", pid3)
+    patient = resources(text, registry)[0]
+    assert patient["identifier"][0]["value"] == mrn
+
+
+def test_typed_pid3_without_mr_is_refused(registry):
+    text = _text(SAMPLES_DIR / "01_hospa_adt_a04.hl7").replace(
+        "SA1001^^^HOSPA^MR", "SA1001^^^HOSPA^PI~X2^^^HOSPA^SS"
+    )
+    with pytest.raises(MappingError) as info:
+        message_to_bundle(text, registry)
+    assert str(info.value) == "PID-3: has typed identifiers (PID-3.5) and none is MR"
+
+
+def test_the_store_picks_the_same_mrn(registry):
+    from hl7bridge.ingest import IngestPipeline
+    from hl7bridge.store import connect
+
+    text = _text(SAMPLES_DIR / "01_hospa_adt_a04.hl7").replace(
+        "SA1001^^^HOSPA^MR", "X1^^^HOSPA^PI~SA1001^^^HOSPA^MR"
+    )
+    conn = connect(":memory:")
+    IngestPipeline(registry, conn).handle_bytes(text.encode())
+    assert [r["mrn"] for r in conn.execute("SELECT mrn FROM patients")] == ["SA1001"]
+    conn.close()
 
 
 # -- refusals: never guess -----------------------------------------------------------
@@ -214,14 +310,14 @@ def test_identifier_values_are_percent_encoded_in_the_request_url(registry):
             "OBR-25: no result status; DiagnosticReport.status is required",
         ),
         (
-            oru("OBX|1|TX|RPT^Text||x||||||B"),
+            oru("OBX|1|ST|RPT^Text||x||||||B"),
             "OBX-11: code not in table 0085 (observation result status); refusing to guess",
         ),
         (
-            oru("OBX|1|TX|RPT^Text||x||||||"),
+            oru("OBX|1|ST|RPT^Text||x||||||"),
             "OBX-11: no result status; Observation.status is required",
         ),
-        (oru("OBX|1|TX|^Text||x||||||F"), "OBX-3: no observation code; it is part of the key"),
+        (oru("OBX|1|ST|^Text||x||||||F"), "OBX-3: no observation code; it is part of the key"),
         (
             oru("OBX|1|NM|N^Num|1|5|||ZZ|||F"),
             "OBX-8: code not in table 0078 (interpretation codes); refusing to guess",
@@ -249,15 +345,15 @@ def test_identifier_values_are_percent_encoded_in_the_request_url(registry):
             "OBX-3: coding system name is not a plain name",
         ),
         (
-            oru("OBX|1|TX|RPT^T||a||||||F", "OBX|1|TX|RPT^T||b||||||F"),
+            oru("OBX|1|ST|RPT^T||a||||||F", "OBX|1|ST|RPT^T||b||||||F"),
             "OBX-3/OBX-4: two results in one message share a key (code and sub-id)",
         ),
         (
-            oru("OBX||TX|RPT^T||a||||||F"),
+            oru("OBX||ST|RPT^T||a||||||F"),
             "OBX-4: no sub-id and no OBX-1 set id; the result has no key",
         ),
         (
-            oru("OBX|1|TX|R/1^T||a||||||F"),
+            oru("OBX|1|ST|R/1^T||a||||||F"),
             "OBX-3: holds a character that cannot be part of a result key",
         ),
         (oru("OBX|1|TX|RPT^T|a|b||||||F"), None),  # a plain sub-id is fine
@@ -271,6 +367,31 @@ def test_identifier_values_are_percent_encoded_in_the_request_url(registry):
             "PV1-2: code not in table 0004 (patient class); refusing to guess",
         ),
         (adt("A01", pv1(p2="I", p19="V1", p44="2026")), "PV1-44: not a valid HL7 timestamp"),
+        (
+            oru("OBX|1|ST|S^T|1|x||||||F", obr=OBR_A.replace("20261007120000||CR", "20261007||CR")),
+            "OBR-22: has a date but no time; the FHIR element needs an instant",
+        ),
+        (
+            adt("A01", pv1(p2="I", p19="V1", p44="99991231230000-0500")),
+            "PV1-44: not a valid HL7 timestamp",  # past year 9999 in UTC
+        ),
+        (
+            oru("OBX|1|CWE|N^Num|1|A  1^Alpha^LN||||||F"),
+            "OBX: a value is not valid for its FHIR element",
+        ),
+        (oru("OBX|1|ST|S^T|1|a\\XZZ\\b||||||F"), "OBX-5: holds a malformed escape sequence"),
+        (oru("OBX|1|ST|S^T|1|a\\Zlocal\\b||||||F"), "OBX-5: holds a malformed escape sequence"),
+        (oru("OBX|1|ST|S^T|1|a\\b||||||F"), "OBX-5: holds a malformed escape sequence"),
+        (oru("OBX|1|ST|S^T|1|a\\\\b||||||F"), "OBX-5: holds a malformed escape sequence"),
+        (
+            oru("OBX|1|ST|S^T|1|x||||||F", "NTE|1||bad \\X1\\ hex"),
+            "NTE-3: holds a malformed escape sequence",
+        ),
+        (
+            _text(SAMPLES_DIR / "02_hospa_orm_o01.hl7")
+            + "ORC|NW|PL2|||||||20261007081500\rOBR|2|PL2|ACC2|71046^XR^local\r",
+            "ORC/OBR: an ORM must hold exactly one order (ORC and OBR)",
+        ),
     ],
 )
 def test_refusals_name_the_field_and_never_the_value(text, message, registry):
@@ -290,10 +411,14 @@ def test_mapping_errors_cannot_quote_a_value(registry):
         _text(SAMPLES_DIR / "01_hospa_adt_a04.hl7").replace("|F\r", f"|{canary}\r"),
         _text(SAMPLES_DIR / "02_hospa_orm_o01.hl7").replace("ORC|NW|", f"ORC|{canary}|"),
         oru(f"OBX|1|NM|N^Num|1|{canary}||||||F"),
-        oru(f"OBX|1|TX|RPT^Text||x||||||{canary}"),
+        oru(f"OBX|1|ST|RPT^Text||x||||||{canary}"),
         oru(f"OBX|1|{canary}|N^Num|1|5||||||F"),
         oru(f"OBX|1|NM|N^Num|1|5|||{canary}|||F"),
-        oru(f"OBX|1|TX|RPT^Text|{canary}/1|x||||||F"),
+        oru(f"OBX|1|ST|RPT^Text|{canary}/1|x||||||F"),
+        oru(f"OBX|1|ST|RPT^Text|{canary},1|x||||||F"),
+        oru(f"OBX|1|CWE|N^Num|1|{canary}  1^Alpha^LN||||||F"),
+        oru(f"OBX|1|ST|S^T|1|{canary}\\XZZ\\||||||F"),
+        _text(SAMPLES_DIR / "01_hospa_adt_a04.hl7").replace("SA1001", f"{canary},1"),
         adt("A01", pv1(p2=canary, p19="V1")),
         adt("A01", pv1(p2="I", p19="V1", p44=canary)),
     ]
@@ -318,13 +443,13 @@ def test_key_uses_the_sub_id_then_the_set_id(registry):
     found = resources(
         oru(
             "OBX|1|NM|N1^Num^99HUB|2|5||||||F",
-            "OBX|2|TX|RPT^T||line one||||||F",
-            "OBX|3|TX|RPT^T||line two||||||F",
+            "OBX|2|ST|RPT^T||line one||||||F",
+            "OBX|3|ST|RPT^T||line two||||||F",
         ),
         registry,
     )
     keys = [o["identifier"][0]["value"] for o in of_type(found, "Observation")]
-    assert keys == ["ACC9001/N1/2", "ACC9001/RPT/set-2", "ACC9001/RPT/set-3"]
+    assert keys == ["ACC9001/N1/sub/2", "ACC9001/RPT/set/2", "ACC9001/RPT/set/3"]
     assert {o["identifier"][0]["system"] for o in of_type(found, "Observation")} == {
         "urn:hl7bridge:hospa:observation"
     }
@@ -333,21 +458,45 @@ def test_key_uses_the_sub_id_then_the_set_id(registry):
 def test_same_code_with_different_sub_ids_are_two_results(registry):
     found = resources(oru("OBX|1|NM|N1^Num|a|5||||||F", "OBX|2|NM|N1^Num|b|6||||||F"), registry)
     assert [o["identifier"][0]["value"] for o in of_type(found, "Observation")] == [
-        "ACC9001/N1/a",
-        "ACC9001/N1/b",
+        "ACC9001/N1/sub/a",
+        "ACC9001/N1/sub/b",
     ]
 
 
-@pytest.mark.parametrize("bad", ["/", "|", ",", "$"])
-def test_key_parts_with_token_separators_are_refused(bad, registry):
-    escaped = {"|": "\\F\\"}.get(bad, bad)
-    with pytest.raises(MappingError, match="OBX-4: holds a character"):
-        message_to_bundle(oru(f"OBX|1|TX|RPT^T|a{escaped}b|x||||||F"), registry)
+def test_an_explicit_sub_id_never_collides_with_a_set_id(registry):
+    """OBX-4 "set-1" (or "1") and an empty OBX-4 with OBX-1 1 used to give
+    one key; the namespaces keep them apart, in one message and across two."""
+    one = resources(oru("OBX|1|ST|C^T|set-1|a||||||F", "OBX|1|ST|C^T||b||||||F"), registry)
+    keys = [o["identifier"][0]["value"] for o in of_type(one, "Observation")]
+    assert keys == ["ACC9001/C/sub/set-1", "ACC9001/C/set/1"]
+    two = resources(oru("OBX|1|ST|C^T|1|a||||||F", "OBX|1|ST|C^T||b||||||F"), registry)
+    keys = [o["identifier"][0]["value"] for o in of_type(two, "Observation")]
+    assert keys == ["ACC9001/C/sub/1", "ACC9001/C/set/1"]
+
+
+@pytest.mark.parametrize(
+    ("bad", "reason"),
+    [
+        ("/", "result key"),
+        ("|", "FHIR search key"),
+        (",", "FHIR search key"),
+        ("$", "FHIR search key"),
+        ("\\", "FHIR search key"),
+    ],
+)
+def test_key_parts_with_token_separators_are_refused(bad, reason, registry):
+    escaped = {"|": "\\F\\", "\\": "\\E\\"}.get(bad, bad)
+    with pytest.raises(
+        MappingError, match=f"OBX-4: holds a character that cannot be part of a {reason}"
+    ):
+        message_to_bundle(oru(f"OBX|1|ST|RPT^T|a{escaped}b|x||||||F"), registry)
 
 
 def test_accession_with_a_separator_is_refused_as_a_key(registry):
-    text = oru("OBX|1|TX|RPT^T||x||||||F").replace("ACC9001", "ACC/9001")
-    with pytest.raises(MappingError, match="accession: holds a character"):
+    text = oru("OBX|1|ST|RPT^T||x||||||F").replace("ACC9001", "ACC/9001")
+    with pytest.raises(
+        MappingError, match="OBR-3: holds a character that cannot be part of a result key"
+    ):
         message_to_bundle(text, registry)
 
 
@@ -383,14 +532,26 @@ def test_ucum_units_get_system_and_code(registry):
     }
 
 
-def test_numbers_keep_their_precision(registry):
-    from hl7bridge.v2fhir.bundle import message_to_bundle as mtb
+@pytest.mark.parametrize(
+    "number", ["12.50", "0.10", "-0.500", "100", "0.12345678901234567890123", "1."]
+)
+def test_numbers_keep_their_digits_in_the_json(number, registry):
+    """The serialized bytes, not the model: fhir.resources would write 12.5."""
+    from decimal import Decimal
 
-    mapped = mtb(oru("OBX|1|NM|N1^Num|1|12.50||||||F"), registry)
-    obs = next(
-        e.resource for e in mapped.bundle.entry if e.resource.get_resource_type() == "Observation"
-    )
-    assert str(obs.valueQuantity.value) == "12.50"
+    mapped = message_to_bundle(oru(f"OBX|1|NM|N1^Num|1|{number}||||||F"), registry)
+    text = json_text(bundle_json(mapped), indent=2)
+    expected = str(Decimal(number))
+    assert f'"value": {expected}' in text
+    assert json.loads(text, parse_float=Decimal)["entry"][1]["resource"]["valueQuantity"][
+        "value"
+    ] == Decimal(number)
+
+
+def test_a_string_cannot_pose_as_a_decimal_marker(registry):
+
+    text = json_text({"a": "hl7bridge-decimal-00", "b": __import__("decimal").Decimal("1.50")})
+    assert text == '{"a": "hl7bridge-decimal-00", "b": 1.50}'
 
 
 def test_coded_value_with_alternate_and_original_text(registry):
@@ -417,19 +578,159 @@ def test_empty_value_gives_no_value_element(registry):
     assert found[0]["status"] == "cancelled"
 
 
-@pytest.mark.parametrize(("code", "status"), sorted(tables.OBSERVATION_STATUS.codes.items()))
+@pytest.mark.parametrize(
+    ("kind", "value"), [("CWE", "^"), ("CWE", "^^LN"), ("ST", "~"), ("ST", "~~")]
+)
+def test_a_value_of_separators_only_gives_no_value_element(kind, value, registry):
+    text = oru(f"OBX|1|{kind}|N1^Num|1|{value}||||||F")
+    found = of_type(resources(text, registry), "Observation")
+    assert not any(k.startswith("value") for k in found[0])
+
+
+# -- text: whole repetitions, never cut at a stray separator -------------------------
+
+
+def test_text_keeps_a_stray_component_separator(registry):
+    found = resources(
+        oru(
+            "OBX|1|ST|S1^Str|1|5 mm ^ stable & clear~line^two||||||F",
+            "NTE|1||note ^ one & more",
+            "OBX|2|TX|RPT^T||Impression: A^B & C||||||F",
+        ),
+        registry,
+    )
+    obs = of_type(found, "Observation")[0]
+    assert obs["valueString"] == "5 mm ^ stable & clear\nline^two"
+    assert obs["note"] == [{"text": "note ^ one & more"}]
+    report = of_type(found, "DiagnosticReport")[0]
+    assert report["conclusion"] == "Impression: A^B & C"
+
+
+def test_escapes_in_text_are_decoded(registry):
+    found = resources(oru("OBX|1|TX|RPT^T||a \\T\\ b \\F\\ c \\S\\ d||||||F"), registry)
+    assert of_type(found, "DiagnosticReport")[0]["conclusion"] == "a & b | c ^ d"
+
+
+# -- narrative is report text, not results -------------------------------------------
+
+
+def test_narrative_lines_are_not_observations(registry):
+    found = resources(
+        oru(
+            "OBX|1|TX|RPT^Text||Line one.~Line two.||||||F",
+            "OBX|2|FT|RPT^Text||Line three.||||||F",
+            "OBX|3|NM|M1^Measure|1|4||||||F",
+            "NTE|1||note on the measure",
+        ),
+        registry,
+    )
+    assert [r["resourceType"] for r in found] == ["Patient", "Observation", "DiagnosticReport"]
+    report = of_type(found, "DiagnosticReport")[0]
+    assert report["conclusion"] == "Line one.\nLine two.\nLine three."
+    assert len(report["result"]) == 1
+    assert of_type(found, "Observation")[0]["note"] == [{"text": "note on the measure"}]
+
+
+# -- times ---------------------------------------------------------------------------
+
+
+def test_a_time_with_no_offset_takes_the_msh7_offset(registry):
+    """HOSPA is in Los Angeles (-0700 in October); MSH-7 says -0500."""
+    text = oru("OBX|1|ST|S^T|1|x||||||F|||20261007110500").replace(
+        "|20261007120000||ORU", "|20261007120000-0500||ORU"
+    )
+    found = resources(text, registry)
+    report = of_type(found, "DiagnosticReport")[0]
+    assert report["effectiveDateTime"] == "2026-10-07T16:00:00Z"  # OBR-7 11:00 at -0500
+    assert of_type(found, "Observation")[0]["effectiveDateTime"] == "2026-10-07T16:05:00Z"
+    # A field's own offset still wins.
+    text = text.replace("|20261007110500", "|20261007110500+0000")
+    assert of_type(resources(text, registry), "Observation")[0]["effectiveDateTime"] == (
+        "2026-10-07T11:05:00Z"
+    )
+
+
+def test_a_date_with_no_time_stays_a_date(registry):
+    text = oru("OBX|1|ST|S^T|1|x||||||F|||20261007").replace("|20261007110000|||", "|20261006|||")
+    found = resources(text, registry)
+    assert of_type(found, "DiagnosticReport")[0]["effectiveDateTime"] == "2026-10-06"
+    assert of_type(found, "Observation")[0]["effectiveDateTime"] == "2026-10-07"
+    enc = of_type(
+        resources(adt("A01", pv1(p2="I", p19="V1", p44="20261007")), registry), "Encounter"
+    )
+    assert enc[0]["period"] == {"start": "2026-10-07"}
+
+
+def test_the_store_reads_times_in_the_msh7_offset(registry):
+    from hl7bridge.ingest import IngestPipeline
+    from hl7bridge.store import connect
+
+    text = oru("OBX|1|ST|S^T|1|x||||||F").replace(
+        "|20261007120000||ORU", "|20261007120000-0500||ORU"
+    )
+    conn = connect(":memory:")
+    IngestPipeline(registry, conn).handle_bytes(text.encode())
+    row = conn.execute("SELECT observed_at_utc, result_at_utc FROM reports").fetchone()
+    assert (row["observed_at_utc"], row["result_at_utc"]) == (
+        "2026-10-07T16:00:00+00:00",
+        "2026-10-07T17:00:00+00:00",
+    )
+    conn.close()
+
+
+# -- orders --------------------------------------------------------------------------
+
+
+def test_authored_on_is_written_for_a_new_order_only(registry):
+    nw = _text(SAMPLES_DIR / "02_hospa_orm_o01.hl7")
+    assert "authoredOn" in of_type(resources(nw, registry), "ServiceRequest")[0]
+    ca = nw.replace("ORC|NW|", "ORC|CA|")
+    order = of_type(resources(ca, registry), "ServiceRequest")[0]
+    assert "authoredOn" not in order
+    assert order["status"] == "revoked"
+
+
+# Written out from the IG's vocabulary maps, not read from tables.py, so a
+# slip in the table fails here instead of agreeing with itself.
+OBSERVATION_STATUS_IG = {
+    "A": "amended",
+    "C": "corrected",
+    "D": "entered-in-error",
+    "F": "final",
+    "P": "preliminary",
+    "W": "entered-in-error",
+    "X": "cancelled",
+}
+REPORT_STATUS_IG = {
+    "O": "registered",
+    "I": "registered",
+    "S": "registered",
+    "P": "preliminary",
+    "C": "corrected",
+    "R": "partial",
+    "F": "final",
+    "X": "cancelled",
+}
+
+
+def test_the_status_tables_are_the_ig_maps():
+    assert tables.OBSERVATION_STATUS.codes == OBSERVATION_STATUS_IG
+    assert tables.REPORT_STATUS.codes == REPORT_STATUS_IG
+
+
+@pytest.mark.parametrize(("code", "status"), sorted(OBSERVATION_STATUS_IG.items()))
 def test_observation_status_table(code, status, registry):
-    found = of_type(resources(oru(f"OBX|1|TX|RPT^T||x||||||{code}"), registry), "Observation")
+    found = of_type(resources(oru(f"OBX|1|ST|RPT^T||x||||||{code}"), registry), "Observation")
     assert found[0]["status"] == status
 
 
 @pytest.mark.parametrize("code", ["B", "I", "N", "O", "R", "S", "U", "V"])
 def test_observation_status_codes_the_ig_leaves_unmapped_are_refused(code, registry):
     with pytest.raises(MappingError, match="OBX-11: code not in table 0085"):
-        message_to_bundle(oru(f"OBX|1|TX|RPT^T||x||||||{code}"), registry)
+        message_to_bundle(oru(f"OBX|1|ST|RPT^T||x||||||{code}"), registry)
 
 
-@pytest.mark.parametrize(("code", "status"), sorted(tables.REPORT_STATUS.codes.items()))
+@pytest.mark.parametrize(("code", "status"), sorted(REPORT_STATUS_IG.items()))
 def test_report_status_table(code, status, registry):
     text = _text(SAMPLES_DIR / "03_hospa_oru_r01_final.hl7").replace("|CR|F", f"|CR|{code}")
     assert of_type(resources(text, registry), "DiagnosticReport")[0]["status"] == status
@@ -449,7 +750,7 @@ def test_report_text_is_conclusion_and_presented_form(registry):
     assert base64.b64decode(report["presentedForm"][0]["data"]).decode() == text
     assert report["effectiveDateTime"] == "2026-10-07T18:00:00Z"  # OBR-7
     assert report["issued"] == "2026-10-07T19:00:00Z"  # OBR-22
-    assert len(report["result"]) == 3
+    assert len(report["result"]) == 2  # the TX line is the conclusion
     assert report["basedOn"][0]["identifier"]["value"] == "SACCA0002"
     assert report["basedOn"][0]["type"] == "ServiceRequest"
 
@@ -579,6 +880,31 @@ def test_spec_rows_are_unique_and_mappers_known():
         assert row.mapper in spec_module.MAPPERS
         assert (row.mapper, row.v2, row.fhir) not in seen, row
         seen.add((row.mapper, row.v2, row.fhir))
+
+
+def test_every_fhir_element_in_the_spec_exists():
+    """The FHIR column names real resources and top-level elements of the
+    R4B models (value[x] by its prefix)."""
+    import importlib
+
+    for row in spec_module.ROWS:
+        if row.fhir.startswith("("):
+            continue
+        for target in row.fhir.split(", "):
+            path = target.split(" ")[0]
+            kind, element = path.split(".")[:2]
+            module = importlib.import_module(f"fhir.resources.R4B.{kind.lower()}")
+            names = {f.alias or n for n, f in getattr(module, kind).model_fields.items()}
+            if element.endswith("[x]"):
+                assert any(n.startswith(element[:-3]) for n in names), row
+            else:
+                assert element in names, row
+
+
+def test_derived_spec_rows_are_not_fields():
+    derived = [row for row in spec_module.ROWS if not row.is_field]
+    assert [row.fhir for row in derived] == ["DiagnosticReport.result"]
+    assert all(r.v2 not in spec_module.fields_by_mapper()[r.mapper] for r in derived)
 
 
 def test_mappers_read_fields_only_through_the_reader():

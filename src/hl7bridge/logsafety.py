@@ -9,7 +9,10 @@ The filter here, ``LogRedactor``, does two things to every record it sees:
    event name. Everything else the library put in the record (the reason
    phrase, response headers such as ``Location``, exception text) is
    dropped, because a server can put an identifier in any of it.
-2. Any other record keeps its text, but every URL in it loses its query
+2. A record from python-hl7 (any module of the ``hl7`` package) is
+   replaced by a fixed line. python-hl7 logs a bad escape sequence or a
+   stray segment with the whole field or segment text, and a traceback.
+3. Any other record keeps its text, but every URL in it loses its query
    string and user info, and a traceback attached to it is rendered with
    the same redaction.
 
@@ -19,10 +22,11 @@ FHIR conditional updates carry the MRN or accession in the query
 Where the filter is installed:
 
 - ``install_third_party_redaction`` puts it on ``httpx``, ``httpcore`` and
-  every logger below them that exists or that httpcore is known to use. A
-  logger filter only runs for records created on that exact logger, so the
-  child loggers need their own copy. The FHIR client calls this on
-  construction, so a library user with their own handlers is covered.
+  every logger below them that exists or that httpcore is known to use,
+  and on python-hl7's loggers (named after their module files). A logger
+  filter only runs for records created on that exact logger, so the child
+  loggers need their own copy. The FHIR client and the HL7 parser call
+  this, so a library user with their own handlers is covered.
 - ``configure_logging`` (the CLI setup) also puts it on the one stderr
   handler it installs. A handler filter runs for every record the handler
   emits, from any logger, so this is the layer that cannot be bypassed by a
@@ -38,6 +42,7 @@ enforces this with canary values on every path.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 import unicodedata
@@ -126,6 +131,35 @@ def printable(text: object, limit: int = 160) -> str:
     return cleaned if len(cleaned) <= limit else cleaned[:limit] + "..."
 
 
+def _hl7_package_dir() -> str:
+    try:
+        import hl7
+    except ImportError:  # pragma: no cover - a hard dependency
+        return ""
+    return str(os.path.normcase(os.path.dirname(os.path.abspath(str(hl7.__file__)))))
+
+
+_HL7_DIR = _hl7_package_dir()
+HL7_WITHHELD = "python-hl7 diagnostic withheld (it quotes message text)"
+
+
+def hl7_logger_names() -> list[str]:
+    """python-hl7 names its loggers after its module files."""
+    try:
+        import hl7.containers
+        import hl7.util
+    except ImportError:  # pragma: no cover
+        return []
+    return [hl7.util.__file__, hl7.containers.__file__]
+
+
+def _is_hl7_record(record: logging.LogRecord) -> bool:
+    if record.name in hl7_logger_names():
+        return True
+    path = os.path.normcase(os.path.abspath(record.pathname)) if record.pathname else ""
+    return bool(_HL7_DIR) and path.startswith(_HL7_DIR + os.sep)
+
+
 def _is_http_logger(name: str) -> bool:
     return any(name == root or name.startswith(root + ".") for root in THIRD_PARTY_HTTP_LOGGERS)
 
@@ -172,7 +206,16 @@ class LogRedactor(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if getattr(record, _DONE_MARK, False):
             return True
-        if _is_http_logger(record.name):
+        if _is_hl7_record(record):
+            exc_type = record.exc_info[0] if record.exc_info else None
+            record.msg = HL7_WITHHELD
+            if exc_type is not None:
+                record.msg += f" (exception {exc_type.__name__})"
+            record.args = None
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+        elif _is_http_logger(record.name):
             record.msg = safe_http_message(record)
             record.args = None
             if record.exc_info:
@@ -224,8 +267,9 @@ def http_logger_names() -> list[str]:
 
 
 def install_third_party_redaction() -> None:
-    """Idempotent: add the filter to every HTTP client logger."""
-    for name in http_logger_names():
+    """Idempotent: add the filter to every HTTP client logger and to
+    python-hl7's loggers."""
+    for name in [*http_logger_names(), *hl7_logger_names()]:
         logger = logging.getLogger(name)
         if not _has_redactor(logger):
             logger.addFilter(LogRedactor())

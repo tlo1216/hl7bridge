@@ -1,4 +1,9 @@
-"""PID to Patient (IG page ConceptMap-segment-pid-to-patient)."""
+"""PID to Patient (IG page ConceptMap-segment-pid-to-patient).
+
+Only ADT messages write the Patient. An ORM or ORU carries a PID too, often
+a thin one, so their Bundles create the Patient only when none has the MRN
+yet and otherwise just refer to it (``bundle.py``).
+"""
 
 from __future__ import annotations
 
@@ -10,16 +15,28 @@ from fhir.resources.R4B.humanname import HumanName
 from fhir.resources.R4B.patient import Patient
 
 from ..errors import MappingError
-from .common import MapContext, birth_date, typed_identifier
+from ..ingest.parser import pick_mrn_repetition
+from .common import MapContext, birth_date, check_key, typed_identifier
 from .tables import SEX
 
 
 def mrn_value(ctx: MapContext) -> str:
-    """PID-3, first repetition, component 1: the key of the Patient."""
-    mrn = ctx.reader.get("PID-3")
+    """PID-3 component 1 of the MRN repetition: the key of the Patient.
+
+    With no identifier type (PID-3.5) in any repetition, the first one is
+    the MRN. When the repetitions are typed, the first one typed MR is,
+    and a typed list with no MR is refused (``pick_mrn_repetition``).
+    """
+    r = ctx.reader
+    reps = r.repetitions("PID-3")
+    types = [r.get("PID-3", rep=n, comp=5) for n in range(1, reps + 1)]
+    chosen = pick_mrn_repetition(types)
+    if chosen is None and reps:
+        raise MappingError("PID-3", "has typed identifiers (PID-3.5) and none is MR")
+    mrn = r.get("PID-3", rep=chosen) if chosen else ""
     if not mrn:
         raise MappingError("PID-3", "no patient identifier; a Patient needs one as its key")
-    return mrn
+    return check_key(mrn, "PID-3")
 
 
 def pid_to_patient(ctx: MapContext) -> Patient:

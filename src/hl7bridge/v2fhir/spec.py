@@ -25,10 +25,17 @@ IG_VERSION = "1.0.0 (STU 1)"
 @dataclass(frozen=True, slots=True)
 class SpecRow:
     mapper: str
-    v2: str  # a field position, "PID-5"
+    v2: str  # a field position, "PID-5", or "(derived)" for an element no field fills
     fhir: str
     ig: str  # the IG page followed, or "" for none
     note: str = ""
+
+    @property
+    def is_field(self) -> bool:
+        return not self.v2.startswith("(")
+
+
+DERIVED = "(derived)"
 
 
 PID = "ConceptMap-segment-pid-to-patient"
@@ -53,6 +60,26 @@ def _accession_rows(mapper: str, resource: str) -> list[SpecRow]:
     ]
 
 
+_BASED_ON_NOTE = (
+    "A logical reference to the ServiceRequest by its accession identifier"
+    " (type ServiceRequest, identifier ACSN). The ORU does not write the order,"
+    " and no server lookup is needed."
+)
+
+
+def _based_on_rows() -> list[SpecRow]:
+    return [
+        SpecRow("obr_to_diagnostic_report", ref, "DiagnosticReport.basedOn", "", _BASED_ON_NOTE)
+        for ref in ALLOWED_ACCESSION_FIELDS
+    ]
+
+
+_TIME_NOTE = (
+    " A time with no offset takes MSH-7's offset, else the hospital's zone; a date"
+    " with no time stays a date."
+)
+
+
 ROWS: tuple[SpecRow, ...] = (
     # Routing, before any segment is mapped.
     SpecRow(
@@ -68,15 +95,25 @@ ROWS: tuple[SpecRow, ...] = (
         "",
         "Message type and trigger. Must be one hl7bridge maps and one the profile lists.",
     ),
+    SpecRow(
+        "message",
+        "MSH-7",
+        "(time zone)",
+        "",
+        "Its UTC offset, when it has one, is the zone of every time in the message that"
+        " has none, as HL7 v2 defines it. Without one the hospital profile's zone is used.",
+    ),
     # PID to Patient
     SpecRow(
         "pid_to_patient",
         "PID-3",
         "Patient.identifier (MR)",
         PID,
-        "First repetition, component 1, with the profile's mrn system. The IG maps"
-        " every repetition and takes the system from the assigning authority;"
-        " hl7bridge reads one system per hospital.",
+        "Component 1 of the MRN repetition, with the profile's mrn system: the first"
+        " repetition when none has a type code (PID-3.5), else the first one typed MR;"
+        " a typed list with no MR is refused. The key; only ADT writes the Patient, and"
+        " ORM and ORU create it when missing. The IG maps every repetition and takes the"
+        " system from the assigning authority; hl7bridge reads one system per hospital.",
     ),
     SpecRow(
         "pid_to_patient",
@@ -124,13 +161,14 @@ ROWS: tuple[SpecRow, ...] = (
         PV1,
         "Component 1 with the profile's visit system; the key. No visit number, no Encounter.",
     ),
-    SpecRow("pv1_to_encounter", "PV1-44", "Encounter.period.start", PV1),
+    SpecRow("pv1_to_encounter", "PV1-44", "Encounter.period.start", PV1, _TIME_NOTE.strip()),
     SpecRow(
         "pv1_to_encounter",
         "PV1-45",
         "Encounter.period.end",
         PV1,
-        "When valued, Encounter.status is finished, as in the IG.",
+        "When valued, Encounter.status is finished, as in the IG. A post merges the"
+        " Encounter into the current one, so an empty PV1-44 or PV1-45 changes nothing.",
     ),
     # ORC and OBR to ServiceRequest
     SpecRow(
@@ -170,17 +208,19 @@ ROWS: tuple[SpecRow, ...] = (
         "ORC-9",
         "ServiceRequest.authoredOn",
         ORC,
-        "Transaction time, in UTC.",
+        "Transaction time, for a new order (NW) only; a cancel leaves the time the order"
+        " was written." + _TIME_NOTE,
     ),
     SpecRow(
         "orc_obr_to_service_request",
         "MSH-7",
         "ServiceRequest.authoredOn",
         "",
-        "Used when ORC-9 is empty, as the store does.",
+        "Used when ORC-9 is empty, as the store does (NW only).",
     ),
     # OBR to DiagnosticReport
     *_accession_rows("obr_to_diagnostic_report", "DiagnosticReport"),
+    *_based_on_rows(),
     SpecRow(
         "obr_to_diagnostic_report",
         "OBR-4",
@@ -193,9 +233,15 @@ ROWS: tuple[SpecRow, ...] = (
         "OBR-7",
         "DiagnosticReport.effectiveDateTime",
         OBR_DR,
-        "OBR-8 is not read, so no effectivePeriod is written.",
+        "OBR-8 is not read, so no effectivePeriod is written." + _TIME_NOTE,
     ),
-    SpecRow("obr_to_diagnostic_report", "OBR-22", "DiagnosticReport.issued", OBR_DR),
+    SpecRow(
+        "obr_to_diagnostic_report",
+        "OBR-22",
+        "DiagnosticReport.issued",
+        OBR_DR,
+        "An instant: a date with no time is refused, never padded to midnight.",
+    ),
     SpecRow(
         "obr_to_diagnostic_report",
         "OBR-25",
@@ -203,13 +249,36 @@ ROWS: tuple[SpecRow, ...] = (
         OBR_DR,
         "Through table 0123. Required.",
     ),
+    SpecRow(
+        "obr_to_diagnostic_report",
+        "OBX-2",
+        "DiagnosticReport.conclusion",
+        "",
+        "TX and FT mark an OBX as narrative: report text, not a result.",
+    ),
+    SpecRow(
+        "obr_to_diagnostic_report",
+        "OBX-5",
+        "DiagnosticReport.conclusion, DiagnosticReport.presentedForm",
+        OBR_DR,
+        "The narrative OBX lines, every repetition read whole, joined with line breaks;"
+        " the same text as a text/plain presentedForm. No Observation per line.",
+    ),
+    SpecRow(
+        "obr_to_diagnostic_report",
+        DERIVED,
+        "DiagnosticReport.result",
+        OBR_DR,
+        "One reference per structured OBX. A post of a corrected report sets each"
+        " Observation the report no longer carries to entered-in-error.",
+    ),
     # OBX to Observation
     SpecRow(
         "obx_to_observation",
         "OBX-1",
         "Observation.identifier",
         "",
-        "Set id, the last part of the key when OBX-4 is empty (set-<n>).",
+        "Set id, the last part of the key <accession>/<OBX-3.1>/set/<OBX-1> when OBX-4 is empty.",
     ),
     SpecRow(
         "obx_to_observation",
@@ -217,7 +286,7 @@ ROWS: tuple[SpecRow, ...] = (
         "Observation.value[x]",
         OBX,
         "Chooses the value element through the value type table. Required when OBX-5 has a"
-        " value; an unknown type is refused. ST, TX and FT lines also form the report text.",
+        " value; an unknown type is refused. TX and FT are narrative and not mapped here.",
     ),
     SpecRow(
         "obx_to_observation",
@@ -231,14 +300,16 @@ ROWS: tuple[SpecRow, ...] = (
         "OBX-4",
         "Observation.identifier",
         "",
-        "Sub-id, the last part of the key <accession>/<OBX-3.1>/<OBX-4>.",
+        "Sub-id, the last part of the key <accession>/<OBX-3.1>/sub/<OBX-4>. Key parts"
+        " may not hold / or a FHIR search special character.",
     ),
     SpecRow(
         "obx_to_observation",
         "OBX-5",
         "Observation.value[x]",
         OBX,
-        "NM must be a plain number; text types join repetitions; other types may not repeat.",
+        "NM must be a plain number, its digits kept as sent (12.50 stays 12.50); ST joins"
+        " repetitions, each read whole; other types may not repeat.",
     ),
     SpecRow(
         "obx_to_observation",
@@ -262,13 +333,16 @@ ROWS: tuple[SpecRow, ...] = (
         OBX,
         "Through table 0085. Required; codes the IG map leaves unmapped are refused.",
     ),
-    SpecRow("obx_to_observation", "OBX-14", "Observation.effectiveDateTime", OBX),
+    SpecRow(
+        "obx_to_observation", "OBX-14", "Observation.effectiveDateTime", OBX, _TIME_NOTE.strip()
+    ),
     SpecRow(
         "obx_to_observation",
         "NTE-3",
         "Observation.note.text",
         NTE,
-        "Each NTE after an OBX, repetitions joined. An NTE before the first OBX is not mapped.",
+        "Each NTE after a structured OBX, repetitions read whole and joined. An NTE before"
+        " the first OBX, or after a narrative one, is not mapped.",
     ),
 )
 
@@ -285,7 +359,8 @@ MAPPERS = (
 def fields_by_mapper() -> dict[str, set[str]]:
     found: dict[str, set[str]] = {m: set() for m in MAPPERS}
     for row in ROWS:
-        found[row.mapper].add(row.v2)
+        if row.is_field:
+            found[row.mapper].add(row.v2)
     return found
 
 
@@ -324,15 +399,20 @@ def render_markdown() -> str:
         "ADT^A01": "Patient, Encounter (when PV1-19 is valued)",
         "ADT^A04": "Patient, Encounter (when PV1-19 is valued)",
         "ADT^A08": "Patient, Encounter (when PV1-19 is valued)",
-        "ORM^O01": "Patient, ServiceRequest",
-        "ORU^R01": "Patient, Observation per OBX, DiagnosticReport",
+        "ORM^O01": "Patient (created when missing), ServiceRequest",
+        "ORU^R01": "Patient (created when missing), Observation per structured OBX,"
+        " DiagnosticReport",
     }
     for msg in SUPPORTED:
         lines.append(f"| {_cell(msg)} | {contents[msg]} |")
     lines += [
         "",
-        "Each resource is a conditional update keyed on its first identifier,",
-        "inside one transaction Bundle. Anything not listed is refused.",
+        "Each resource is keyed on its first identifier, inside one transaction",
+        "Bundle. Observation and DiagnosticReport are conditional updates. Patient",
+        "from ADT, Encounter and ServiceRequest are conditional updates that a post",
+        "first merges into the current resource, because an empty v2 field means",
+        "no change. Patient from ORM and ORU is a conditional create: only ADT",
+        "writes the Patient. Anything not listed is refused.",
     ]
     for mapper in MAPPERS:
         lines += [
