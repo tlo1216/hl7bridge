@@ -48,15 +48,20 @@ full ACK table is in `src/hl7bridge/ingest/direct.py` and ADR-0004.
 
 - **Patients are read only.** Every loaded profile must say
   `fhir.patient_policy: match_only`. The listener finds the Patient by
-  MRN (PID-3, its system from `mrn_by_authority` by PID-3.4, else `mrn`).
-  None, several (counted over every result page), an inactive one or one
-  replaced by another is AE. ADT^A08 and ADT^A40 get AR
+  MRN (PID-3, its system from `mrn_by_authority` by PID-3.4, or `mrn`
+  when PID-3.4 is empty; a PID-3.4 the profile does not map is AE
+  `unknown_assigning_authority`). None, several (counted over every
+  result page), an inactive one or one replaced by another is AE. A key
+  that already belongs to another Patient is AE `patient_mismatch`: a
+  report never moves between patients. ADT^A08 and ADT^A40 get AR
   `patient_read_only`. Supported: ADT^A01, ADT^A04 (an Encounter), ORM^O01
   and ORU^R01.
 - **A run id is required** (`--run-id` or `HL7BRIDGE_RUN_ID`, 1 to 32
   letters, digits or `-`). Every identifier written gets the system
   `<profile system>/run/<run id>`, the value from the message stays as a
-  second identifier with `use: secondary`, and every resource carries
+  second identifier under `<profile system>/as-sent` with `use:
+  secondary` (no `to-fhir --post` or `fhir sync` search can match it), and
+  every resource carries
   the lab tag (`fhir.tag`) and the run tag (`<lab tag system>/lab-run`,
   code = run id). A key that matches a resource without this run's tag is
   AE `outside_run` and nothing is written.
@@ -66,33 +71,62 @@ full ACK table is in `src/hl7bridge/ingest/direct.py` and ADR-0004.
   search did not find is made by a conditional create that must answer
   201; one found is written by id with `If-Match`.
 - **Message identity** is hospital, MSH-3, MSH-4 and MSH-10 within the
-  run, plus a hash of the whole message. The same bytes again get AA and
-  write nothing; anything else under the same identity, a restamped MSH-7
-  included, gets AE `control_id_conflict`.
+  run, plus a hash of the whole message. The first hash committed, or
+  maybe committed (a timeout, a lost or malformed answer, a 5xx), holds
+  the identity: anything else under it, a restamped MSH-7 included, gets
+  AE `control_id_conflict`. The same bytes again get AA and write nothing
+  when each of their keys is still on the server in the run; after a
+  reset or on a wiped server they are written again. Log rows are bound
+  to the FHIR base they were answered for.
 - **MSH-11** must be in `fhir.allowed_processing_ids` (default T and D):
   production traffic (P) gets AR.
 - **A late older report** (by OBR-22, then OBR-25) gets AE `stale_result`
-  and writes nothing. `to-fhir --post` and `fhir sync` refuse it too.
+  and writes nothing. `to-fhir --post` and `fhir sync` refuse it too. A
+  retraction (cancelled, entered-in-error) outranks a correction. With no
+  OBR-22 on either side and the same status the message is taken as the
+  newer one: MSH-7 is not compared (ADR-0004).
 - The log of every arrival, which is also the quarantine (AE and AR rows
-  keep their bytes), is its own SQLite file: `--db`, default
-  `./hl7bridge-direct.db`. It is never a store database.
+  keep their bytes, AA rows none), is its own SQLite file: `--db`, default
+  `./hl7bridge-direct.db`. It is never a store database, and it is held
+  exclusively while the listener runs, so a second listener on the same
+  file is refused. If a row cannot be written the answer is AE
+  `log_write_failed`, never AR, so the sender keeps the message.
 - `--fhir-timeout SECONDS` (default 10) bounds each FHIR request; a
-  timeout is AE. The FHIR calls run in a worker thread, so one slow
-  request does not hold up other connections.
-- `--mapping-module FILE` loads mapping hooks (below).
+  timeout is AE. Each message also has a 60 second deadline from arrival
+  to the commit: lock waits and the steps before the commit stop there
+  with AE `deadline_exceeded` and nothing sent. The FHIR calls run on a
+  pool of 8 worker threads of the listener's own, so one slow request
+  does not hold up other connections.
+- Every value echoed into the ACK (MSH-3, MSH-4, MSH-10, MSH-12) is
+  HL7-escaped and loses its control characters, so a sender cannot add a
+  segment or a field to the ACK. The store listener does the same.
+- `--mapping-module FILE` loads mapping hooks (below); it is refused when
+  `--host` is not loopback.
 
 ## Lab runs: `fhir reset` and `from-fhir`
 
 `hl7bridge fhir reset --run-id lab-a` lists how many resources of each type
 carry run `lab-a`'s tag and deletes nothing. With `--yes` it asks for the
 run id to be typed back, then deletes them all in one transaction: if the
-server refuses any delete, none happens and the command exits 1. It never
-searches or deletes a Patient, and there is no scope wider than one run.
+server refuses any delete, none happens and the command exits 1. Each
+delete is conditional on the id and the run tag, so a resource retagged
+to another run after the count is kept. It never searches or deletes a
+Patient, and there is no scope wider than one run. `--db FILE` (the
+listener's direct-mode log, with the listener stopped) also voids the
+run's log rows there, so a message under an old control id is taken as
+new.
 
 `hl7bridge from-fhir --patient 123 --hospital WINTEHR --out msgs` reads one
 Patient and writes `01_adt_a04.hl7`, `02_adt_a08.hl7`, `03_orm_o01.hl7` and
-`04_oru_r01.hl7` with its MRN in PID-3 (the identifier typed MR, else the
-first; the command says which). MSH-11 is T. Files are never overwritten.
+`04_oru_r01.hl7` with its MRN in PID-3. The MRN comes only from an
+identifier under the profile's `mrn` system or one `mrn_by_authority`
+maps (the one typed MR among those, else the first; the command says
+which), and PID-3.4 is that authority, or empty for `mrn`; a Patient
+with neither is refused. A `birthDate` that is not a FHIR date is
+refused, and every value loses its control characters. MSH-10, the
+accession and the visit number carry a short hash of the Patient id, so
+two patients rendered in one second do not collide. MSH-11 is T. Files
+are never overwritten.
 `--report 456` writes one ORU^R01 for a DiagnosticReport and its
 Observations instead.
 
@@ -101,11 +135,16 @@ Observations instead.
 `--mapping-module FILE` (on `listen --target fhir` and `to-fhir`) loads a
 Python file that may define `sex_code(pid8)`, `abnormal_flag(obx8)` and
 `observation_time(obx14, zone)`. Each replaces one mapping step; what it
-returns is checked, and an exception or a value outside the FHIR value
-set is a mapping error naming the field. Any other public function in the
-file is refused. The file runs as code inside hl7bridge: use it for a
-loopback teaching lab, never a shared listener. The command warns on
-stderr when it loads one.
+returns is checked, and an exception (SystemExit included) or a value
+outside the FHIR value set is a mapping error naming the field. Any other
+public function in the file is refused, and so is a hook name bound to
+anything but a `def` in the file (a `functools.partial`, an import). The
+file runs as code inside hl7bridge: use it for a loopback teaching lab,
+never a shared listener; `listen --target fhir` refuses it off loopback.
+The command warns on stderr when it loads one.
+
+`to-fhir --post` and `fhir sync` create and merge Patients, so they refuse
+a `match_only` profile.
 
 ### Removed in 0.4.0
 

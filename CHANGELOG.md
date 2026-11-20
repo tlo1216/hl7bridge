@@ -51,6 +51,30 @@ profile format may still change between minor versions.
 ### Changed
 
 - The synthetic generator writes MSH-11 `T` (training) instead of `P`.
+- Direct mode hardening before release: ACKs escape every echoed header
+  value (the store listener too); a valued PID-3.4 the profile does not
+  map is AE `unknown_assigning_authority`; a key of another Patient is AE
+  `patient_mismatch`; the secondary identifier moves to
+  `<system>/as-sent`; a maybe-committed message holds its control id; a
+  logged duplicate is answered AA only while its keys are still in the
+  run, and log rows are bound to the FHIR base (schema version 2, AA rows
+  keep no bytes, the file is held exclusively); a per-message deadline
+  (AE `deadline_exceeded`), bounded lock waits and an own worker pool; a
+  log write failure is AE `log_write_failed` and an unreadable server
+  answer AE `fhir_unconfirmed`, never AR.
+- `fhir reset` deletes conditionally on the run tag, checks every id,
+  takes only 200 or 204, and voids the run's rows in the listener's log
+  with `--db`. A search answer holding another resource type, or a paged
+  identifier search with an empty first page, is an error.
+- `to-fhir --post` and `fhir sync` refuse a `match_only` profile.
+- A retraction (cancelled, entered-in-error) ranks above a correction in
+  the stale-report rule.
+- `from-fhir` takes the MRN only from the profile's MRN system or a mapped
+  one, refuses a malformed `birthDate`, drops control characters and adds
+  a patient hash to MSH-10 and the sample keys.
+- Mapping hooks: a misbehaving hook (an unhashable answer, SystemExit) is
+  a mapping error; a hook name bound to a non-function is refused;
+  `--mapping-module` is refused off loopback.
 - `to-fhir --post` and `fhir sync` refuse a report older than the one on
   the server (OBR-22, then status); sync lists it as skipped.
 - A merged resource (Patient from ADT, Encounter, ServiceRequest) that a
