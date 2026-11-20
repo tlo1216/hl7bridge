@@ -5,6 +5,7 @@ HL7 ACK message.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -48,6 +49,21 @@ ALL_REASONS = frozenset(
 )
 
 
+_ACK_ESCAPES = (("\\", "\\E\\"), ("|", "\\F\\"), ("^", "\\S\\"), ("&", "\\T\\"), ("~", "\\R\\"))
+
+
+def ack_value(value: str) -> str:
+    r"""One value echoed into an ACK as plain HL7 text: the separators
+    escaped and every control character (CR, LF, the MLLP framing bytes)
+    dropped. The parser hands back decoded values, so a sender's ``\X0D\``
+    or ``\F\`` in MSH-3 arrives here as a real CR or ``|``; echoed raw, it
+    could start a second MSA or shift MSA-2."""
+    text = "".join(c for c in value if unicodedata.category(c) != "Cc")
+    for raw, escaped in _ACK_ESCAPES:
+        text = text.replace(raw, escaped)
+    return text
+
+
 @dataclass(frozen=True, slots=True)
 class AckDecision:
     """``reason`` is 'accepted' or a REASON_* code. ``detail`` can quote the
@@ -75,7 +91,9 @@ def build_ack(
     now: datetime,
 ) -> str:
     """Render an original-mode ACK. For unparseable input the caller passes
-    original_control_id='UNKNOWN' so the rejection is still addressable."""
+    original_control_id='UNKNOWN' so the rejection is still addressable.
+    Every value is passed through ``ack_value``, so nothing a sender wrote
+    can add a segment or a field to the ACK."""
     ts = format_hl7_ts(now, include_offset=True)
     # MSA-3 is the reason code and the fixed ack_text, never the detail.
     msa_text = f"{decision.reason}: {decision.ack_text}" if decision.ack_text else decision.reason
@@ -84,19 +102,19 @@ def build_ack(
         [
             "MSH",
             "^~\\&",
-            sending_app,
-            sending_facility,
-            receiving_app,
-            receiving_facility,
+            ack_value(sending_app),
+            ack_value(sending_facility),
+            ack_value(receiving_app),
+            ack_value(receiving_facility),
             ts,
             "",
-            ack_type,
-            ack_control_id,
+            ack_value(ack_type),
+            ack_value(ack_control_id),
             "P",
-            version,
+            ack_value(version),
         ]
     )
-    msa_fields = ["MSA", decision.code, original_control_id or "UNKNOWN"]
+    msa_fields = ["MSA", decision.code, ack_value(original_control_id) or "UNKNOWN"]
     if decision.code != "AA":
-        msa_fields.append(msa_text)
+        msa_fields.append(ack_value(msa_text))
     return msh + "\r" + "|".join(msa_fields) + "\r"
