@@ -92,12 +92,15 @@ def build_ack(
 ) -> str:
     """Render an original-mode ACK. For unparseable input the caller passes
     original_control_id='UNKNOWN' so the rejection is still addressable.
-    Every value is passed through ``ack_value``, so nothing a sender wrote
-    can add a segment or a field to the ACK."""
+    Every echoed value is passed through ``ack_value``, so nothing a sender
+    wrote can add a segment, a field or a component to the ACK. Separators
+    this function builds itself (the caret in MSH-9) are never escaped."""
     ts = format_hl7_ts(now, include_offset=True)
     # MSA-3 is the reason code and the fixed ack_text, never the detail.
     msa_text = f"{decision.reason}: {decision.ack_text}" if decision.ack_text else decision.reason
-    ack_type = f"ACK^{trigger_event}" if trigger_event else "ACK"
+    # MSH-9 is ACK^<trigger>: the trigger is escaped on its own, the caret stays.
+    trigger = ack_value(trigger_event)
+    ack_type = f"ACK^{trigger}" if trigger else "ACK"
     msh = "|".join(
         [
             "MSH",
@@ -108,7 +111,7 @@ def build_ack(
             ack_value(receiving_facility),
             ts,
             "",
-            ack_value(ack_type),
+            ack_type,
             ack_value(ack_control_id),
             "P",
             ack_value(version),

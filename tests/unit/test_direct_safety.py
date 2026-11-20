@@ -96,6 +96,41 @@ def test_an_escaped_cr_in_msh3_cannot_forge_an_aa(lab):
     assert segments[1][1] == "AR"
 
 
+def _ack_with_trigger(trigger: str) -> list[str]:
+    ack = build_ack(
+        decision=AckDecision("AA", "accepted"),
+        original_control_id="C1",
+        ack_control_id="B1",
+        sending_app="HUB",
+        sending_facility="HUB",
+        receiving_app="APP",
+        receiving_facility="FAC",
+        trigger_event=trigger,
+        version="2.5.1",
+        now=NOW,
+    )
+    return _segments(ack)[0]
+
+
+@pytest.mark.parametrize("trigger", ["R01", "O01", "A01"])
+def test_msh9_keeps_its_own_component_separator(trigger):
+    msh = _ack_with_trigger(trigger)
+    assert len(msh) == 12
+    assert msh[8] == f"ACK^{trigger}"
+
+
+def test_msh9_without_a_trigger_is_plain_ack():
+    assert _ack_with_trigger("")[8] == "ACK"
+
+
+def test_a_hostile_trigger_is_escaped_inside_its_component():
+    msh = _ack_with_trigger("R01^X|Y&Z~W\\V\rMSA|AA|X")
+    assert len(msh) == 12
+    assert msh[8] == "ACK^R01\\S\\X\\F\\Y\\T\\Z\\R\\W\\E\\VMSA\\F\\AA\\F\\X"
+    assert msh[8].split("^") == ["ACK", msh[8][4:]]
+    assert msh[9] == "B1"
+
+
 # -- the log: bound to the server and the run ----------------------------------------------
 
 
