@@ -263,7 +263,9 @@ def test_a_foreign_file_in_a_subfolder_keeps_that_subfolder(owned):
 
 def test_a_replaced_file_is_left(owned):
     target = owned.root / "synth" / "a.hl7"
-    target.unlink()
+    # Move the old file aside, not unlink it: Linux reuses a freed inode
+    # number at once, and the new file would then carry the old identity.
+    target.rename(owned.root.parent / "old-a.hl7")
     target.write_bytes(b"MSH|demo\r")  # same name and content, another file
     result = remove_owned(owned)
     assert "synth/a.hl7" in result.kept
@@ -349,7 +351,9 @@ def test_a_root_swapped_just_before_its_own_removal_is_left_alone(owned, monkeyp
     root = owned.root
 
     def swap():
-        root.rmdir()  # the demo's folder, empty by now
+        # The demo's folder, empty by now, is moved aside rather than removed
+        # so Linux cannot hand its inode number to the new folder.
+        root.rename(root.parent / "old-root")
         root.mkdir()  # another folder with the same name
 
     _on_step(monkeypatch, swap, lambda e: e is None)

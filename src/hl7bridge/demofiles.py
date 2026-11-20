@@ -48,8 +48,9 @@ or as an administrator, and writes into that private folder during the
 run. Such a program could rename another file onto a recorded name
 between the last check and the delete (Linux and macOS), replace a
 folder between its ``mkdir`` and the identity read, or, on a file system
-that reuses file ids (FAT, and some ReFS volumes), make a new file that
-carries a recorded identity. Each of these needs write access to your
+that reuses file ids (Linux file systems reuse a freed inode number at
+once; FAT and some ReFS volumes do too), make a new file that carries a
+recorded identity. Each of these needs write access to your
 private temp folder, which means it already has your rights and could
 delete your files directly. The race gives it nothing it did not have,
 so the demo does not try to defend against your own account.
