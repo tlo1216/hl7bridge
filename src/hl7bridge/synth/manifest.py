@@ -75,6 +75,9 @@ class Manifest:
         return [d for d in self.defects if d.category == category]
 
     def save(self, path: Path) -> None:
+        path.write_bytes(self.to_bytes())
+
+    def to_bytes(self) -> bytes:
         payload = {
             "seed": self.seed,
             "base_date": self.base_date,
@@ -83,9 +86,7 @@ class Manifest:
             "defects": [asdict(d) for d in self.defects],
             "expected": self.expected,
         }
-        path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
-        )
+        return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def load_manifest(path: Path) -> Manifest:

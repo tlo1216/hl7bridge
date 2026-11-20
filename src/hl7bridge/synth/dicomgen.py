@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 from pydicom import dcmwrite
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, SecondaryCaptureImageStorage, generate_uid
+
+from .sink import FileSink, PlainSink
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +31,7 @@ def study_uid(spec: StudySpec) -> str:
     return str(generate_uid(entropy_srcs=[spec.uid_entropy]))
 
 
-def write_study(directory: Path, spec: StudySpec) -> Path:
+def write_study(directory: Path, spec: StudySpec, sink: FileSink | None = None) -> Path:
     if spec.study_at.tzinfo is None or spec.study_at.utcoffset() is None:
         raise ValueError("StudySpec.study_at must be timezone-aware")
 
@@ -57,7 +60,10 @@ def write_study(directory: Path, spec: StudySpec) -> Path:
     meta.TransferSyntaxUID = ExplicitVRLittleEndian
     ds.file_meta = meta
 
-    directory.mkdir(parents=True, exist_ok=True)
+    sink = sink if sink is not None else PlainSink()
+    sink.makedirs(directory)
     path = directory / f"{uid}.dcm"
-    dcmwrite(path, ds, enforce_file_format=True)
+    buffer = BytesIO()
+    dcmwrite(buffer, ds, enforce_file_format=True)
+    sink.write_bytes(path, buffer.getvalue())
     return path

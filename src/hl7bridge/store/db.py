@@ -32,20 +32,38 @@ def parse_utc_iso(value: str) -> datetime:
     return dt
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
-    """Open (and create if needed) the store. A file that is not an
-    hl7bridge database, or holds another schema version, raises StoreError
-    with the path, the versions and what to do."""
+def connect(path: str | Path, *, create: bool = True, wal: bool = True) -> sqlite3.Connection:
+    """Open the store. ``create`` False opens an existing file only and
+    never makes one (the report commands use that). A file that is not an
+    hl7bridge database, holds another program's tables, or holds another
+    schema version raises StoreError with the path and what to do. ``wal``
+    False keeps SQLite's default rollback journal, which leaves no side
+    files behind once the connection closes (the demo uses that)."""
     target = str(path)
+    open_as, uri = target, False
     if target != ":memory:":
-        parent = Path(target).parent
+        file = Path(target)
+        if not create:
+            if not file.exists():
+                raise StoreError(
+                    f"no database at {target}.",
+                    hint="Run hl7bridge listen or hl7bridge load first, or pass --db"
+                    " with the database file.",
+                )
+            if not file.is_file():
+                raise StoreError(
+                    f"{target} is not a file.", hint="Pass --db with the database file."
+                )
+            # mode=rw: SQLite opens the file but never creates it.
+            open_as, uri = f"{file.resolve().as_uri()}?mode=rw", True
+        parent = file.parent
         if not parent.is_dir():
             raise StoreError(
                 f"cannot create database {target}: folder {parent} does not exist",
                 hint="Create the folder first, or pass --db with another path.",
             )
     try:
-        conn = sqlite3.connect(target)
+        conn = sqlite3.connect(open_as, uri=uri)
     except sqlite3.Error as exc:
         raise StoreError(
             f"cannot open database {target} ({type(exc).__name__}).",
@@ -53,7 +71,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
         ) from None
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        if wal:
+            conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         _init_schema(conn, target)
     except StoreError:
@@ -81,6 +100,13 @@ def _init_schema(conn: sqlite3.Connection, target: str = "") -> None:
         row = None
         if _has_table(conn, "schema_version"):
             row = conn.execute("SELECT version FROM schema_version").fetchone()
+        elif conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table'").fetchone():
+            # Tables, but not ours: never add hl7bridge tables to another
+            # program's database.
+            raise StoreError(
+                f"{target or '(memory)'} is a SQLite database that hl7bridge did not create.",
+                hint="Pass --db with another path.",
+            )
         if row is not None and row["version"] != SCHEMA_VERSION:
             raise StoreError(
                 schema_mismatch_message(target or "(memory)", row["version"]),

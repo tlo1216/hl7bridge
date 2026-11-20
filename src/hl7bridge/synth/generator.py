@@ -34,6 +34,7 @@ from .dicomgen import StudySpec, write_study
 from .hl7build import message, msh, obr, seg
 from .manifest import Defect, Manifest
 from .patients import PatientSpec, make_pool
+from .sink import FileSink, PlainSink
 
 BASE_DATE = "2026-10-07"
 REPORT_NOW_UTC = "2026-10-08T12:00:00+00:00"
@@ -744,8 +745,13 @@ class _HospitalDay:
         )
 
 
-def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
-    out_dir.mkdir(parents=True, exist_ok=True)
+def generate(
+    out_dir: Path, registry: HospitalRegistry, seed: int, sink: FileSink | None = None
+) -> Manifest:
+    """Write one synthetic day under ``out_dir`` and return its manifest.
+    Every folder and file goes through ``sink`` (default: plain writes)."""
+    sink = sink if sink is not None else PlainSink()
+    sink.makedirs(out_dir)
     manifest = Manifest(
         seed=seed,
         base_date=BASE_DATE,
@@ -765,15 +771,15 @@ def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
         day.run()
 
         msg_dir = out_dir / "messages" / hosp_id
-        msg_dir.mkdir(parents=True, exist_ok=True)
+        sink.makedirs(msg_dir)
         for n, event in enumerate(sorted(day.events, key=lambda e: (e.at_utc, e.name))):
             # Bytes, so the output is identical on every OS (no newline translation).
-            (msg_dir / f"{n:04d}_{event.name}.hl7").write_bytes(event.text.encode("utf-8"))
+            sink.write_bytes(msg_dir / f"{n:04d}_{event.name}.hl7", event.text.encode("utf-8"))
             aa_total += 1 if event.expect_aa else 0
 
         dicom_dir = out_dir / "dicom" / hosp_id
         for spec in day.study_specs:
-            write_study(dicom_dir, spec)
+            write_study(dicom_dir, spec, sink)
 
         outbound_lines.extend(day.outbound)
         quarantine_total.update(day.quarantine)
@@ -783,10 +789,9 @@ def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
         fhir_total.update(day.fhir_expect)
 
     outbound_path = out_dir / "outbound_reports.jsonl"
-    outbound_path.write_text(
-        "".join(json.dumps(line, sort_keys=True) + "\n" for line in outbound_lines),
-        encoding="utf-8",
-        newline="\n",
+    sink.write_bytes(
+        outbound_path,
+        "".join(json.dumps(line, sort_keys=True) + "\n" for line in outbound_lines).encode("utf-8"),
     )
 
     manifest.expected = {
@@ -797,5 +802,5 @@ def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
         "fhir": dict(sorted(fhir_total.items())),
         "messages_aa_total": aa_total,
     }
-    manifest.save(out_dir / "manifest.json")
+    sink.write_bytes(out_dir / "manifest.json", manifest.to_bytes())
     return manifest
