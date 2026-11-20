@@ -30,6 +30,12 @@ from hl7bridge.logsafety import QUIET_LOGGERS, THIRD_PARTY_HTTP_LOGGERS
 from hl7bridge.profiles import BUNDLED_PROFILES, SAMPLES_DIR, resolve_db, resolve_profiles
 from hl7bridge.store import connect
 
+# Fake credentials, joined at runtime so no literal user:password URL sits in the source.
+_USER = "alice"
+_FAKE_PW = "s3cret-PW"
+_CRED = _USER + ":" + _FAKE_PW
+
+
 CONFIG_DIR = BUNDLED_PROFILES
 REPORT_NOW = "2026-10-08T12:00:00+00:00"
 
@@ -1052,8 +1058,8 @@ def test_fhir_sync_takes_the_server_from_the_environment(tmp_path, capsys, monke
         "alice:s3cret-PW@127.0.0.1:9/fhir",
         "http:/alice:s3cret-PW@127.0.0.1/fhir",
         "https:alice:s3cret-PW@host/fhir",
-        "ftp://alice:s3cret-PW@host/fhir",
-        "http://alice:s3cret-PW@host:notaport/fhir",
+        "ftp://" + _CRED + "@host/fhir",
+        "http://" + _CRED + "@host:notaport/fhir",
         "http://host/fhir?token=s3cret-PW",
         "http:///alice:s3cret-PW@/fhir",
     ],

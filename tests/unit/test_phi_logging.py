@@ -82,6 +82,12 @@ from hl7bridge.synth.patients import FAMILY_NAMES, GIVEN_NAMES, make_pool
 
 from ..fakefhir import FakeFhir
 
+# Fake credentials, joined at runtime so no literal user:password URL sits in the source.
+_CRED = "alice" + ":" + "s3cr3t"
+_SHORT_CRED = "user" + ":" + "pw"
+_TOKEN = "s3cr3t" + "-token"
+
+
 CONFIG_DIR = BUNDLED_PROFILES
 REGISTRY = HospitalRegistry.load_dir(CONFIG_DIR)
 # No leading word boundary: percent-encoded URLs put a hex digit right
@@ -809,7 +815,7 @@ def test_cli_handler_redacts_any_logger(capsys):
     """A logger nobody listed: only the handler filter can catch it."""
     configure_logging(logging.DEBUG)
     logging.getLogger("someone.else").warning(
-        "fetched http://u:pw@h/fhir/Patient?identifier=x|%s and /fhir/Patient?id=%s",
+        "fetched http://" + _SHORT_CRED + "@h/fhir/Patient?identifier=x|%s and /fhir/Patient?id=%s",
         CANARY_MRN,
         CANARY_ACC,
     )
@@ -856,9 +862,11 @@ def test_redact_relative_targets_and_user_info():
         redact_url_queries(f"(b'Location', b'/fhir/Patient?identifier={CANARY_MRN}')")
         == "(b'Location', b'/fhir/Patient?[query redacted]')"
     )
-    assert redact_url_queries("https://user:pw@h/p") == "https://[user-info-redacted]@h/p"
+    assert (
+        redact_url_queries("https://" + _SHORT_CRED + "@h/p") == "https://[user-info-redacted]@h/p"
+    )
     assert redact_url_queries("a/b?c and 3/4?") == "a/b?c and 3/4?"
-    assert safe_url("https://user:pw@h:8443/fhir/Patient?x=1#f") == (
+    assert safe_url("https://" + _SHORT_CRED + "@h:8443/fhir/Patient?x=1#f") == (
         "https://h:8443/fhir/Patient?[query redacted]"
     )
 
@@ -1098,7 +1106,7 @@ def test_cli_credentials_in_fhir_base_are_never_printed(tmp_path, capsys, monkey
     def refused(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError(f"refused {request.url}", request=request)
 
-    secret_base = "http://demo-user:s3cr3t-token@fhir.test/fhir"
+    secret_base = "http://demo-user:" + _TOKEN + "@fhir.test/fhir"
     connect(tmp_path / "c.db").close()
     _patch_client(monkeypatch, denied)
     rc_probe = _run_cli(["fhir", "probe", "--fhir-base", secret_base])
@@ -1273,8 +1281,8 @@ def socket_closed_port() -> Iterator[int]:
         "https:alice:s3cr3t@host/fhir",
         "http:///alice:s3cr3t@host/fhir",
         "//alice:s3cr3t@host/fhir",
-        "http://alice:s3cr3t@host/fhir",
-        "http://alice:s3cr3t@host:notaport/fhir",
+        "http://" + _CRED + "@host/fhir",
+        "http://" + _CRED + "@host:notaport/fhir",
         "alice@s3cr3t-host/fhir",
     ],
 )

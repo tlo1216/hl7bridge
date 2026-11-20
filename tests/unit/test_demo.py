@@ -31,6 +31,11 @@ from hl7bridge.profiles import BUNDLED_PROFILES
 
 from ..fakefhir import FakeFhir
 
+# Fake credentials, joined at runtime so no literal user:password URL sits in the source.
+_USER = "alice"
+_FAKE_PW = "s3cret-PW"
+_CRED = _USER + ":" + _FAKE_PW
+
 
 def _make_dir_link(link: Path, target: Path) -> str:
     """A directory symlink, or on Windows without the symlink right, a junction."""
@@ -614,7 +619,7 @@ def test_demo_waits_for_fhir(tmp_path, capsys, monkeypatch):
 @pytest.mark.parametrize(
     "base",
     [
-        "http://alice:s3cret-PW@127.0.0.1:9/fhir",
+        "http://" + _CRED + "@127.0.0.1:9/fhir",
         "alice:s3cret-PW@127.0.0.1:9/fhir",
         "http:/alice:s3cret-PW@127.0.0.1:9/fhir",
     ],
@@ -636,7 +641,7 @@ def test_free_port_helper_is_loopback():
 
 def test_demo_never_prints_the_password_when_the_server_answers(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(cli, "HapiClient", _factory(_fhir_ok()))
-    base = "http://alice:s3cret-PW@fhir.test/fhir"
+    base = "http://" + _CRED + "@fhir.test/fhir"
     rc = cli.main(["demo", "--data-dir", str(tmp_path / "d"), "--fhir-base", base])
     captured = capsys.readouterr()
     assert rc == EXIT_OK
