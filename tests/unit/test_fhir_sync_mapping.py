@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from hl7bridge.config import HospitalRegistry
-from hl7bridge.errors import FhirPostError
+from hl7bridge.errors import FhirPostError, MappingError
 from hl7bridge.fhir import sync_to_fhir
 from hl7bridge.fhir.client import HapiClient
 from hl7bridge.fhir.post import PostOrderError, check_run_order, merge_resource, post_mapped
@@ -373,6 +373,41 @@ def test_retiring_never_touches_another_reports_or_systems_results(registry):
     _post(server, registry, _corrected(STRUCTURED))
     assert server.data["Observation"]["500"]["status"] == "final"
     assert server.data["Observation"]["501"]["status"] == "final"
+
+
+def test_retiring_compares_the_parsed_accession_exactly(registry):
+    # A key an accession like SACCA0002/B would have made: it starts with
+    # this report's accession and a slash, but its accession part is not
+    # this report's. It must never be retired.
+    server = FakeFhir()
+    _post(server, registry, STRUCTURED)
+    report = server.by_key("DiagnosticReport", "urn:hl7bridge:hospa:accession|SACCA0002")
+    for n, value in enumerate(["SACCA0002/B/sub/1/sub/2", "SACCA0002/B/x/1", "SACCA0002//sub/1"]):
+        server._write(
+            "Observation",
+            f"60{n}",
+            {
+                "resourceType": "Observation",
+                "status": "final",
+                "identifier": [{"system": "urn:hl7bridge:hospa:observation", "value": value}],
+            },
+        )
+        report["result"].append({"reference": f"Observation/60{n}"})
+    server._write("DiagnosticReport", report["id"], report)
+    _post(server, registry, _corrected(STRUCTURED))
+    assert [server.data["Observation"][f"60{n}"]["status"] for n in range(3)] == ["final"] * 3
+    # The result this report owns and dropped is still retired.
+    finding = server.by_key("Observation", "urn:hl7bridge:hospa:observation|SACCA0002/FIND1/sub/1")
+    assert finding["status"] == "entered-in-error"
+
+
+@pytest.mark.parametrize("name", ["03_hospa_oru_r01_final.hl7", "14_hospa_oru_r01_structured.hl7"])
+def test_an_accession_with_a_slash_is_refused_for_every_oru(registry, name):
+    old = "SACCA0001" if name.startswith("03") else "SACCA0002"
+    with pytest.raises(MappingError) as caught:
+        message_to_bundle(_sample(name).replace(old, "SACCA0002/B"), registry)
+    assert caught.value.field == "OBR-3"
+    assert "SACCA" not in str(caught.value)
 
 
 def test_run_order_refuses_a_preliminary_after_a_final(registry):

@@ -222,3 +222,43 @@ def test_sync_after_to_fhir_post_writes_the_same_content(client, run, tmp_path: 
     assert sum(report.created.values()) == 0
     after = _snapshot(client, root, keys)
     assert after == before
+
+
+def test_retiring_skips_a_result_whose_parsed_accession_differs(client, run):
+    """A result under this report's system and starting with its accession
+    and a slash, but whose accession part is another one, stays as it is."""
+    registry, root = run
+    structured = _sample("14_hospa_oru_r01_structured.hl7")
+    _post(client, registry, structured)
+    system = f"{root}:hospa:observation"
+    report = _one(client, "DiagnosticReport", f"{root}:hospa:accession", "SACCA0002")
+    foreign = {
+        "resourceType": "Observation",
+        "status": "final",
+        "code": {"text": "foreign"},
+        "identifier": [{"system": system, "value": "SACCA0002/B/sub/1/sub/2"}],
+    }
+    (created,) = client.commit(
+        {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [{"resource": foreign, "request": {"method": "POST", "url": "Observation"}}],
+        }
+    )
+    report["result"].append({"reference": f"Observation/{created.server_id}"})
+    client.commit(
+        {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [
+                {
+                    "resource": report,
+                    "request": {"method": "PUT", "url": f"DiagnosticReport/{report['id']}"},
+                }
+            ],
+        }
+    )
+    (done,) = _post(client, registry, _corrected(structured))
+    assert [c.key.partition("|")[2] for c in done if c.retired] == ["SACCA0002/FIND1/sub/1"]
+    kept = client.read_by_id("Observation", str(created.server_id))
+    assert kept is not None and kept["status"] == "final"

@@ -51,7 +51,7 @@ from .common import MapContext, check_key
 from .encounter import pv1_to_encounter
 from .fields import FieldReader
 from .jsontext import resource_dict
-from .observation import notes_after, obx_to_observation
+from .observation import KEY_JOIN, notes_after, obx_to_observation
 from .order import accession_value, orc_obr_to_service_request
 from .patient import pid_to_patient
 from .report import is_narrative, obr_to_diagnostic_report, report_text
@@ -199,6 +199,15 @@ def _report_resources(ctx: MapContext, patient_ref: str) -> list[Resource]:
         raise MappingError("OBR", "an ORU must hold exactly one OBR; more are not mapped")
     with _mapping(reader, "obr_to_diagnostic_report", "OBR"):
         filler = accession_value(ctx)
+        if KEY_JOIN in filler:
+            # The accession is the first part of every result key, and a
+            # post finds a report's own results by it. Refused for every
+            # ORU, narrative ones included, so no report can claim another
+            # report's results.
+            raise MappingError(
+                ctx.hospital.accession_field,
+                "holds a character that cannot be part of a result key",
+            )
         text = report_text(ctx)
     observations: list[Resource] = []
     with reader.mapper("obx_to_observation"):

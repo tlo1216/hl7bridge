@@ -16,7 +16,7 @@ is sent, two things are read from the server and folded into it:
    More than one: refused, never "first match wins".
 2. **Retire** (ORU). A corrected report can drop a result. The current
    DiagnosticReport's ``result`` list is read, and each Observation in it
-   that carries this report's key prefix and that the new version no
+   whose key parses to this report's accession and that the new version no
    longer carries is written back with status ``entered-in-error`` (with
    ``If-Match``) in the same transaction. Observations with another
    system or another report's key are never touched.
@@ -36,6 +36,7 @@ from typing import Any
 
 from ..errors import BridgeError, FhirPostError
 from ..v2fhir.bundle import MERGE, MappedMessage, bundle_json, full_url, search_query
+from ..v2fhir.observation import KEY_JOIN, SET_ID_PART, SUB_ID_PART
 from .client import EntryResult, HapiClient
 
 # The elements each mapper writes and so owns in a merge. Everything else
@@ -145,13 +146,21 @@ def _merge_entry(client: HapiClient, entry: dict[str, Any]) -> None:
     }
 
 
+def result_accession(value: str) -> str | None:
+    """The accession part of a result key (``<accession>/<code>/sub|set/<id>``),
+    or None when the value does not have exactly that shape."""
+    parts = value.split(KEY_JOIN)
+    if len(parts) != 4 or parts[2] not in (SUB_ID_PART, SET_ID_PART) or not all(parts):
+        return None
+    return parts[0]
+
+
 def _retire_entries(
     client: HapiClient, mapped: MappedMessage, report: dict[str, Any], keep: set[str]
 ) -> list[dict[str, Any]]:
     current = _one(client, "DiagnosticReport", _key(report))
     if current is None:
         return []
-    prefix = mapped.accession + "/"
     retire: list[dict[str, Any]] = []
     for ref in current.get("result", []):
         match = _REFERENCE.search(str(ref.get("reference", "")))
@@ -164,7 +173,7 @@ def _retire_entries(
             i
             for i in obs.get("identifier", [])
             if i.get("system") == mapped.observation_system
-            and str(i.get("value", "")).startswith(prefix)
+            and result_accession(str(i.get("value", ""))) == mapped.accession
         ]
         if not ours or any(f"{i['system']}|{i['value']}" in keep for i in ours):
             continue
@@ -265,5 +274,6 @@ __all__ = [
     "merge_resource",
     "post_mapped",
     "prepare",
+    "result_accession",
     "search_query",
 ]
