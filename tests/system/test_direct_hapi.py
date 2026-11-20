@@ -322,3 +322,33 @@ def test_a_refused_delete_in_reset_deletes_nothing(world, monkeypatch):
     assert world.counts("run-a")["Observation"] == 1
     assert world.counts("run-a")["DiagnosticReport"] == 1
     assert world.counts("run-b")["Observation"] == 1
+
+
+def test_reset_keeps_a_resource_that_left_the_run_after_the_plan(world):
+    assert _ack(world.handler("run-a"), world.oru()) == ("AA", "")
+    with HapiClient(world.base) as c:
+        plan = plan_reset(c, RunScope("run-a", world.lab_tag))
+    obs_id = plan.ids["Observation"][0]
+    # HAPI keeps tags across a PUT, so the run tag goes by $meta-delete.
+    tag = {"system": f"{world.lab_tag[0]}/lab-run", "code": "run-a"}
+    params = {
+        "resourceType": "Parameters",
+        "parameter": [{"name": "meta", "valueMeta": {"tag": [tag]}}],
+    }
+    gone = httpx.post(f"{world.base}/Observation/{obs_id}/$meta-delete", json=params)
+    assert gone.status_code == 200
+    with HapiClient(world.base) as c:
+        plan.ids["DiagnosticReport"] = []  # the report still refers to the observation
+        execute_reset(c, plan)
+        assert c.read_by_id("Observation", obs_id) is not None
+
+
+def test_a_resend_after_reset_is_written_again(world):
+    h = world.handler("run-a")
+    text = world.oru()
+    assert _ack(h, text) == ("AA", "")
+    with HapiClient(world.base) as c:
+        execute_reset(c, plan_reset(c, RunScope("run-a", world.lab_tag)))
+    assert world.counts("run-a")["DiagnosticReport"] == 0
+    assert _ack(h, text) == ("AA", "")
+    assert world.counts("run-a")["DiagnosticReport"] == 1

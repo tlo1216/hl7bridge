@@ -77,6 +77,8 @@ class MappedMessage:
     observation_system: str = ""
     # PID-3.4 of the MRN repetition, for direct mode's MRN system choice.
     mrn_authority: str = ""
+    # The profile's fhir.patient_policy. The batch post refuses match_only.
+    patient_policy: str = "create"
 
     def entry_types(self) -> list[str]:
         return [e.resource.get_resource_type() for e in self.bundle.entry or [] if e.resource]
@@ -194,6 +196,7 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
         accession=report.identifier[0].value if report is not None else "",  # type: ignore[attr-defined]
         observation_system=hospital.systems.observation if report is not None else "",
         mrn_authority=authority,
+        patient_policy=hospital.fhir.patient_policy,
     )
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from hl7bridge.ingest.direct import (
     AR_REASONS,
     COMMITTED,
     DUPLICATE,
+    DeadlineExceeded,
     DirectHandler,
     DirectLog,
     KeyLocks,
@@ -204,7 +206,7 @@ def test_a04_orm_oru_commit_in_the_run_and_never_touch_the_patient(lab):
     assert len(lab.server.data["Patient"]) == 1
     report = lab.server.by_key("DiagnosticReport", "urn:test:acc/run/run-a|ACC1")
     assert report["subject"] == {"reference": "Patient/p1"}
-    assert {"system": "urn:test:acc", "value": "ACC1", "use": "secondary"}.items() <= (
+    assert {"system": "urn:test:acc/as-sent", "value": "ACC1", "use": "secondary"}.items() <= (
         report["identifier"][1].items()
     )
     tags = {(t["system"], t["code"]) for t in report["meta"]["tag"]}
@@ -354,7 +356,7 @@ def test_the_mrn_system_follows_the_assigning_authority(tmp_path, server):
     lab = Lab(HospitalRegistry.load_dir(folder), server, tmp_path)
     assert lab.send(lab.oru()) == ("AA", "")
     other = lab.oru().replace("^^^LAB^MR", "^^^ELSEWHERE^MR").replace("FF2026", "FG2026")
-    assert lab.send(other) == ("AE", "unknown_patient: PID-3")
+    assert lab.send(other) == ("AE", "unknown_assigning_authority: PID-3.4")
 
 
 # -- run ownership -------------------------------------------------------------------------
@@ -432,7 +434,9 @@ def test_a_late_older_report_gets_stale_result_and_writes_nothing(lab):
         {
             "resourceType": "Bundle",
             "type": "transaction-response",
-            "entry": [{"response": {"status": "400 Bad Request"}}] * 3,
+            # One entry per request (the report and its result), so only the
+            # entry status check can refuse it.
+            "entry": [{"response": {"status": "400 Bad Request"}}] * 2,
         },
         {"resourceType": "OperationOutcome"},
     ],
@@ -528,19 +532,22 @@ def test_the_same_message_on_two_threads_leaves_one_set(lab):
     assert len(lab.server.data["Observation"]) == 1
 
 
-def test_key_locks_are_taken_in_sorted_order():
+def test_key_locks_are_taken_in_sorted_order_and_dropped_after():
     locks = KeyLocks()
-    order: list[str] = []
-    real = locks._lock
-
-    def spy(key):
-        order.append(key)
-        return real(key)
-
-    locks._lock = spy  # type: ignore[method-assign]
     with locks.hold(["b", "a", "c", "a"]):
+        assert list(locks._locks) == ["a", "b", "c"]
+    assert len(locks) == 0, "a lock no one holds is dropped"
+
+
+def test_a_lock_wait_ends_at_the_deadline():
+    locks = KeyLocks()
+    with (
+        locks.hold(["k"]),
+        pytest.raises(DeadlineExceeded),
+        locks.hold(["k"], deadline=time.monotonic() + 0.05),
+    ):
         pass
-    assert order == ["a", "b", "c"]
+    assert len(locks) == 0
 
 
 # -- the log -------------------------------------------------------------------------------

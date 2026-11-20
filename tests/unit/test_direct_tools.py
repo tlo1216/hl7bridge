@@ -136,7 +136,7 @@ def test_reset_cli_deletes_after_the_typed_run_id(registry, tmp_path, monkeypatc
     _cli_server(monkeypatch, server)
     monkeypatch.setattr("builtins.input", lambda: "run-a")
     assert cli.main(_reset_args(tmp_path, "--yes")) == 0
-    assert "deleted 4 resources" in capsys.readouterr().out
+    assert "sent 4 deletes for run" in capsys.readouterr().out
 
 
 def test_reset_cli_refuses_without_a_run_id(tmp_path, monkeypatch, capsys):

@@ -150,12 +150,20 @@ class FakeFhir:
         deletes: list[tuple[str, str]] = []
         for entry in body["entry"]:
             req = entry["request"]
-            if req["method"] == "DELETE":
+            if req["method"] == "DELETE" and "?" in req["url"]:
+                # Conditional delete (``?_id=&_tag=``): no match deletes nothing.
+                kind, _, query = req["url"].partition("?")
+                params = {k: v[0] for k, v in parse_qs(query).items()}
+                server_id = params.pop("_id")
+                if server_id in {r["id"] for r in self.search(kind, params)}:
+                    deletes.append((kind, server_id))
+            elif req["method"] == "DELETE":
                 kind, _, server_id = req["url"].partition("/")
                 if server_id not in self.data.get(kind, {}):
                     return _outcome(404, "not-found")
                 deletes.append((kind, server_id))
-        if deletes:
+        n_deletes = sum(1 for e in body["entry"] if e["request"]["method"] == "DELETE")
+        if n_deletes:
             gone = {f"{k}/{i}" for k, i in deletes}
             for kind, resources in self.data.items():
                 for server_id, resource in resources.items():
@@ -163,7 +171,7 @@ class FakeFhir:
                         return _outcome(409, "conflict")
             for kind, server_id in deletes:
                 del self.data[kind][server_id]
-            answers = [{"response": {"status": "204 No Content"}} for _ in deletes]
+            answers = [{"response": {"status": "204 No Content"}} for _ in range(n_deletes)]
             return _response(
                 200, {"resourceType": "Bundle", "type": "transaction-response", "entry": answers}
             )

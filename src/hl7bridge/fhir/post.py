@@ -27,7 +27,14 @@ is sent, two things are read from the server and folded into it:
 3. **Stale results** (ORU). A report older than the one on the server (by
    OBR-22, then by status, ``is_older``) raises StaleResultError and
    nothing is sent. ``check_run_order`` applies the same rule inside one
-   run, before anything is posted.
+   run, before anything is posted. A retraction (cancelled,
+   entered-in-error) ranks above a correction, so a correction with the
+   same or no OBR-22 cannot bring a retracted report back. With no OBR-22
+   on either side and the same rank, the message is taken as the newer
+   (ADR-0004: MSH-7 is not used).
+
+A profile with ``patient_policy: match_only`` is refused here: its
+Patients belong to someone else and this path writes Patients.
 """
 
 from __future__ import annotations
@@ -39,7 +46,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..errors import BridgeError, FhirPostError
+from ..errors import BridgeError, ConfigError, FhirPostError
 from ..v2fhir.bundle import MERGE, MappedMessage, bundle_json, full_url, search_query
 from ..v2fhir.observation import KEY_JOIN, SET_ID_PART, SUB_ID_PART
 from .client import EntryResult, HapiClient
@@ -65,8 +72,9 @@ STATUS_RANK = {
     "amended": 3,
     "corrected": 3,
     "appended": 3,
-    "cancelled": 3,
-    "entered-in-error": 3,
+    # A retraction outranks a correction: it is the last word on a report.
+    "cancelled": 4,
+    "entered-in-error": 4,
 }
 _REFERENCE = re.compile(r"(?:^|/)Observation/([A-Za-z0-9.\-]{1,64})(?:/_history/[^/]+)?$")
 
@@ -306,9 +314,23 @@ def check_created(body: dict[str, Any], results: Sequence[EntryResult], creates:
             raise ConcurrentWriteError(str(body["entry"][n]["resource"]["resourceType"]))
 
 
+def refuse_match_only(hospital_id: str, policy: str) -> None:
+    """ConfigError for a match_only profile: the batch path creates and
+    merges Patients, which such a profile says belong to someone else."""
+    if policy == "match_only":
+        raise ConfigError(
+            f"profile {hospital_id} has patient_policy match_only; to-fhir --post and fhir"
+            " sync create and merge Patients, so they refuse it.",
+            hint="Use listen --target fhir for a match_only profile, or a profile with"
+            " patient_policy create on a server of your own.",
+        )
+
+
 def post_mapped(client: HapiClient, mapped: MappedMessage) -> list[Committed]:
     """Prepare and post one message. Raises FhirPostError unless the server
-    committed every entry (``HapiClient.commit``)."""
+    committed every entry (``HapiClient.commit``), and ConfigError for a
+    match_only profile before anything is read or sent."""
+    refuse_match_only(mapped.hospital_id, mapped.patient_policy)
     body = prepare(client, mapped)
     creates = {
         n
@@ -374,6 +396,7 @@ __all__ = [
     "parse_instant",
     "post_mapped",
     "prepare",
+    "refuse_match_only",
     "result_accession",
     "retire_entries",
     "search_query",

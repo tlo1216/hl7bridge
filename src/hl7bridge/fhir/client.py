@@ -223,6 +223,10 @@ class HapiClient:
             isinstance(link, dict) and link.get("relation") == "next"
             for link in body.get("link") or []
         )
+        if paged and not found:
+            raise FhirPostError(
+                200, str(response.url), reason="a paged search answer with no entries on page one"
+            )
         if paged and len(found) < 2:
             found = found * 2  # more on a next page: at least two, never "the first"
         return found
@@ -256,17 +260,23 @@ class HapiClient:
 
         A ``next`` link is followed only when it points under this client's
         base URL; any other link, or more than ``max_pages`` pages, raises
-        FhirPostError, so a partial list is never taken for the whole."""
+        FhirPostError, so a partial list is never taken for the whole. So
+        does a match of another type: an OperationOutcome the server adds
+        (search mode ``outcome``) is skipped, anything else is not."""
         body = self.search_bundle(resource_type, params)
         found: list[dict[str, Any]] = []
         for _ in range(max_pages):
-            found.extend(
-                e["resource"]
-                for e in body.get("entry") or []
-                if isinstance(e, dict)
-                and isinstance(e.get("resource"), dict)
-                and e["resource"].get("resourceType") == resource_type
-            )
+            for e in body.get("entry") or []:
+                resource = e.get("resource") if isinstance(e, dict) else None
+                if not isinstance(resource, dict):
+                    continue
+                mode = (e.get("search") or {}).get("mode")
+                if resource.get("resourceType") == resource_type and mode in (None, "match"):
+                    found.append(resource)
+                elif mode not in ("outcome", "include"):
+                    raise FhirPostError(
+                        200, resource_type, reason="a search answer held another resource type"
+                    )
             nxt = next(
                 (
                     link.get("url")

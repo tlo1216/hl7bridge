@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import sys
 from collections.abc import Callable
 from datetime import datetime, tzinfo
 from pathlib import Path
@@ -43,18 +44,44 @@ def load_mapping_module(path: Path) -> tuple[str, ...]:
     """Load ``path`` and install the hooks it defines. Returns their names.
 
     Public functions (no leading underscore) defined in the file itself
-    must all be hook names. Raises ConfigError for a file that is missing,
-    is not a .py file, fails to import, or defines an unknown function."""
+    must all be hook names, and a hook name must be such a function (a
+    lambda, partial or imported callable under a hook name is refused, not
+    silently skipped). Raises ConfigError for a file that is missing, is
+    not a .py file, fails to import, or breaks either rule. The module is
+    in ``sys.modules`` while it runs, so dataclasses and type hints work."""
     if path.suffix != ".py" or not path.is_file():
         raise ConfigError("--mapping-module must name an existing .py file.")
     spec = importlib.util.spec_from_file_location("hl7bridge_mapping_hooks", path)
     if spec is None or spec.loader is None:
         raise ConfigError("--mapping-module could not be loaded as a Python module.")
     module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(spec.name)
+    sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
-    except Exception as exc:  # noqa: BLE001  user code; only the type is shown
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001  user code, SystemExit included
         raise ConfigError(f"--mapping-module failed to import ({type(exc).__name__}).") from None
+    finally:
+        if previous is None:
+            sys.modules.pop(spec.name, None)
+        else:
+            sys.modules[spec.name] = previous
+    misfit = sorted(
+        name
+        for name in HOOK_NAMES
+        if name in vars(module)
+        and not (
+            inspect.isfunction(vars(module)[name])
+            and vars(module)[name].__module__ == module.__name__
+        )
+    )
+    if misfit:
+        raise ConfigError(
+            f"--mapping-module binds {', '.join(misfit)} to something other than a function"
+            " defined in the file; write each hook as a def."
+        )
     defined = {
         name: obj
         for name, obj in vars(module).items()
@@ -88,19 +115,30 @@ def active() -> tuple[str, ...]:
     return tuple(sorted(_active))
 
 
-def _call(name: str, field: str, segment: int, *args: Any) -> Any:
+def _call(
+    name: str, field: str, segment: int, *args: Any, check: Callable[[Any], bool] = bool
+) -> Any:
+    """Run a hook and check its answer, both inside one guard: whatever
+    the user's code raises or returns (SystemExit, an unhashable value)
+    becomes a MappingError, never an internal error. Only Ctrl+C passes."""
     try:
-        return _active[name](*args)
-    except Exception:  # noqa: BLE001  user code; the text can quote the value
+        value = _active[name](*args)
+        ok = check(value)
+    except KeyboardInterrupt:
+        raise
+    except BaseException:  # noqa: BLE001  user code; the text can quote the value
         raise MappingError(field, f"the mapping hook {name} failed", segment=segment) from None
+    if not ok:
+        raise MappingError(
+            field, f"the mapping hook {name} returned no usable value", segment=segment
+        )
+    return value
 
 
 def sex_code(raw: str, default: Callable[[str], str]) -> str:
     if "sex_code" not in _active:
         return default(raw)
-    code = _call("sex_code", "PID-8", 1, raw)
-    if code not in GENDERS:
-        raise MappingError("PID-8", "the mapping hook sex_code returned no FHIR gender code")
+    code = _call("sex_code", "PID-8", 1, raw, check=lambda v: isinstance(v, str) and v in GENDERS)
     return str(code)
 
 
@@ -109,13 +147,13 @@ def abnormal_flag(
 ) -> str:
     if "abnormal_flag" not in _active:
         return default(raw)
-    code = _call("abnormal_flag", "OBX-8", segment, raw)
-    if code not in allowed:
-        raise MappingError(
-            "OBX-8",
-            "the mapping hook abnormal_flag returned no interpretation code",
-            segment=segment,
-        )
+    code = _call(
+        "abnormal_flag",
+        "OBX-8",
+        segment,
+        raw,
+        check=lambda v: isinstance(v, str) and v in allowed,
+    )
     return str(code)
 
 
@@ -127,15 +165,16 @@ def observation_time(
         return default()
     if not raw:
         return None
-    value = _call("observation_time", "OBX-14", segment, raw, zone)
+    value = _call(
+        "observation_time",
+        "OBX-14",
+        segment,
+        raw,
+        zone,
+        check=lambda v: v is None or (isinstance(v, datetime) and v.utcoffset() is not None),
+    )
     if value is None:
         return None
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise MappingError(
-            "OBX-14",
-            "the mapping hook observation_time returned no time with a zone",
-            segment=segment,
-        )
     from ..store.db import utc_iso
 
     return utc_iso(value)

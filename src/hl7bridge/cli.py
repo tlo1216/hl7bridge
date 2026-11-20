@@ -51,7 +51,7 @@ from .errors import (
 )
 from .explain import as_json, explain_message, render_text, split_messages
 from .fhir import HapiClient, render_sync_text, sync_to_fhir
-from .fhir.post import check_run_order, post_mapped
+from .fhir.post import check_run_order, post_mapped, refuse_match_only
 from .fhir.reset import execute_reset, plan_reset
 from .fhir.runscope import DEFAULT_LAB_TAG, RunScope, check_run_id
 from .fromfhir import patient_messages, report_message
@@ -518,7 +518,10 @@ def _post_bundles(args: argparse.Namespace, mapped: list[tuple[str, MappedMessag
     """Post each Bundle as one transaction, in order, through the same post
     as ``fhir sync`` (merges and retirements, ``fhir/post.py``). The first
     one the server does not fully commit stops the run: later messages can
-    depend on it. What was committed before it has been printed."""
+    depend on it. What was committed before it has been printed. A
+    match_only profile among them stops the run before anything is sent."""
+    for _, result in mapped:
+        refuse_match_only(result.hospital_id, result.patient_policy)
     base, named = _fhir_base(args)
     if not named:
         raise UsageError(
@@ -922,6 +925,12 @@ def _listen_direct(args: argparse.Namespace) -> int:
     run_id = _run_id(args)
     registry = _registry(args)
     check_profiles_for_direct(registry)
+    if getattr(args, "mapping_module", None) and args.host not in LOOPBACK_HOSTS:
+        raise UsageError(
+            "--mapping-module runs a Python file inside the listener; it is for a loopback"
+            " listener only, and --host is not loopback.",
+            hint="Leave out --host (loopback is the default), or leave out --mapping-module.",
+        )
     _load_hooks(args)
     db_path = Path(args.db) if args.db else Path(DEFAULT_DIRECT_DB)
     _note(args, f"using direct-mode log: {db_path}")
@@ -934,7 +943,10 @@ def _listen_direct(args: argparse.Namespace) -> int:
             _require_metadata(client, base)
             handler = DirectHandler(registry, client, scope, direct_log)
             where = f"FHIR {safe_url(base)}, run {run_id}, log {db_path}"
-            return _serve_forever(args, handler.handle_frame, handler.handle_junk, where)
+            try:
+                return _serve_forever(args, handler.handle_frame, handler.handle_junk, where)
+            finally:
+                handler.close()
     finally:
         direct_log.close()
 
@@ -1173,6 +1185,9 @@ def cmd_fhir_reset(args: argparse.Namespace) -> int:
     run_id = _run_id(args)
     registry = _registry(args)
     scope = RunScope(run_id, _lab_tag(registry))
+    direct_db = Path(args.db) if args.db else None
+    if direct_db is not None and not direct_db.is_file():
+        raise UsageError("--db names no file; give the listener's direct-mode log.")
     headers = _fhir_headers()
     _warn_plain_http(base, headers)
     with HapiClient(base, extra_headers=headers) as client:
@@ -1184,6 +1199,7 @@ def cmd_fhir_reset(args: argparse.Namespace) -> int:
         print("  Patient: never deleted")
         if plan.total == 0:
             print("nothing to delete")
+            _void_direct_log(direct_db, run_id, client.base_url, args.yes)
             return EXIT_OK
         if not args.yes:
             print("dry run: nothing deleted. Pass --yes to delete these resources.")
@@ -1197,8 +1213,25 @@ def cmd_fhir_reset(args: argparse.Namespace) -> int:
             print("not confirmed: nothing deleted.", file=sys.stderr)
             return EXIT_FINDINGS
         deleted = execute_reset(client, plan)
-    print(f"deleted {deleted} resources of run {run_id}")
+        print(
+            f"sent {deleted} deletes for run {run_id}; a resource that left the run since"
+            " the count above was kept"
+        )
+        _void_direct_log(direct_db, run_id, client.base_url, True)
     return EXIT_OK
+
+
+def _void_direct_log(path: Path | None, run_id: str, base: str, really: bool) -> None:
+    """Void the run's rows in the listener's log, so a resend after the
+    reset is written again and a changed one is not a conflict."""
+    if path is None or not really:
+        return
+    direct_log = DirectLog(path)
+    try:
+        voided = direct_log.void_run(run_id, base)
+    finally:
+        direct_log.close()
+    print(f"voided {voided} log row(s) of run {run_id} in {path}")
 
 
 def cmd_from_fhir(args: argparse.Namespace) -> int:
@@ -1242,6 +1275,8 @@ def cmd_fhir_sync(args: argparse.Namespace) -> int:
             hint=f"Pass --fhir-base URL or set {FHIR_BASE_ENV}.",
         )
     registry = _registry(args)
+    for hospital in registry.by_id.values():
+        refuse_match_only(hospital.hospital_id, hospital.fhir.patient_policy)
     conn = _report_db(args)
     headers = _fhir_headers()
     _warn_plain_http(base, headers)
@@ -1828,6 +1863,11 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         _add_config(p)
         _add_fhir_base(p)
         _add_run_id(p)
+        p.add_argument(
+            "--db",
+            metavar="FILE",
+            help="the listener's direct-mode log: void the run's rows there too",
+        )
         p.add_argument(
             "--yes", action="store_true", help="delete after a typed run id (default: dry run)"
         )

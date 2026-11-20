@@ -164,8 +164,14 @@ class FhirSettings:
     tag: tuple[str, str] | None = None
     allowed_processing_ids: tuple[str, ...] = DEFAULT_PROCESSING_IDS
 
-    def mrn_system(self, authority: str, fallback: str) -> str:
-        return dict(self.mrn_by_authority).get(authority, fallback)
+    def mrn_system(self, authority: str, fallback: str) -> str | None:
+        """The MRN system for a PID-3.4 authority: the mapped one, the
+        fallback when PID-3.4 is empty, and None for a valued authority the
+        profile does not map (another authority's MRN under the default
+        system could be another patient)."""
+        if not authority:
+            return fallback
+        return dict(self.mrn_by_authority).get(authority)
 
 
 @dataclass(frozen=True, slots=True)

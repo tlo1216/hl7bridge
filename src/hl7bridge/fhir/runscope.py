@@ -7,15 +7,18 @@ another run's data:
 1. **Run-namespaced identifiers.** Every identifier the listener writes
    has the system ``<profile system>/run/<run id>``, so a conditional write
    can only ever match a resource of the same run. The value from the
-   message is kept beside it under the profile system with ``use:
-   secondary``, for reading; it is never a match key.
+   message is kept beside it under ``<profile system>/as-sent`` with
+   ``use: secondary``, for reading; it is never a match key, and no batch
+   path search (which uses the profile system itself) can find it.
 2. **A run tag on every write.** Each resource carries the lab tag (the
    profile's ``fhir.tag``) and the run tag (``<lab tag system>/lab-run``,
    code = run id). A create is a conditional create on the run identifier
    *and* the run tag.
 3. **Outside the run is refused.** Before a write, each key is searched.
    A match that lacks this run's tag raises OutsideRunError (AE
-   ``outside_run``) and nothing is written.
+   ``outside_run``) and nothing is written. A match whose subject is
+   another Patient raises PatientMismatchError (AE ``patient_mismatch``):
+   one key never moves from one patient to another.
 4. **The Patient is read only.** It is matched by MRN
    (``fhir/match.py``) and referred to by id. It is never created, merged
    or tagged, and ``fhir reset`` never touches it.
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import quote
@@ -48,6 +52,8 @@ from .post import (
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,31}")
 DEFAULT_LAB_TAG = ("urn:hl7bridge:tag", "hl7v2-lab")
 RUN_TAG_SUFFIX = "/lab-run"
+AS_SENT_SUFFIX = "/as-sent"
+_PATIENT_REF = re.compile(r"(?:^|/)Patient/([A-Za-z0-9.\-]{1,64})(?:/_history/[^/]+)?$")
 # Types the listener writes, in the order fhir reset deletes them.
 RUN_TYPES = ("Observation", "DiagnosticReport", "ServiceRequest", "Encounter")
 
@@ -78,6 +84,21 @@ class AmbiguousResourceError(BridgeError):
     def __init__(self, kind: str) -> None:
         self.kind = kind
         super().__init__(f"more than one {kind} has this key; nothing was written")
+
+
+class PatientMismatchError(BridgeError):
+    """A key matched a resource of the run whose subject is another Patient."""
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        super().__init__(f"a {kind} with this key belongs to another patient; nothing was written")
+
+
+def subject_id(resource: dict[str, Any]) -> str | None:
+    """The Patient id ``resource.subject`` refers to, or None."""
+    ref = (resource.get("subject") or {}).get("reference")
+    match = _PATIENT_REF.search(ref) if isinstance(ref, str) else None
+    return match.group(1) if match else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +141,9 @@ def _swap_references(value: Any, old: str, new: str) -> Any:
 
 def _scope_identifiers(identifiers: list[dict[str, Any]], scope: RunScope) -> list[dict[str, Any]]:
     keyed = [{**i, "system": scope.system(i["system"])} for i in identifiers]
-    secondary = [{**i, "use": "secondary"} for i in identifiers]
+    secondary = [
+        {**i, "system": i["system"] + AS_SENT_SUFFIX, "use": "secondary"} for i in identifiers
+    ]
     return keyed + secondary
 
 
@@ -202,6 +225,8 @@ def prepare_run(
         current = found[0]
         if not scope.owns(current):
             raise OutsideRunError(kind)
+        if subject_id(current) != subject_id(new):
+            raise PatientMismatchError(kind)
         if kind == "DiagnosticReport":
             check_not_stale(current, new)
             current_report = current
@@ -231,13 +256,21 @@ def prepare_run(
 
 
 def post_run(
-    client: HapiClient, mapped: MappedMessage, body: dict[str, Any], scope: RunScope
+    client: HapiClient,
+    mapped: MappedMessage,
+    body: dict[str, Any],
+    scope: RunScope,
+    *,
+    before_commit: Callable[[], None] | None = None,
 ) -> list[EntryResult]:
     """Prepare and commit one scoped message. Raises unless the server
-    committed every entry and every planned create was a create."""
+    committed every entry and every planned create was a create.
+    ``before_commit`` runs between the two and may raise to send nothing."""
     creates = prepare_run(client, mapped, body, scope)
     if not body["entry"]:
         raise FhirPostError(0, "Bundle", reason="nothing to write")
+    if before_commit is not None:
+        before_commit()
     results = client.commit(body)
     check_created(body, results, creates)
     return results
@@ -248,6 +281,7 @@ __all__ = [
     "RUN_TYPES",
     "AmbiguousResourceError",
     "OutsideRunError",
+    "PatientMismatchError",
     "RunScope",
     "check_run_id",
     "lock_keys",
