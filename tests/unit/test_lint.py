@@ -11,7 +11,7 @@ import pytest
 from hl7bridge.config import HospitalRegistry
 from hl7bridge.errors import ConfigError
 from hl7bridge.lint import lint_text
-from hl7bridge.lint.runner import lint_directory
+from hl7bridge.lint.runner import lint_directory, render_lint_text
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
 
@@ -156,3 +156,25 @@ def test_unknown_disabled_rule_rejected_at_lint_time(tmp_path):
 def test_lint_directory_empty_rejected(tmp_path, registry):
     with pytest.raises(ConfigError, match=r"no .*hl7 files"):
         lint_directory(tmp_path, registry)
+
+
+def test_lint_directory_keys_use_forward_slashes(tmp_path, registry):
+    """Report keys are POSIX-style on every OS, so output matches everywhere."""
+    sub = tmp_path / "HOSPA" / "nested"
+    sub.mkdir(parents=True)
+    bad = msg(PID, ORC, "OBR|1|PL1||71250^CT^local", control_id="")
+    (sub / "bad.hl7").write_bytes(bad.encode())
+    report = lint_directory(tmp_path, registry)
+    assert [key for key, _ in report.by_file] == ["HOSPA/nested/bad.hl7"]
+    assert "\\" not in render_lint_text(report)
+
+
+@pytest.mark.parametrize("terminator", ["\r", "\n", "\r\n"])
+def test_lint_directory_reads_any_segment_terminator(tmp_path, registry, terminator):
+    """Files are read as bytes, so a bare CR (the HL7 standard) survives on
+    every OS, and LF or CRLF files lint the same way."""
+    text = GOOD_ORM.replace("\r", terminator)
+    (tmp_path / "one.hl7").write_bytes(text.encode())
+    report = lint_directory(tmp_path, registry)
+    assert report.files_checked == 1
+    assert report.findings == []

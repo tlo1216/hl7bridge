@@ -120,3 +120,13 @@ def test_expected_counts_present(generated):
         assert rec["matched"] == 6
         assert len(rec["ORDER_WITHOUT_IMAGE"]) == 1
         assert len(rec["IMAGE_WITHOUT_ORDER"]) == 1
+
+
+def test_output_has_no_os_newline_translation(generated):
+    """HL7 files end segments with a bare CR and the JSON files use LF, on
+    every OS. Text-mode writes on Windows would turn LF into CRLF."""
+    out, _ = generated
+    for path in sorted((out / "messages").rglob("*.hl7")):
+        assert b"\n" not in path.read_bytes(), path.name
+    for path in (out / "manifest.json", out / "outbound_reports.jsonl"):
+        assert b"\r\n" not in path.read_bytes(), path.name

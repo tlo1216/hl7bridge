@@ -78,6 +78,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
         asyncio.run(run())
     except KeyboardInterrupt:
         print("listener stopped")
+    except OSError as exc:
+        # Usually the port is taken (another listener, or a previous run).
+        reason = exc.strerror or type(exc).__name__
+        raise SystemExit(
+            f"cannot listen on {args.host}:{args.port}: {reason}. Is another listener"
+            " running? Stop it or pick a free port with --port."
+        ) from exc
     return 0
 
 

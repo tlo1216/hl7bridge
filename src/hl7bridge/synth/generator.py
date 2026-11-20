@@ -767,7 +767,8 @@ def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
         msg_dir = out_dir / "messages" / hosp_id
         msg_dir.mkdir(parents=True, exist_ok=True)
         for n, event in enumerate(sorted(day.events, key=lambda e: (e.at_utc, e.name))):
-            (msg_dir / f"{n:04d}_{event.name}.hl7").write_text(event.text, encoding="utf-8")
+            # Bytes, so the output is identical on every OS (no newline translation).
+            (msg_dir / f"{n:04d}_{event.name}.hl7").write_bytes(event.text.encode("utf-8"))
             aa_total += 1 if event.expect_aa else 0
 
         dicom_dir = out_dir / "dicom" / hosp_id
@@ -785,6 +786,7 @@ def generate(out_dir: Path, registry: HospitalRegistry, seed: int) -> Manifest:
     outbound_path.write_text(
         "".join(json.dumps(line, sort_keys=True) + "\n" for line in outbound_lines),
         encoding="utf-8",
+        newline="\n",
     )
 
     manifest.expected = {

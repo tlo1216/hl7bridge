@@ -1,0 +1,12 @@
+# Normalize text to LF in the repo and in checkouts on every OS.
+* text=auto eol=lf
+
+# HL7 v2 ends segments with a bare CR. Line-ending conversion would
+# rewrite it, so sample messages are stored byte for byte.
+*.hl7 -text
+*.dcm binary
+
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf

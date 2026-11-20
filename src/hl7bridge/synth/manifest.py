@@ -83,7 +83,9 @@ class Manifest:
             "defects": [asdict(d) for d in self.defects],
             "expected": self.expected,
         }
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+        )
 
 
 def load_manifest(path: Path) -> Manifest:
@@ -134,7 +136,7 @@ def _index_output(out_dir: Path, registry: HospitalRegistry) -> _Index:
     idx = _Index()
     for msg_path in sorted((out_dir / "messages").glob("*/*.hl7")):
         hosp_dir = msg_path.parent.name
-        text = msg_path.read_text(encoding="utf-8")
+        text = msg_path.read_bytes().decode("utf-8")
         try:
             m = parse_hl7(text)
         except HL7ParseError:

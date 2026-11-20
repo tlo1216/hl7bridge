@@ -209,10 +209,12 @@ def lint_directory(directory: Path, registry: HospitalRegistry) -> LintReport:
         raise ConfigError(f"no *.hl7 files under {directory}")
     report = LintReport()
     for path in paths:
-        findings = lint_text(path.read_text(encoding="utf-8"), registry)
+        # Bytes, then decode: text mode would rewrite bare CR segment ends.
+        findings = lint_text(path.read_bytes().decode("utf-8"), registry)
         report.files_checked += 1
         if findings:
-            report.by_file.append((str(path.relative_to(directory)), findings))
+            # Forward slashes on every OS so reports and keys match everywhere.
+            report.by_file.append((path.relative_to(directory).as_posix(), findings))
     return report
 
 
