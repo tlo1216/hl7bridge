@@ -51,3 +51,12 @@ def test_serve_on_a_taken_port_fails_with_a_clear_message(tmp_path):
     message = str(excinfo.value)
     assert f"cannot listen on 127.0.0.1:{port}" in message
     assert "--port" in message
+
+
+def test_version_flag(capsys):
+    from hl7bridge import __version__
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--version"])
+    assert excinfo.value.code == 0
+    assert capsys.readouterr().out.strip() == f"hl7bridge {__version__}"

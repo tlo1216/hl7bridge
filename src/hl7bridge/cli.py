@@ -17,6 +17,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import __version__
 from .acks import render_ack_text, track_acks
 from .config import HospitalRegistry
 from .errors import FhirPostError
@@ -153,9 +154,9 @@ def cmd_lint(args: argparse.Namespace) -> int:
 
 def _fhir_headers() -> dict[str, str]:
     """Auth headers from the environment, never from argv (argv leaks into
-    process listings). HL7B_FHIR_APIKEY feeds an 'apikey' header, for
+    process listings). HL7BRIDGE_FHIR_APIKEY feeds an 'apikey' header, for
     servers that expect one."""
-    api_key = os.environ.get("HL7B_FHIR_APIKEY")
+    api_key = os.environ.get("HL7BRIDGE_FHIR_APIKEY")
     return {"apikey": api_key} if api_key else {}
 
 
@@ -185,7 +186,9 @@ def _fhir_probe(args: argparse.Namespace) -> int:
             )
             print(f"  {err}", file=sys.stderr)
             if summary["status_code"] in (401, 403):
-                print("  hint: set HL7B_FHIR_APIKEY if the server expects one", file=sys.stderr)
+                print(
+                    "  hint: set HL7BRIDGE_FHIR_APIKEY if the server expects one", file=sys.stderr
+                )
             return 1
         print(f"  software: {summary.get('software')} {summary.get('software_version')}")
         print(f"  fhirVersion: {summary.get('fhir_version')}")
@@ -223,6 +226,7 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hl7bridge", description=__doc__)
+    parser.add_argument("--version", action="version", version=f"hl7bridge {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add(
@@ -285,7 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
         "fhir-probe",
         cmd_fhir_probe,
         help="read-only server check: capability statement and resource counts"
-        " (set HL7B_FHIR_APIKEY for servers that need an apikey header)",
+        " (set HL7BRIDGE_FHIR_APIKEY for servers that need an apikey header)",
     )
     p.add_argument("--fhir-base", required=True)
 

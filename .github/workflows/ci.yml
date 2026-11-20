@@ -50,10 +50,10 @@ jobs:
           done
           echo "HAPI never became ready" >&2
           exit 1
-      # HL7B_FHIR_REQUIRED=1 turns a missing/unreachable server into a FAILURE,
+      # HL7BRIDGE_FHIR_REQUIRED=1 turns a missing/unreachable server into a FAILURE,
       # so this job can never silently skip the tests it exists to run.
       - name: FHIR system tests
         env:
-          HL7B_FHIR_BASE: http://localhost:8080/fhir
-          HL7B_FHIR_REQUIRED: "1"
+          HL7BRIDGE_FHIR_BASE: http://localhost:8080/fhir
+          HL7BRIDGE_FHIR_REQUIRED: "1"
         run: uv run pytest tests/system/test_fhir_hapi.py -m fhir -q

@@ -153,8 +153,7 @@ wheels = [
 ]
 
 [[package]]
-name = "hl7-imaging-bridge"
-version = "0.1.0"
+name = "hl7bridge"
 source = { editable = "." }
 dependencies = [
     { name = "fhir-resources" },

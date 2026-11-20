@@ -1,7 +1,7 @@
 """FHIR system test against a live HAPI server.
 
-Needs HL7B_FHIR_BASE (e.g. http://localhost:8080/fhir). Without it the tests
-skip locally, but when HL7B_FHIR_REQUIRED=1 (set by the CI job that runs a
+Needs HL7BRIDGE_FHIR_BASE (e.g. http://localhost:8080/fhir). Without it the tests
+skip locally, but when HL7BRIDGE_FHIR_REQUIRED=1 (set by the CI job that runs a
 HAPI service container) a missing server FAILS the build instead of skipping:
 a check that matters must not silently stop running.
 
@@ -21,8 +21,8 @@ from .corpus import build_corpus, ingest_corpus
 
 pytestmark = pytest.mark.fhir
 
-BASE = os.environ.get("HL7B_FHIR_BASE")
-REQUIRED = os.environ.get("HL7B_FHIR_REQUIRED") == "1"
+BASE = os.environ.get("HL7BRIDGE_FHIR_BASE")
+REQUIRED = os.environ.get("HL7BRIDGE_FHIR_REQUIRED") == "1"
 HOSPITALS = ("HOSPA", "HOSPB", "HOSPC")
 
 
@@ -30,8 +30,8 @@ HOSPITALS = ("HOSPA", "HOSPB", "HOSPC")
 def fhir_base() -> str:
     if not BASE:
         if REQUIRED:
-            pytest.fail("HL7B_FHIR_REQUIRED=1 but HL7B_FHIR_BASE is not set")
-        pytest.skip("HL7B_FHIR_BASE not set; start HAPI FHIR and export it to run these tests")
+            pytest.fail("HL7BRIDGE_FHIR_REQUIRED=1 but HL7BRIDGE_FHIR_BASE is not set")
+        pytest.skip("HL7BRIDGE_FHIR_BASE not set; start HAPI FHIR and export it to run these tests")
     return BASE
 
 
@@ -40,7 +40,7 @@ def synced(tmp_path_factory, fhir_base):
     tmp = tmp_path_factory.mktemp("fhir")
     out, registry, manifest = build_corpus(tmp)
     conn, _pipeline, _acks = ingest_corpus(out, registry, tmp / "fhir.db")
-    api_key = os.environ.get("HL7B_FHIR_APIKEY")
+    api_key = os.environ.get("HL7BRIDGE_FHIR_APIKEY")
     client = HapiClient(fhir_base, extra_headers={"apikey": api_key} if api_key else None)
     if not client.metadata_ok():
         if REQUIRED:

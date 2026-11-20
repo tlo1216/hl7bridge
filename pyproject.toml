@@ -1,9 +1,24 @@
 [project]
-name = "hl7-imaging-bridge"
-version = "0.1.0"
-description = "HL7 v2 + DICOM + FHIR tooling: MLLP ingest, order-to-image reconciliation, report ACK tracking, and a v2-to-FHIR bridge. Synthetic data only."
+name = "hl7bridge"
+dynamic = ["version"]
+description = "HL7 v2, DICOM and FHIR integration toolkit: MLLP listener with explicit ACKs, order-to-image reconciliation, report ACK tracking, TAT reporting, message linting and a v2-to-FHIR bridge. Synthetic data only."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Tom O'Sullivan" }]
+keywords = ["hl7", "hl7v2", "fhir", "mllp", "dicom", "radiology", "interoperability"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Healthcare Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Typing :: Typed",
+]
 dependencies = [
     "hl7>=0.4.5",
     "fhir-resources>=8.3.0",
@@ -14,12 +29,21 @@ dependencies = [
     "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
+[project.urls]
+Homepage = "https://github.com/tlo1216/hl7bridge"
+Source = "https://github.com/tlo1216/hl7bridge"
+Issues = "https://github.com/tlo1216/hl7bridge/issues"
+Changelog = "https://github.com/tlo1216/hl7bridge/blob/main/CHANGELOG.md"
+
 [project.scripts]
 hl7bridge = "hl7bridge.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/hl7bridge/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hl7bridge"]
@@ -62,5 +86,5 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
-    "fhir: system tests that need a running HAPI FHIR server (HL7B_FHIR_BASE)",
+    "fhir: system tests that need a running HAPI FHIR server (HL7BRIDGE_FHIR_BASE)",
 ]

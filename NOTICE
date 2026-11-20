@@ -1,0 +1,9 @@
+hl7bridge
+Copyright 2026 Tom O'Sullivan
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+HL7 and FHIR are registered trademarks of Health Level Seven International.
+This project is not affiliated with or endorsed by HL7.
+
+All patient data in this repository is synthetic.
