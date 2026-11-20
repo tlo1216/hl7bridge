@@ -49,19 +49,19 @@ def test_naive_sent_at_rejected_with_line_number(conn, tmp_path):
     path = write_jsonl(
         tmp_path, entry(), entry(control_id="RPT2", sent_at_utc="2026-10-07T12:00:00")
     )
-    with pytest.raises(BridgeError, match=r":2: sent_at_utc .* is naive"):
+    with pytest.raises(BridgeError, match=r":2: sent_at_utc is naive"):
         load_outbound(conn, path)
 
 
 def test_garbage_sent_at_rejected(conn, tmp_path):
     path = write_jsonl(tmp_path, entry(sent_at_utc="yesterday"))
-    with pytest.raises(BridgeError, match="bad sent_at_utc"):
+    with pytest.raises(BridgeError, match="sent_at_utc is not an ISO 8601 timestamp"):
         load_outbound(conn, path)
 
 
 def test_non_string_sent_at_rejected(conn, tmp_path):
     path = write_jsonl(tmp_path, entry(sent_at_utc=1759838400))
-    with pytest.raises(BridgeError, match="bad sent_at_utc"):
+    with pytest.raises(BridgeError, match="sent_at_utc is not an ISO 8601 timestamp"):
         load_outbound(conn, path)
 
 

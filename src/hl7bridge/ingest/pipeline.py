@@ -26,6 +26,7 @@ from __future__ import annotations
 import itertools
 import logging
 import sqlite3
+import traceback
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
@@ -34,6 +35,7 @@ from typing import TYPE_CHECKING
 from ..config import HospitalConfig, HospitalRegistry
 from ..errors import HL7ParseError, MessageValidationError, TimestampError
 from ..hl7time import parse_hl7_ts
+from ..logsafety import short_hash
 from ..store import utc_iso
 from ..store.repo import (
     AckInRow,
@@ -44,6 +46,7 @@ from ..store.repo import (
     insert_ack_in,
     insert_quarantine,
     insert_report_event,
+    message_row_id,
     record_merge,
     record_message,
     upsert_order,
@@ -77,12 +80,29 @@ VALID_ACK_CODES = ("AA", "AE", "AR")
 SUPPORTED_ORDER_CONTROLS = ("NW", "CA")
 
 
+_PARSE_ACK_TEXT = {
+    "not_utf8": "payload is not valid UTF-8",
+    "not_hl7": "payload is not parseable as HL7 v2",
+}
+
+
+def _log_type(hospital: HospitalConfig, msg_type: str) -> str:
+    """MSH-9 is sender-written. Log it only when it is one of the types the
+    hospital profile lists; any other ACK variant is logged as plain ACK."""
+    if msg_type in hospital.expected_message_types or msg_type == "ACK":
+        return msg_type
+    return "ACK" if msg_type.startswith("ACK^") else "(unlisted)"
+
+
 class IngestPipeline:
     """Parses, validates, stores, and ACKs one message at a time.
 
-    PHI discipline (engineering rule 3): log statements in this class carry
-    only control ids, hospital ids, message types, and reason codes. Patient
-    names, MRNs, and report text go to the database, never to the log.
+    PHI discipline: log statements in this class carry only store row ids,
+    a short hash of MSH-10, hospital ids, message types from configuration,
+    byte lengths and reason codes. MSH-10 itself is written by the sender and
+    can hold anything, so it is never logged; the raw value stays in the
+    database and in reports. Patient names, MRNs and report text go to the
+    database, never to the log.
     """
 
     def __init__(
@@ -112,13 +132,13 @@ class IngestPipeline:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             return self._reject_unparseable(
-                raw, f"payload is not valid UTF-8: {exc}", received, now
+                raw, "not_utf8", f"payload is not valid UTF-8: {exc}", received, now
             )
 
         try:
             message = parse_hl7(text)
         except HL7ParseError as exc:
-            return self._reject_unparseable(raw, str(exc), received, now)
+            return self._reject_unparseable(raw, "not_hl7", str(exc), received, now)
 
         control_id = get_control_id(message)
         msg_type = get_message_type(message)
@@ -182,30 +202,26 @@ class IngestPipeline:
         except MessageValidationError as exc:
             # The transaction above rolled back: no partial domain writes.
             decision = AckDecision("AE", exc.reason, exc.detail)
-            self._quarantine(hospital.hospital_id, decision, raw, received)
+            quarantine_id = self._quarantine(hospital.hospital_id, decision, raw, received)
             log.warning(
-                "message rejected hospital=%s control_id=%s type=%s reason=%s",
+                "message rejected hospital=%s quarantine_id=%d ctl_hash=%s type=%s reason=%s",
                 hospital.hospital_id,
-                control_id,
-                msg_type,
+                quarantine_id,
+                short_hash(control_id),
+                _log_type(hospital, msg_type),
                 exc.reason,
             )
             return respond(decision)
 
-        if outcome == "duplicate":
-            log.info(
-                "duplicate message re-acked hospital=%s control_id=%s type=%s",
-                hospital.hospital_id,
-                control_id,
-                msg_type,
-            )
-        else:
-            log.info(
-                "message accepted hospital=%s control_id=%s type=%s",
-                hospital.hospital_id,
-                control_id,
-                msg_type,
-            )
+        row_id = message_row_id(self.conn, hospital_id=hospital.hospital_id, control_id=control_id)
+        log.info(
+            "%s hospital=%s message_id=%d ctl_hash=%s type=%s",
+            "duplicate message re-acked" if outcome == "duplicate" else "message accepted",
+            hospital.hospital_id,
+            row_id,
+            short_hash(control_id),
+            _log_type(hospital, msg_type),
+        )
         return respond(AckDecision("AA", "accepted"))
 
     async def handle_frame(self, payload: bytes) -> bytes:
@@ -214,11 +230,19 @@ class IngestPipeline:
         is loud (stack trace logged, message quarantined, AR returned)."""
         try:
             return self.handle_bytes(payload).encode("utf-8")
-        except Exception:  # server boundary, kept loud; see docstring
-            log.exception("internal error handling frame (%d bytes)", len(payload))
+        except Exception as exc:  # noqa: BLE001  server boundary, logged below
             now = self.clock()
             decision = AckDecision("AR", ackmod.REASON_INTERNAL_ERROR, "unhandled error; see log")
-            self._quarantine(None, decision, payload, utc_iso(now))
+            quarantine_id = self._quarantine(None, decision, payload, utc_iso(now))
+            # Exception type and stack frames only. The exception message can
+            # quote field values, so it is not logged; the frames show code.
+            log.error(
+                "internal error handling frame quarantine_id=%d bytes=%d error=%s\n%s",
+                quarantine_id,
+                len(payload),
+                type(exc).__name__,
+                "".join(traceback.format_tb(exc.__traceback__)).rstrip(),
+            )
             return build_ack(
                 decision=decision,
                 original_control_id="UNKNOWN",
@@ -242,12 +266,23 @@ class IngestPipeline:
     def _next_ack_id(self) -> str:
         return f"BRIDGE{next(self._ack_seq):06d}"
 
-    def _reject_unparseable(self, raw: bytes, detail: str, received: str, now: datetime) -> str:
-        decision = AckDecision("AR", ackmod.REASON_PARSE_ERROR, detail)
-        self._quarantine(None, decision, raw, received)
-        log.warning("unparseable message quarantined: %s", detail)
+    def _reject_unparseable(
+        self, raw: bytes, cause: str, detail: str, received: str, now: datetime
+    ) -> str:
+        """``cause`` is a fixed code for the log and the ACK. ``detail`` is the
+        parser's own text, which can quote the broken segment, so it goes to
+        the quarantine row only."""
+        quarantine_id = self._quarantine(
+            None, AckDecision("AR", ackmod.REASON_PARSE_ERROR, detail), raw, received
+        )
+        log.warning(
+            "unparseable message quarantined quarantine_id=%d cause=%s bytes=%d",
+            quarantine_id,
+            cause,
+            len(raw),
+        )
         return build_ack(
-            decision=decision,
+            decision=AckDecision("AR", ackmod.REASON_PARSE_ERROR, _PARSE_ACK_TEXT[cause]),
             original_control_id="UNKNOWN",
             ack_control_id=self._next_ack_id(),
             sending_app=self.sending_app,
@@ -261,10 +296,10 @@ class IngestPipeline:
 
     def _quarantine(
         self, hospital_id: str | None, decision: AckDecision, raw: bytes, received: str
-    ) -> None:
+    ) -> int:
         assert decision.code in ("AE", "AR")
         with self.conn:
-            insert_quarantine(
+            return insert_quarantine(
                 self.conn,
                 hospital_id=hospital_id,
                 reason=decision.reason,

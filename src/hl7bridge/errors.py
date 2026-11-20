@@ -1,5 +1,11 @@
 """Exception hierarchy. Every failure path raises one of these; nothing is swallowed."""
 
+import json
+import re
+from urllib.parse import urlsplit
+
+_ISSUE_CODE_RE = re.compile(r"[a-z][a-z-]{0,39}")
+
 
 class BridgeError(Exception):
     """Base class for all hl7bridge errors."""
@@ -39,10 +45,48 @@ class FhirMappingError(BridgeError):
 
 
 class FhirPostError(BridgeError):
-    """The FHIR server rejected a request. Carries status and body."""
+    """The FHIR server rejected a request, or its answer was unusable.
 
-    def __init__(self, status_code: int, url: str, body: str) -> None:
+    The message holds only the status code, the URL path with no query and
+    a fixed reason phrase. Conditional-update URLs carry MRNs and accessions
+    in the query, and server bodies often echo the request, so neither is
+    ever part of the message. The full URL and body stay on the object for
+    tests and for callers that know what they are doing; never log them.
+    """
+
+    def __init__(self, status_code: int, url: str, body: str = "", *, reason: str = "") -> None:
         self.status_code = status_code
         self.url = url
         self.body = body
-        super().__init__(f"FHIR server returned {status_code} for {url}: {body[:500]}")
+        self.reason = reason
+        self.path = urlsplit(url).path or url.split("?", 1)[0]
+        if status_code:
+            text = f"FHIR server returned {status_code} for {self.path}"
+        else:
+            text = f"FHIR request to {self.path} failed"
+        codes = self.issue_codes
+        if codes:
+            text += f" (OperationOutcome issue codes: {', '.join(codes)})"
+        if reason:
+            text += f": {reason}"
+        super().__init__(text)
+
+    @property
+    def issue_codes(self) -> list[str]:
+        """OperationOutcome ``issue.code`` values from the body, if any.
+
+        Only values shaped like FHIR codes (lower case letters and hyphens)
+        are returned, so a body cannot smuggle free text through here.
+        """
+        try:
+            payload = json.loads(self.body)
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(payload, dict) or payload.get("resourceType") != "OperationOutcome":
+            return []
+        codes: list[str] = []
+        for issue in payload.get("issue") or []:
+            code = issue.get("code") if isinstance(issue, dict) else None
+            if isinstance(code, str) and _ISSUE_CODE_RE.fullmatch(code) and code not in codes:
+                codes.append(code)
+        return codes

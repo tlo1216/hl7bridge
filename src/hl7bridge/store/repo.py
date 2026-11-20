@@ -114,6 +114,17 @@ def record_message(
     return "new" if row["duplicate_count"] == 0 else "duplicate"
 
 
+def message_row_id(conn: sqlite3.Connection, *, hospital_id: str, control_id: str) -> int:
+    """The store's own id for an accepted message. Logs use this, never MSH-10."""
+    row = conn.execute(
+        "SELECT id FROM messages WHERE hospital_id = ? AND control_id = ?",
+        (hospital_id, control_id),
+    ).fetchone()
+    if row is None:
+        raise LookupError("message row not found after record_message")
+    return int(row["id"])
+
+
 def upsert_patient(conn: sqlite3.Connection, p: PatientRow) -> None:
     conn.execute(
         """
@@ -316,14 +327,17 @@ def insert_quarantine(
     raw: bytes,
     ack_code: Literal["AE", "AR"],
     received_at_utc: str,
-) -> None:
-    conn.execute(
+) -> int:
+    """Insert one quarantine row and return its id."""
+    cur = conn.execute(
         """
         INSERT INTO quarantine (hospital_id, reason, detail, raw, ack_code, received_at_utc)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (hospital_id, reason, detail, raw, ack_code, received_at_utc),
     )
+    assert cur.lastrowid is not None
+    return cur.lastrowid
 
 
 def quarantine_summary(conn: sqlite3.Connection) -> dict[str, int]:

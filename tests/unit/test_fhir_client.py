@@ -127,5 +127,7 @@ def test_capability_summary_transport_error_raises():
     def handler(_request):
         raise httpx.ConnectError("refused")
 
-    with make_client(handler) as client, pytest.raises(FhirPostError, match="refused"):
+    with make_client(handler) as client, pytest.raises(FhirPostError, match="ConnectError") as e:
         client.capability_summary()
+    assert e.value.status_code == 0
+    assert "refused" in e.value.body  # kept on the object, never in the message

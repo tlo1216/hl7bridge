@@ -96,8 +96,17 @@ def sync_to_fhir(
         )
         getattr(report, action)["ImagingStudy"] += 1
 
-    for kind, skipped_key, reason in report.skipped:
-        log.warning("fhir sync skipped %s %s: %s", kind, skipped_key, reason)
+    # Keys (accessions, study UIDs) stay in the rendered report on stdout.
+    # The log carries the kind, the fixed reason phrase and a count only.
+    skipped_counts = Counter((kind, reason) for kind, _, reason in report.skipped)
+    for (kind, reason), n in sorted(skipped_counts.items()):
+        log.warning("fhir sync skipped %d %s row(s): %s", n, kind, reason)
+    log.info(
+        "fhir sync finished created=%d updated=%d skipped=%d",
+        sum(report.created.values()),
+        sum(report.updated.values()),
+        len(report.skipped),
+    )
     return report
 
 

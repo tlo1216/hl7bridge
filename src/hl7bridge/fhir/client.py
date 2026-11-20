@@ -4,6 +4,10 @@ Writes use conditional update (PUT <type>?identifier=system|value), which is
 what makes re-running the bridge idempotent: zero matches creates (201), one
 match updates in place (200), more than one is a server-side 412 that we
 surface as an error instead of papering over.
+
+Those query strings carry MRNs and accessions, so the client installs a
+filter that strips URL queries from httpx and httpcore log records, and
+FhirPostError never puts the query or the server body in its message.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import httpx
 from fhir.resources.R4B.resource import Resource
 
 from ..errors import FhirPostError
+from ..logsafety import install_third_party_redaction
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +37,7 @@ class HapiClient:
     ) -> None:
         """extra_headers carries auth such as a hosted sandbox 'apikey'
         header; values never appear in logs or error messages."""
+        install_third_party_redaction()
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(
             timeout=timeout,
@@ -48,6 +54,16 @@ class HapiClient:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
+    def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """One request. Transport failures (refused, reset, timeout) become a
+        FhirPostError whose message names the failure type and the path only."""
+        try:
+            return self._client.request(method, url, **kwargs)
+        except httpx.TransportError as exc:
+            raise FhirPostError(
+                0, url, str(exc), reason=f"transport error ({type(exc).__name__})"
+            ) from exc
+
     def upsert(self, resource: Resource) -> tuple[str, str]:
         """Conditional update keyed on the resource's first identifier.
 
@@ -56,13 +72,14 @@ class HapiClient:
         identifiers = getattr(resource, "identifier", None)
         if not identifiers:
             raise FhirPostError(
-                0, self.base_url, "resource has no identifier for conditional update"
+                0, self.base_url, reason="resource has no identifier for conditional update"
             )
         ident = identifiers[0]
         resource_type = resource.get_resource_type()
         url = f"{self.base_url}/{resource_type}"
         params = {"identifier": f"{ident.system}|{ident.value}"}
-        response = self._client.put(
+        response = self._send(
+            "PUT",
             url,
             params=params,
             content=resource.model_dump_json(exclude_none=True),
@@ -74,27 +91,30 @@ class HapiClient:
         server_id = body.get("id")
         if not server_id:
             raise FhirPostError(
-                response.status_code, str(response.url), "response carried no resource id"
+                response.status_code, str(response.url), reason="response carried no resource id"
             )
         return server_id, "created" if response.status_code == 201 else "updated"
 
     def search_total(self, resource_type: str, params: dict[str, str] | None = None) -> int:
         """Server-side count. _summary=count means no resources transfer."""
         query: dict[str, str] = {"_summary": "count", **(params or {})}
-        response = self._client.get(f"{self.base_url}/{resource_type}", params=query)
+        response = self._send("GET", f"{self.base_url}/{resource_type}", params=query)
         if response.status_code != 200:
             raise FhirPostError(response.status_code, str(response.url), response.text)
         body = response.json()
         total = body.get("total")
         if not isinstance(total, int):
             raise FhirPostError(
-                response.status_code, str(response.url), f"no integer total in {body!r}"
+                response.status_code,
+                str(response.url),
+                response.text,
+                reason="no integer total in search response",
             )
         return total
 
     def read(self, resource_type: str, params: dict[str, str]) -> dict[str, Any]:
         """Search and return the raw bundle JSON."""
-        response = self._client.get(f"{self.base_url}/{resource_type}", params=params)
+        response = self._send("GET", f"{self.base_url}/{resource_type}", params=params)
         if response.status_code != 200:
             raise FhirPostError(response.status_code, str(response.url), response.text)
         result: dict[str, Any] = response.json()
@@ -105,7 +125,7 @@ class HapiClient:
             response = self._client.get(f"{self.base_url}/metadata")
         except httpx.TransportError as exc:
             # Probe failure is an expected outcome, but never a silent one.
-            log.warning("FHIR /metadata probe failed for %s: %s", self.base_url, exc)
+            log.warning("FHIR /metadata probe failed for %s: %s", self.base_url, type(exc).__name__)
             return False
         return response.status_code == 200
 
@@ -116,7 +136,12 @@ class HapiClient:
         try:
             response = self._client.get(f"{self.base_url}/metadata")
         except httpx.TransportError as exc:
-            raise FhirPostError(0, f"{self.base_url}/metadata", str(exc)) from exc
+            raise FhirPostError(
+                0,
+                f"{self.base_url}/metadata",
+                str(exc),
+                reason=f"transport error ({type(exc).__name__})",
+            ) from exc
         summary: dict[str, Any] = {"status_code": response.status_code}
         if response.status_code == 200:
             body = response.json()

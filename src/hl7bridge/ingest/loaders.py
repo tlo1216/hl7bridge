@@ -109,10 +109,13 @@ def load_outbound(conn: sqlite3.Connection, path: Path) -> int:
             try:
                 sent_at = datetime.fromisoformat(raw_sent)
             except (TypeError, ValueError) as exc:
-                raise BridgeError(f"{path}:{lineno}: bad sent_at_utc {raw_sent!r}: {exc}") from exc
+                # The value itself is not echoed: error text never quotes input fields.
+                raise BridgeError(
+                    f"{path}:{lineno}: sent_at_utc is not an ISO 8601 timestamp"
+                ) from exc
             if sent_at.tzinfo is None or sent_at.utcoffset() is None:
                 raise BridgeError(
-                    f"{path}:{lineno}: sent_at_utc {raw_sent!r} is naive; must carry a UTC offset"
+                    f"{path}:{lineno}: sent_at_utc is naive; it must carry a UTC offset"
                 )
             record_outbound_report(
                 conn,
