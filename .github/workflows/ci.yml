@@ -3,14 +3,25 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Actions are pinned by commit SHA; the comment names the release.
 jobs:
   checks:
-    name: lint + types + tests
+    name: format, lint, types, references
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
       - name: Sync dependencies (locked)
@@ -19,10 +30,66 @@ jobs:
         run: uv run ruff format --check .
       - name: Ruff lint
         run: uv run ruff check .
-      - name: Mypy (strict on src)
+      - name: Mypy (strict on src and tools)
         run: uv run mypy
+      - name: Reference check
+        run: uv run python tools/check_references.py
+
+  tests:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS minutes cost ten times as much on a private repo, so macOS
+        # runs on main and on manual runs only. Make this unconditional once
+        # the repository is public.
+        os: ${{ fromJSON((github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest", "windows-latest", "macos-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - name: Sync dependencies (locked)
+        run: uv sync --locked
       - name: Unit and system tests (no FHIR server)
         run: uv run pytest -m "not fhir" -q
+
+  pip-path:
+    name: pip install from wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build the wheel, install it in a clean venv, run a smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist
+          python -m venv "$RUNNER_TEMP/venv"
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="$RUNNER_TEMP/venv/Scripts"; else BIN="$RUNNER_TEMP/venv/bin"; fi
+          "$BIN/python" -m pip install dist/*.whl
+          "$BIN/hl7bridge" --version
+          out="$RUNNER_TEMP/smoke"
+          "$BIN/hl7bridge" synth --out "$out/synth" --config config/hospitals
+          # The corpus holds seeded defects, so lint exits 1 by design.
+          status=0
+          "$BIN/hl7bridge" lint --dir "$out/synth/messages" --config config/hospitals > "$out/lint.txt" || status=$?
+          test "$status" -eq 1
+          grep -q "linted 139 files" "$out/lint.txt"
 
   fhir-system:
     name: FHIR system tests against HAPI
@@ -33,8 +100,10 @@ jobs:
         ports:
           - 8080:8080
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
       - name: Sync dependencies (locked)
