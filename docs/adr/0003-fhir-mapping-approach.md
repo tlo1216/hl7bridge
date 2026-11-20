@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-Project 1 posts Patient, ServiceRequest, DiagnosticReport, and ImagingStudy
+The FHIR bridge posts Patient, ServiceRequest, DiagnosticReport, and ImagingStudy
 to a HAPI FHIR server (`hapiproject/hapi`, default FHIR version R4; CI pins
 image `v8.12.0-2`). `fhir.resources` 8.x dropped the plain-R4 package and
 ships R4B; for these four resource types R4B is structurally identical to
@@ -47,5 +47,5 @@ real deployment:
   Observation resources (`presentedForm` would be the next step).
 - No Provenance, Encounter, or practitioner resources.
 - Patients merged away (A40) are simply not posted; nothing resolves merge
-  chains onto resources yet (that is project 8's scope). Rows whose subject
+  chains onto resources yet (planned with the A40 merge work). Rows whose subject
   cannot be resolved are skipped loudly and reported, never dropped.

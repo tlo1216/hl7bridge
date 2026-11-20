@@ -69,7 +69,7 @@ def chunked(data: bytes) -> list[bytes]:
 
 
 def test_size_guard_never_dumps_complete_frames():
-    """Regression (review finding C10): two valid frames whose combined size
+    """Regression: two valid frames whose combined size
     exceeds MAX_FRAME_BYTES, arriving in 64KB chunks, must both be recovered.
     Before the fix the whole buffer was dumped as junk."""
     big = encode_mllp(b"A" * 998_997)

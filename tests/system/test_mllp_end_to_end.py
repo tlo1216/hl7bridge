@@ -1,5 +1,5 @@
 """End-to-end: generated corpus over real MLLP sockets, asserted against
-the ground-truth manifest. This is the system test engineering rule 6 asks for."""
+the ground-truth manifest, so detection claims are checked, not re-derived."""
 
 import asyncio
 from datetime import datetime

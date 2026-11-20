@@ -1,6 +1,6 @@
 """Order-to-image reconciliation.
 
-Matching normalizes whitespace and case ONLY (spec rule: anything fuzzier is
+Matching normalizes whitespace and case ONLY (design rule: anything fuzzier is
 flagged for human review, never auto-matched). Thresholds and the grace
 period for late-arriving orders come from per-hospital config.
 

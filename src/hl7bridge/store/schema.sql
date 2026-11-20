@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS reports (
     PRIMARY KEY (hospital_id, accession)
 );
 
--- Every accepted ORU, one row per message (project 4 input). Unlike the
+-- Every accepted ORU, one row per message (turnaround-time input). Unlike the
 -- reports table, nothing here is ever overwritten: turnaround times need
 -- the P and the F event, not just the latest status.
 CREATE TABLE IF NOT EXISTS report_events (
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS report_events (
     received_at_utc TEXT NOT NULL
 );
 
--- Reports we (the radiology group) sent to hospital EHRs (project 3 input).
+-- Reports this hub sent to hospital EHRs (ACK tracking input).
 CREATE TABLE IF NOT EXISTS outbound_reports (
     hospital_id TEXT NOT NULL,
     control_id  TEXT NOT NULL,

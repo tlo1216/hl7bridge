@@ -1,6 +1,6 @@
 """HL7 DTM timestamp parsing and formatting.
 
-Policy (engineering rule 4):
+Policy (UTC inside, aware timestamps only):
 - Every parsed timestamp is timezone-aware. If the value carries an explicit
   ``+HHMM`` / ``-HHMM`` offset, that offset wins. Otherwise the hospital's
   configured timezone is attached (this is per-hospital config, never a guess).

@@ -1,7 +1,7 @@
 """TAT engine: hand-computed statistics, DST arithmetic, missing-data accounting.
 
 Every expected number in this file was computed by hand from the fixture
-timestamps, per the acceptance criterion in the project spec.
+timestamps, so the engine is checked against numbers it did not produce.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -210,7 +210,7 @@ def test_render_contains_summary_sentence(conn, registry):
     assert "1 target breach(es)" in text
 
 
-# -- regressions from review findings T2, T3, T4 -----------------------------
+# -- regressions: NULL-final ordering, month attribution, target parity -------
 
 
 def test_null_result_final_does_not_displace_dated_final(conn, registry):

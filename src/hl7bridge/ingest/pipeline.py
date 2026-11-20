@@ -1,6 +1,6 @@
 """Ingest pipeline: bytes in, explicit ACK decision out.
 
-ACK decision table (engineering rule 2; tested row by row):
+ACK decision table (one explicit ACK per message; tested row by row):
 
 | Condition                                        | ACK | Destination              |
 |--------------------------------------------------|-----|--------------------------|
@@ -18,7 +18,7 @@ ACK decision table (engineering rule 2; tested row by row):
 MLLP junk bytes get no ACK (nothing addressable) but are quarantined as
 mllp_junk. ACK messages from hospitals are accepted for any configured
 hospital regardless of expected_message_types: they are transport plumbing
-for project 3, not clinical traffic.
+for ACK tracking, not clinical traffic.
 """
 
 from __future__ import annotations

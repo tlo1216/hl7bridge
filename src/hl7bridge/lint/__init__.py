@@ -1,4 +1,4 @@
-"""Project 5: per-hospital message linting."""
+"""Per-hospital message linting."""
 
 from .rules import KNOWN_RULES, LintFinding
 from .runner import LintReport, lint_directory, lint_text, render_lint_text

@@ -4,7 +4,7 @@ Frame format: <VT=0x0B> payload <FS=0x1C> <CR=0x0D>.
 
 Junk bytes between frames are never silently dropped: the codec yields them
 as explicit ``JunkBytes`` items so the pipeline can quarantine and count them
-(engineering rule 1: a degraded path must never look healthy).
+(fail loudly: a degraded path must never look healthy).
 """
 
 from __future__ import annotations

@@ -273,7 +273,7 @@ def test_internal_error_boundary_is_loud_ar(pipeline, caplog):
     assert quarantine_summary(pipeline.conn) == {"internal_error": 1}
 
 
-# -- branch coverage added after review finding C2 ---------------------------
+# -- remaining branches of the decision table ---------------------------------
 
 
 def test_missing_mrn_is_ae(pipeline):

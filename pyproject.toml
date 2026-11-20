@@ -38,8 +38,8 @@ target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-# Curated, high-precision set. DTZ enforces timezone-aware datetimes (engineering
-# rule 4), BLE bans blind excepts (rule 1). On a false positive: narrow with a
+# Curated, high-precision set. DTZ enforces timezone-aware datetimes, BLE
+# bans blind excepts (fail loudly). On a false positive: narrow with a
 # justified per-line noqa, never drop the rule.
 select = ["E", "F", "W", "I", "UP", "B", "BLE", "C4", "DTZ", "SIM", "RUF"]
 
@@ -52,7 +52,7 @@ select = ["E", "F", "W", "I", "UP", "B", "BLE", "C4", "DTZ", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src"]
+files = ["src", "tools"]
 
 [[tool.mypy.overrides]]
 module = "hl7.*"

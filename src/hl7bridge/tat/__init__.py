@@ -1,4 +1,4 @@
-"""Project 4: turnaround-time reporting from HL7 timestamps."""
+"""Turnaround-time reporting from HL7 timestamps."""
 
 from .engine import GroupStats, HospitalTat, tat_report
 from .report import render_tat_text

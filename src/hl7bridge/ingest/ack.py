@@ -1,5 +1,5 @@
 """ACK construction. Every inbound message gets an explicit AA / AE / AR
-decision (engineering rule 2); this module renders that decision as an
+decision; this module renders that decision as an
 HL7 ACK message.
 """
 

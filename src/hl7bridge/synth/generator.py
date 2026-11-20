@@ -1,4 +1,4 @@
-"""Project 9: deterministic synthetic day of HL7 + DICOM traffic.
+"""Deterministic synthetic day of HL7 + DICOM traffic.
 
 Same seed, same bytes. Every deliberate defect is labeled in the manifest,
 and the generator computes the expected downstream outcomes (quarantine

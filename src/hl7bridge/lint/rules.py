@@ -1,6 +1,6 @@
 """Lint rule catalog.
 
-Rule discipline (engineering rule 7): small, high-precision set. Every rule
+Rule discipline: a small, high-precision set. Every rule
 has a test proving it fires on a bad message and stays silent on a good
 one, and the whole generated corpus is a precision fixture: the only
 findings allowed are the seeded defects, asserted as an exact set.

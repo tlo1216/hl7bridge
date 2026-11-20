@@ -13,7 +13,7 @@ from typing import Literal
 
 # Report status rank: a corrected report supersedes a final, which supersedes
 # a preliminary. A lower-rank arrival after a higher rank is recorded as a
-# regression and does not overwrite (spec: corrected reports update, never
+# regression and does not overwrite (corrected reports update, never
 # duplicate; stale preliminaries never clobber finals).
 _REPORT_RANK = {"P": 0, "F": 1, "C": 2}
 

@@ -1,4 +1,4 @@
-"""Project 1: HL7 v2 to FHIR R4 bridge (ADR-0003)."""
+"""HL7 v2 to FHIR R4 bridge (ADR-0003)."""
 
 from .client import HapiClient
 from .mapper import (

@@ -1,4 +1,4 @@
-"""Per-hospital configuration (engineering rule 5: field locations live here, not in code).
+"""Per-hospital configuration (field locations live here, not in code).
 
 Validation is strict and loud: unknown keys, bad timezones, bad field references,
 and duplicate facility codes all fail at load time with the offending file named.
@@ -55,7 +55,7 @@ _LINT_RULE_ID_SHAPE = ("HL7-", 7)
 
 @dataclass(frozen=True, slots=True)
 class ReconcileConfig:
-    """Thresholds for order-to-image reconciliation (project 2)."""
+    """Thresholds for order-to-image reconciliation."""
 
     order_without_image_hours: float = 4.0
     order_without_image_hours_by_modality: dict[str, float] = field(default_factory=dict)
@@ -71,7 +71,7 @@ class ReconcileConfig:
 
 @dataclass(frozen=True, slots=True)
 class TatConfig:
-    """Turnaround-time targets (project 4). The breach comparison is strict:
+    """Turnaround-time targets. The breach comparison is strict:
     a report exactly on target is not a breach."""
 
     exam_to_final_target_hours: float = 2.0
@@ -85,7 +85,7 @@ class TatConfig:
 
 @dataclass(frozen=True, slots=True)
 class LintConfig:
-    """Per-hospital lint profile (project 5)."""
+    """Per-hospital lint profile."""
 
     disabled_rules: tuple[str, ...] = ()
 

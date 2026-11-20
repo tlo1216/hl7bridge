@@ -164,19 +164,15 @@ src/hl7bridge/
   config.py  hl7time.py  errors.py  cli.py
   ingest/    # mllp, parser, ack, pipeline, loaders
   store/     # schema.sql, db, repo
-  synth/     # project 9: generator, manifest, dicomgen, patients
-  reconcile/ # project 2
-  acks/      # project 3
-  tat/       # project 4: turnaround-time engine and report
-  lint/      # project 5: rule catalog and runner
-  fhir/      # project 1: mapper, client, sync
+  synth/     # generator, manifest, dicomgen, patients
+  reconcile/ # order-to-image reconciliation
+  acks/      # report delivery and ACK tracking
+  tat/       # turnaround-time engine and report
+  lint/      # rule catalog and runner
+  fhir/      # mapper, client, sync
 tests/unit/  tests/system/
 ```
 
-## Roadmap (specs in the project brief)
+## Roadmap
 
-Built here: projects 9 (generator), 2 (reconciliation), 3 (ACK tracking),
-1 (v2-to-FHIR), 4 (turnaround-time reporting), and 5 (per-hospital message
-linting), plus the shared ingest foundation. Specified next: 6 (procedure
-code normalization), 7 (report text NLP), 8 (patient merge watcher; merge
-recording and the duplicate-pair seed already exist).
+See `CHANGELOG.md` and the open issues.

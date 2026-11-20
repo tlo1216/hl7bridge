@@ -1,4 +1,4 @@
-"""Project 2: order-to-image reconciliation."""
+"""Order-to-image reconciliation."""
 
 from .engine import Finding, HospitalReconcileReport, reconcile
 from .report import render_reconcile_text

@@ -16,7 +16,7 @@ def utc_iso(dt: datetime) -> str:
     """Render an aware datetime as an ISO 8601 UTC string for storage.
 
     Naive datetimes are rejected: comparing naive and aware timestamps is the
-    bug class engineering rule 4 exists to prevent.
+    bug class the aware-timestamps-only rule exists to prevent.
     """
     if dt.tzinfo is None or dt.utcoffset() is None:
         raise ValueError("refusing to store a naive datetime")

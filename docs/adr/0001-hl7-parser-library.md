@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-The spec allows either `hl7apy` or `python-hl7`. We need: tolerant parsing of
+Two libraries were candidates: `hl7apy` and `python-hl7`. We need: tolerant parsing of
 per-hospital dialects (accession in OBR-3 vs ORC-3, Z-segments), positional
 field addressing driven by config strings like `"OBR-3"`, correct escape
 handling, and loud failures on garbage. We run our own asyncio MLLP server
