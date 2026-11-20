@@ -1,0 +1,72 @@
+# The full demo with HAPI FHIR, in containers. Synthetic data only.
+#
+#   docker compose -f compose.demo.yaml up --build --exit-code-from demo
+#
+# Services:
+#   hapi    HAPI FHIR, reachable only on the compose network (no host port).
+#   bridge  the MLLP listener, published on 127.0.0.1:2575 so you can try
+#           `hl7bridge send` against it from this machine.
+#   demo    waits for both, runs `hl7bridge demo` against hapi, prints the
+#           reports and exits 0 when every count matches the manifest.
+#
+# Why every published port is bound to 127.0.0.1: MLLP has no encryption or
+# authentication, and this HAPI server accepts writes from anyone who can
+# reach it. A bare "2575:2575" would publish on every network interface,
+# so anyone on your network could send to the listener or write into HAPI.
+# tests/unit/test_network_exposure.py fails the build on any port in this
+# repository that is not bound to 127.0.0.1.
+#
+# To browse HAPI at http://127.0.0.1:8080/fhir, add the override:
+#   docker compose -f compose.demo.yaml -f compose.hapi-port.yaml up --build
+#
+# Demo data lives in named volumes that compose owns, never in a host
+# folder. `docker compose -f compose.demo.yaml down -v` removes them.
+
+name: hl7bridge-demo
+
+services:
+  hapi:
+    # hapiproject/hapi:v8.12.0-2, pinned by digest.
+    image: hapiproject/hapi:v8.12.0-2@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e
+    # No ports: only the other services on this network can reach it. The
+    # image has no shell or curl for a health check; the demo service
+    # polls /metadata itself (--fhir-wait).
+
+  bridge:
+    build: .
+    image: hl7bridge:local
+    command: ["listen", "--host", "0.0.0.0", "--port", "2575"]
+    ports:
+      - "127.0.0.1:2575:2575"
+    volumes:
+      - bridge-data:/data
+
+  demo:
+    # Same image as bridge. The build entry keeps compose from trying to
+    # pull hl7bridge:local from a registry; the second build is cached.
+    build: .
+    image: hl7bridge:local
+    depends_on:
+      bridge:
+        condition: service_healthy
+      hapi:
+        condition: service_started
+    command:
+      - "demo"
+      - "--fhir-base"
+      - "http://hapi:8080/fhir"
+      - "--fhir-wait"
+      - "300"
+      - "--data-dir"
+      - "/demo/run"
+    volumes:
+      - demo-data:/demo
+    # The image's health check probes the listener port; this service runs
+    # the demo, not a listener. The demo's own listener binds 127.0.0.1
+    # inside this container only.
+    healthcheck:
+      disable: true
+
+volumes:
+  bridge-data:
+  demo-data:

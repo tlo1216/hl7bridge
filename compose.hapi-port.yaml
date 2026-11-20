@@ -1,0 +1,12 @@
+# Optional override for compose.demo.yaml: publish HAPI FHIR on this
+# machine only, so you can browse http://127.0.0.1:8080/fhir.
+#
+#   docker compose -f compose.demo.yaml -f compose.hapi-port.yaml up --build
+#
+# Bound to 127.0.0.1 on purpose: this HAPI server takes writes from anyone
+# who can reach it.
+
+services:
+  hapi:
+    ports:
+      - "127.0.0.1:8080:8080"
