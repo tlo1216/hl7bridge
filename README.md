@@ -209,7 +209,9 @@ one is written when the server has none. A contradicting or reversed merge is
 refused. Orders, reports and encounters are not moved onto the survivor, and
 later messages can still write onto a merged-away Patient. The Bundle that
 `--out` writes makes the merged-away Patient a conditional create, so posting
-the file as is never replaces a Patient. A corrected report that drops a result sets that
+the file as is never replaces it with a bare body. That file does not apply
+the merge: the survivor entry is still a conditional update, and an existing
+merged-away Patient is left untouched. Use `--post` to apply a merge. A corrected report that drops a result sets that
 Observation to `entered-in-error`. Narrative report lines (OBX-2 TX or FT)
 are the report's text, not Observations.
 `--out DIR` writes one Bundle per message (never over an existing file),

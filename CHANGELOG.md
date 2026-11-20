@@ -14,7 +14,10 @@ profile format may still change between minor versions.
   set inactive with a `replaced-by` link to the survivor, keeping what the
   server already holds for it (its other links stay), or written bare when
   the server has none. The offline Bundle makes the merged-away Patient a
-  conditional create, so a file posted as is never replaces a Patient.
+  conditional create, so a file posted as is never replaces it with a bare
+  body. The offline file does not apply the merge (the survivor entry is
+  still a conditional update and an existing merged-away Patient is left
+  untouched); use `--post` to apply one.
   Refused: a message with more than one PID or MRG, an MRG-1 that is empty,
   repeated, typed with anything but MR, the same as PID-3 or from another
   assigning authority than PID-3, an A40 whose merged-away Patient is
