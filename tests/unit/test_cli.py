@@ -15,6 +15,8 @@ import socket
 import sqlite3
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -72,6 +74,12 @@ def sample_db(tmp_path) -> Path:
         pipeline.handle_bytes(path.read_bytes())
     conn.close()
     return db
+
+
+def _empty_db(path: Path) -> Path:
+    """An empty hl7bridge store: report commands never create one."""
+    connect(path).close()
+    return path
 
 
 def _patch_client(monkeypatch, handler) -> None:
@@ -215,6 +223,7 @@ def test_db_default_env_and_flag(monkeypatch):
 
 def test_commands_say_which_profiles_and_database_they_used(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    _empty_db(tmp_path / "hl7bridge.db")
     rc = cli.main(["reconcile", "--now", REPORT_NOW])
     err = capsys.readouterr().err
     assert rc == EXIT_OK
@@ -225,6 +234,7 @@ def test_commands_say_which_profiles_and_database_they_used(tmp_path, capsys, mo
 
 def test_quiet_drops_the_using_lines(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    _empty_db(tmp_path / "hl7bridge.db")
     assert cli.main(["-q", "summary"]) == EXIT_OK
     assert "using" not in capsys.readouterr().err
 
@@ -236,21 +246,89 @@ def test_fhir_headers_come_from_the_environment(monkeypatch):
     assert cli._fhir_headers() == {"apikey": "k-123", "Authorization": "Bearer t-456"}
 
 
-def test_bearer_token_is_sent_and_never_printed(monkeypatch, capsys):
+TOKEN = "t0ken-CANARY-7731"  # guardrails: allow (test canary, not a secret)
+API_KEY = "k3y-CANARY-4420"  # guardrails: allow (test canary, not a secret)
+
+
+@contextmanager
+def _token_echoing_server(status: int) -> Iterator[tuple[str, list[str]]]:
+    """A real HTTP server on 127.0.0.1 (httpx goes through httpcore, unlike
+    MockTransport) that puts the Authorization and apikey values it gets in
+    every place a server can: the reason phrase, a Location query, a header
+    and an OperationOutcome body. Yields the base URL and the headers seen."""
     seen: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request.headers.get("Authorization", ""))
-        return httpx.Response(401, text="no")
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
 
-    monkeypatch.setenv("HL7BRIDGE_FHIR_TOKEN", "t0ken-SECRET")
-    _patch_client(monkeypatch, handler)
-    rc = cli.main(["fhir", "probe", "--fhir-base", "http://fhir.test/fhir"])
+        def do_GET(self) -> None:
+            auth = self.headers.get("Authorization", "")
+            key = self.headers.get("apikey", "")
+            seen.append(auth)
+            echo = f"{auth} {key}"
+            body = json.dumps(
+                {
+                    "resourceType": "OperationOutcome",
+                    "issue": [{"code": echo, "diagnostics": echo}],
+                }
+            ).encode()
+            self.send_response(status, f"Denied {echo}")
+            self.send_header("Location", f"/fhir/metadata?seen={auth.replace(' ', '+')}")
+            self.send_header("X-Echo", echo)
+            self.send_header("Content-Type", "application/fhir+json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/fhir", seen
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["fhir", "probe"], ["doctor", "--json"], ["fhir", "sync"]],
+    ids=["probe", "doctor", "sync"],
+)
+def test_bearer_token_is_sent_and_never_printed_or_logged(tmp_path, capsys, monkeypatch, argv):
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("HL7BRIDGE_FHIR_TOKEN", TOKEN)
+    monkeypatch.setenv("HL7BRIDGE_FHIR_APIKEY", API_KEY)
+    monkeypatch.chdir(tmp_path)
+    extra = ["--db", str(_empty_db(tmp_path / "s.db"))] if argv[-1] == "sync" else []
+    real_configure = cli.configure_logging
+
+    def configure_and_open_http_logs(level: int) -> None:
+        # The CLI holds httpx and httpcore at WARNING. Open them to DEBUG, as
+        # an integrator might, so their records reach the CLI's handler and
+        # only the redaction stands between the server's echo and stderr.
+        real_configure(level)
+        for name in ("httpx", "httpcore"):
+            logging.getLogger(name).setLevel(logging.DEBUG)
+
+    monkeypatch.setattr(cli, "configure_logging", configure_and_open_http_logs)
+    with _token_echoing_server(401) as (base, seen):
+        rc = cli.main(["-vv", *argv, *extra, "--fhir-base", base])
     captured = capsys.readouterr()
+    everything = captured.out + captured.err
     assert rc == EXIT_FINDINGS
-    assert seen == ["Bearer t0ken-SECRET"]
-    assert "t0ken-SECRET" not in captured.out + captured.err
-    assert "HL7BRIDGE_FHIR_TOKEN" in captured.err, "the 401 hint names the variable"
+    assert seen and set(seen) == {f"Bearer {TOKEN}"}, "the token was sent"
+    assert "HTTP Request: GET" in captured.err, "the HTTP client logged the request"
+    assert "receive_response_headers.complete" in captured.err, "httpcore logged too"
+    assert TOKEN not in everything
+    assert API_KEY not in everything
+    assert "CANARY" not in everything
 
 
 def test_fhir_base_comes_from_the_environment(monkeypatch, capsys):
@@ -271,7 +349,8 @@ def test_fhir_base_comes_from_the_environment(monkeypatch, capsys):
 
 def test_fhir_server_down_message(tmp_path, capsys, monkeypatch):
     _patch_client(monkeypatch, _refused)
-    rc = cli.main(["fhir", "sync", "--db", str(tmp_path / "f.db")])
+    db = _empty_db(tmp_path / "f.db")
+    rc = cli.main(["fhir", "sync", "--db", str(db), "--fhir-base", "http://localhost:8080/fhir"])
     err = capsys.readouterr().err
     assert rc == EXIT_CONNECTION
     assert (
@@ -283,7 +362,8 @@ def test_fhir_server_down_message(tmp_path, capsys, monkeypatch):
 
 def test_fhir_server_not_ready_message(tmp_path, capsys, monkeypatch):
     _patch_client(monkeypatch, lambda request: httpx.Response(503, text="booting"))
-    rc = cli.main(["fhir", "sync", "--db", str(tmp_path / "f.db")])
+    db = _empty_db(tmp_path / "f.db")
+    rc = cli.main(["fhir", "sync", "--db", str(db), "--fhir-base", "http://localhost:8080/fhir"])
     err = capsys.readouterr().err
     assert rc == EXIT_FINDINGS
     assert "error: FHIR server returned 503 for /fhir/metadata: the server is not ready" in err
@@ -370,7 +450,9 @@ def test_not_a_database_message(tmp_path, capsys):
 
 def test_missing_db_folder_message(tmp_path, capsys):
     db = tmp_path / "nofolder" / "x.db"
-    rc = cli.main(["summary", "--db", str(db)])
+    log = tmp_path / "out.jsonl"
+    log.write_text("", encoding="utf-8")
+    rc = cli.main(["load", "outbound", "--db", str(db), "--path", str(log)])
     assert rc == EXIT_USAGE
     assert f"folder {db.parent} does not exist" in capsys.readouterr().err
 
@@ -393,7 +475,7 @@ def test_keyboard_interrupt_exits_130(monkeypatch, capsys, tmp_path):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(cli, "message_counts", interrupted)
-    assert cli.main(["summary", "--db", str(tmp_path / "k.db")]) == 130
+    assert cli.main(["summary", "--db", str(_empty_db(tmp_path / "k.db"))]) == 130
     assert "interrupted" in capsys.readouterr().err
 
 
@@ -412,7 +494,11 @@ def _taken_port() -> tuple[socket.socket, int]:
 def test_listen_on_a_taken_port_fails_with_a_clear_message(tmp_path, capsys):
     holder, port = _taken_port()
     try:
-        rc = cli.main(["listen", "--db", str(tmp_path / "b.db"), "--port", str(port)])
+        # --host given explicitly: the default is tested on its own below, so a
+        # wrong default fails that test instead of hanging this one.
+        rc = cli.main(
+            ["listen", "--db", str(tmp_path / "b.db"), "--host", "127.0.0.1", "--port", str(port)]
+        )
     finally:
         holder.close()
     captured = capsys.readouterr()
@@ -905,3 +991,422 @@ def test_doctor_prints_the_fhir_problem_once(tmp_path, capsys, monkeypatch):
     assert "FHIR /metadata probe failed" not in captured.err
     assert captured.out.count("no answer from") == 1
     assert logging.getLogger("hl7bridge.fhir.client").level == logging.NOTSET
+
+
+# -- the store: report commands never create a database --------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["summary"],
+        ["reconcile", "--now", REPORT_NOW],
+        ["ack-report", "--now", REPORT_NOW],
+        ["tat", "--month", "2026-10"],
+        ["fhir", "sync", "--fhir-base", "http://fhir.test/fhir"],
+    ],
+    ids=["summary", "reconcile", "ack-report", "tat", "fhir-sync"],
+)
+@pytest.mark.parametrize("named", [False, True], ids=["default", "flag"])
+def test_report_commands_refuse_a_missing_database(tmp_path, capsys, monkeypatch, argv, named):
+    monkeypatch.chdir(tmp_path)
+    _patch_client(monkeypatch, lambda r: pytest.fail("no request without a database"))
+    db = tmp_path / "missing.db" if named else Path("hl7bridge.db")
+    rc = cli.main([*argv, *(["--db", str(db)] if named else [])])
+    err = capsys.readouterr().err
+    assert rc == EXIT_USAGE
+    assert f"error: no database at {db}. Run hl7bridge listen or hl7bridge load first" in err
+    assert list(tmp_path.iterdir()) == [], "nothing was created"
+
+
+def test_a_database_of_another_program_is_refused_and_left_alone(tmp_path, capsys):
+    db = tmp_path / "other-app.sqlite"
+    other = sqlite3.connect(db)
+    other.execute("CREATE TABLE notes (body TEXT)")
+    other.commit()
+    other.close()
+    (tmp_path / "dicom").mkdir()
+    for argv in (
+        ["summary", "--db", str(db)],
+        ["load", "studies", "--db", str(db), "--dicom", str(tmp_path / "dicom")],
+    ):
+        assert cli.main(argv) == EXIT_USAGE
+        assert f"error: {db} is a SQLite database that hl7bridge did not create." in (
+            capsys.readouterr().err
+        )
+    conn = sqlite3.connect(db)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert tables == {"notes"}
+
+
+# -- FHIR: which server, and what is printed about it ------------------------------------
+
+
+def test_fhir_sync_needs_a_named_server(tmp_path, capsys, monkeypatch):
+    _patch_client(monkeypatch, lambda r: pytest.fail("sync must not pick a server itself"))
+    db = _empty_db(tmp_path / "s.db")
+    assert cli.main(["fhir", "sync", "--db", str(db)]) == EXIT_USAGE
+    assert (
+        "error: fhir sync writes to a FHIR server, so it needs one named."
+        " Pass --fhir-base URL or set HL7BRIDGE_FHIR_BASE."
+    ) in capsys.readouterr().err
+
+
+def test_fhir_sync_takes_the_server_from_the_environment(tmp_path, capsys, monkeypatch):
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json={})
+
+    _patch_client(monkeypatch, handler)
+    monkeypatch.setenv("HL7BRIDGE_FHIR_BASE", "http://env.test/fhir")
+    assert cli.main(["fhir", "sync", "--db", str(_empty_db(tmp_path / "s.db"))]) == EXIT_OK
+    assert urls == ["http://env.test/fhir/metadata"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "alice:s3cret-PW@127.0.0.1:9/fhir",
+        "http:/alice:s3cret-PW@127.0.0.1/fhir",
+        "https:alice:s3cret-PW@host/fhir",
+        "ftp://alice:s3cret-PW@host/fhir",
+        "http://alice:s3cret-PW@host:notaport/fhir",
+        "http://host/fhir?token=s3cret-PW",
+        "http:///alice:s3cret-PW@/fhir",
+    ],
+)
+@pytest.mark.parametrize(
+    "argv",
+    [["fhir", "probe"], ["doctor"], ["doctor", "--json"], ["fhir", "sync"], ["demo"]],
+    ids=["probe", "doctor", "doctor-json", "sync", "demo"],
+)
+@pytest.mark.parametrize("source", ["flag", "env"])
+def test_a_bad_fhir_base_is_refused_without_echoing_it(
+    tmp_path, capsys, monkeypatch, value, argv, source
+):
+    _patch_client(monkeypatch, lambda r: pytest.fail("no request for a bad URL"))
+    db = _empty_db(tmp_path / "s.db")
+    extra = ["--db", str(db)] if argv[-1] == "sync" else []
+    if argv == ["demo"]:
+        extra = ["--data-dir", str(tmp_path / "d")]
+    if source == "env":
+        if argv == ["demo"]:
+            pytest.skip("the demo never reads the environment variable")
+        monkeypatch.setenv("HL7BRIDGE_FHIR_BASE", value)
+        rc = cli.main([*argv, *extra])
+        named = "HL7BRIDGE_FHIR_BASE"
+    else:
+        rc = cli.main([*argv, *extra, "--fhir-base", value])
+        named = "--fhir-base"
+    captured = capsys.readouterr()
+    assert rc == EXIT_USAGE
+    assert f"error: {named} is not an http(s) URL with a host (value not shown)." in captured.err
+    assert "s3cret-PW" not in captured.out + captured.err
+    assert "alice" not in captured.out + captured.err
+    assert not (tmp_path / "d").exists(), "the demo stopped before writing anything"
+
+
+def test_the_bearer_token_goes_only_to_a_named_server(tmp_path, capsys, monkeypatch):
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("Authorization", "")))
+        return httpx.Response(200, json={})
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HL7BRIDGE_FHIR_TOKEN", "t0ken-SECRET")
+    monkeypatch.setenv("HL7BRIDGE_FHIR_APIKEY", "k3y-SECRET")
+    _patch_client(monkeypatch, handler)
+    cli.main(["doctor"])
+    cli.main(["fhir", "probe"])
+    assert seen and all(auth == "" for _, auth in seen), "default server: no credentials"
+    seen.clear()
+    cli.main(["doctor", "--fhir-base", "http://127.0.0.1:9/fhir"])
+    assert seen == [("http://127.0.0.1:9/fhir/metadata", "Bearer t0ken-SECRET")]
+    captured = capsys.readouterr()
+    assert "SECRET" not in captured.out + captured.err
+
+
+def test_doctor_on_the_default_server_warns_for_any_answer(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _patch_client(monkeypatch, lambda r: httpx.Response(404, text="some other web app"))
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    rc = cli.main(["doctor", "--port", str(port)])
+    out = capsys.readouterr().out
+    assert rc == EXIT_OK, out
+    assert (
+        "[WARN] fhir: http://localhost:8080/fhir/metadata answered HTTP 404;"
+        " it may not be a FHIR server"
+    ) in out
+
+
+def test_doctor_on_a_named_server_fails_for_an_http_error(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _patch_client(monkeypatch, lambda r: httpx.Response(401))
+    assert cli.main(["doctor", "--fhir-base", "http://fhir.test/fhir"]) == EXIT_FINDINGS
+    assert "[FAIL] fhir: http://fhir.test/fhir/metadata answered HTTP 401" in (
+        capsys.readouterr().out
+    )
+
+
+def test_credentials_over_plain_http_to_another_machine_warn(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HL7BRIDGE_FHIR_TOKEN", "t0ken-SECRET")
+    _patch_client(monkeypatch, lambda r: httpx.Response(200, json={}))
+    cli.main(["doctor", "--fhir-base", "http://fhir.test/fhir"])
+    err = capsys.readouterr().err
+    assert "warning: sending credentials to http://fhir.test/fhir over plain http" in err
+    for base in ("https://fhir.test/fhir", "http://127.0.0.1:8080/fhir"):
+        cli.main(["doctor", "--fhir-base", base])
+        assert "over plain http" not in capsys.readouterr().err, base
+
+
+def test_fhir_probe_strips_control_characters_from_server_text(capsys, monkeypatch):
+    statement = {
+        "resourceType": "CapabilityStatement",
+        "software": {"name": "HAPI\x1b]0;owned\x07", "version": "8\x1b[2J"},
+        "fhirVersion": "4.0.1\x9b",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/metadata"):
+            return httpx.Response(200, json=statement)
+        return httpx.Response(200, json={"total": 0})
+
+    _patch_client(monkeypatch, handler)
+    assert cli.main(["fhir", "probe", "--fhir-base", "http://fhir.test/fhir"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out and "\x9b" not in out
+    assert "  software: HAPI?]0;owned? 8?[2J" in out
+
+
+# -- send: what the receiver wrote is never printed raw ---------------------------------
+
+
+class _AckingListener:
+    """A loopback MLLP listener that answers every frame with one fixed ACK."""
+
+    def __init__(self, ack: bytes) -> None:
+        self.ack = ack
+        self.loop = asyncio.new_event_loop()
+        self.ready = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self.loop)
+
+        async def handle(reader, writer):
+            buffer = b""
+            while True:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\x1c\r" in buffer:
+                    _frame, buffer = buffer.split(b"\x1c\r", 1)
+                    writer.write(encode_mllp(self.ack))
+                    await writer.drain()
+            writer.close()
+
+        async def start():
+            self.server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            self.port = self.server.sockets[0].getsockname()[1]
+            self.ready.set()
+
+        self.loop.run_until_complete(start())
+        self.loop.run_forever()
+
+    def __enter__(self) -> _AckingListener:
+        self.thread.start()
+        assert self.ready.wait(10)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.loop.call_soon_threadsafe(self.server.close)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(10)
+
+
+def _ack(code: str, msa3: str, err: str = "") -> bytes:
+    segments = [
+        "MSH|^~\\&|RCV|R|SND|S|20261007100000||ACK|A1|P|2.5",
+        f"MSA|{code}|C1|{msa3}",
+    ]
+    if err:
+        segments.append(f"ERR|||{err}")
+    return ("\r".join(segments) + "\r").encode("utf-8")
+
+
+def _one_message(tmp_path: Path) -> Path:
+    msg = tmp_path / "a.hl7"
+    msg.write_bytes(sorted(SAMPLES_DIR.glob("*.hl7"))[0].read_bytes())
+    return msg
+
+
+def test_send_strips_control_characters_from_the_receivers_ack(tmp_path, capsys):
+    hostile = "\x1b]0;owned\x07\x1b[2Jlooks fine‮"
+    msg = _one_message(tmp_path)
+    with _AckingListener(_ack("AE", hostile, err=hostile)) as listener:
+        rc = cli.main(["send", str(msg), "--port", str(listener.port)])
+    out = capsys.readouterr().out
+    assert rc == EXIT_FINDINGS
+    for ch in ("\x1b", "\x07", "‮"):
+        assert ch not in out
+    assert "  MSA-3: ?]0;owned??[2Jlooks fine?" in out
+    assert "  ERR: ?]0;owned??[2Jlooks fine?" in out
+    assert "quarantine reason" not in out, "only hl7bridge's own reason codes"
+
+
+def test_send_shows_a_quarantine_reason_only_for_known_codes(tmp_path, capsys):
+    msg = _one_message(tmp_path)
+    with _AckingListener(_ack("AE", "not a patient here: PID-3")) as listener:
+        cli.main(["send", str(msg), "--port", str(listener.port)])
+    out = capsys.readouterr().out
+    assert "  MSA-3: not a patient here: PID-3" in out
+    assert "quarantine reason" not in out
+
+
+def test_send_never_prints_a_code_that_is_not_an_ack_code(tmp_path, capsys):
+    msg = _one_message(tmp_path)
+    with _AckingListener(_ack("\x1b[2J", "x")) as listener:
+        cli.main(["send", str(msg), "--port", str(listener.port)])
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "a.hl7: ?? (not a known ACK code)" in out
+
+
+# -- --json: an explicit list of fields per report ----------------------------------------
+
+
+def test_report_json_fields_are_exactly_the_listed_ones(sample_db, tmp_path, capsys):
+    from hl7bridge.config import HospitalRegistry
+    from hl7bridge.ingest.loaders import load_outbound
+    from hl7bridge.synth import generate
+
+    conn = connect(sample_db)
+    registry = HospitalRegistry.load_dir(CONFIG_DIR)
+    generate(tmp_path / "synth", registry, seed=42)
+    load_outbound(conn, registry, tmp_path / "synth" / "outbound_reports.jsonl")
+    conn.execute(
+        "INSERT INTO acks_in (hospital_id, ack_control_id, msa_code, msa_control_id, reason,"
+        " received_at_utc) VALUES ('HOSPA', 'X1', 'AA', 'NEVER-SENT', 'free text', ?)",
+        (REPORT_NOW,),
+    )
+    conn.commit()
+    conn.close()
+
+    cli.main(["reconcile", "--db", str(sample_db), "--now", REPORT_NOW, "--json"])
+    rec = json.loads(capsys.readouterr().out)
+    assert any(h["findings"] for h in rec.values())
+    for hosp in rec.values():
+        assert set(hosp) == {*cli.RECONCILE_FIELDS, "finding_count", "findings"}
+        for finding in hosp["findings"]:
+            assert set(finding) == set(cli.FINDING_FIELDS)
+
+    cli.main(["ack-report", "--db", str(sample_db), "--now", REPORT_NOW, "--json"])
+    ack = json.loads(capsys.readouterr().out)
+    assert set(ack) == {
+        "states",
+        "by_hospital",
+        "outcomes",
+        "unknown_acks",
+        "unconfigured_hospital_reports",
+    }
+    assert ack["outcomes"] and all(set(o) == set(cli.OUTCOME_FIELDS) for o in ack["outcomes"])
+    assert ack["unknown_acks"]
+    assert all(set(a) == set(cli.UNKNOWN_ACK_FIELDS) for a in ack["unknown_acks"])
+
+    cli.main(["tat", "--db", str(sample_db), "--month", "2026-10", "--json"])
+    tat = json.loads(capsys.readouterr().out)
+    for hosp in tat.values():
+        assert set(hosp) == {*cli.TAT_FIELDS, "measured", "groups"}
+        assert all(set(m) == set(cli.MEASURED_FIELDS) for m in hosp["measured"])
+        assert all(set(g) == set(cli.GROUP_FIELDS) for g in hosp["groups"].values())
+
+    cli.main(["lint", str(SAMPLES_DIR), "--json"])
+    lint = json.loads(capsys.readouterr().out)
+    assert all(set(f) == {"file", *cli.LINT_FIELDS} for f in lint["findings"])
+
+
+# -- user mistakes exit 2 ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("month", ["garbage", "2026-13", "2026-00", "2026-1", "26-10"])
+def test_tat_month_must_be_a_real_month(tmp_path, capsys, month):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["tat", "--db", str(_empty_db(tmp_path / "t.db")), "--month", month])
+    assert excinfo.value.code == EXIT_USAGE
+    assert "is not a month in the form YYYY-MM" in capsys.readouterr().err
+
+
+def test_load_outbound_missing_file_is_a_usage_error(tmp_path, capsys):
+    missing = tmp_path / "missing.jsonl"
+    rc = cli.main(["load", "outbound", "--db", str(tmp_path / "x.db"), "--path", str(missing)])
+    assert rc == EXIT_USAGE
+    assert f"error: --path {missing} is not a file.\n" in capsys.readouterr().err
+    assert not (tmp_path / "x.db").exists()
+
+
+def test_load_studies_missing_folder_is_a_usage_error(tmp_path, capsys):
+    missing = tmp_path / "nodicom"
+    rc = cli.main(["load", "studies", "--db", str(tmp_path / "x.db"), "--dicom", str(missing)])
+    assert rc == EXIT_USAGE
+    assert f"error: --dicom {missing} is not a folder." in capsys.readouterr().err
+
+
+def test_synth_into_a_file_is_a_usage_error(tmp_path, capsys):
+    target = tmp_path / "a-file"
+    target.write_text("x", encoding="utf-8")
+    assert cli.main(["synth", "--out", str(target)]) == EXIT_USAGE
+    assert f"error: --out {target} exists and is not a folder." in capsys.readouterr().err
+
+
+def test_init_into_a_file_is_a_usage_error(tmp_path, capsys):
+    target = tmp_path / "a-file"
+    target.write_text("x", encoding="utf-8")
+    assert cli.main(["init", str(target)]) == EXIT_USAGE
+    assert f"error: {target} exists and is not a folder." in capsys.readouterr().err
+    assert target.read_text(encoding="utf-8") == "x"
+
+
+def test_init_when_profiles_is_a_file_is_a_usage_error(tmp_path, capsys):
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "profiles").write_text("x", encoding="utf-8")
+    assert cli.main(["init", str(tmp_path / "site")]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert f"error: {tmp_path / 'site' / 'profiles'} exists and is not a folder." in err
+    assert not (tmp_path / "site" / "samples").exists(), "nothing was written"
+
+
+def test_file_system_errors_are_usage_errors_without_the_file_name(tmp_path, capsys, monkeypatch):
+    def missing(_conn):
+        raise FileNotFoundError(2, "No such file or directory", "2.25.1234567.dcm")
+
+    monkeypatch.setattr(cli, "message_counts", missing)
+    rc = cli.main(["summary", "--db", str(_empty_db(tmp_path / "x.db"))])
+    err = capsys.readouterr().err
+    assert rc == EXIT_USAGE
+    assert "error: FileNotFoundError: No such file or directory. Check the paths you passed." in err
+    assert "2.25.1234567" not in err
+    assert "bug in hl7bridge" not in err
+
+
+def test_lint_reports_a_file_that_is_not_utf8(tmp_path, capsys):
+    (tmp_path / "bad.hl7").write_bytes(b"MSH|^~\\&|\xff\xfe\r")
+    rc = cli.main(["lint", str(tmp_path), "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert rc == EXIT_FINDINGS
+    assert [(f["file"], f["rule_id"]) for f in data["findings"]] == [("bad.hl7", "HL7-001")]
+
+
+# -- defaults that keep things on this machine ------------------------------------------
+
+
+@pytest.mark.parametrize("command", [["listen"], ["send", "x"], ["doctor"]])
+def test_network_defaults_are_loopback(command):
+    assert cli.build_parser().parse_args(command).host == "127.0.0.1"

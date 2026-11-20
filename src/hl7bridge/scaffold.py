@@ -34,6 +34,15 @@ def init_folder(dest: Path, *, force: bool = False) -> InitResult:
     plan += [(src, dest / "samples" / src.name) for src in samples]
     if dest.exists() and not dest.is_dir():
         raise UsageError(f"{dest} exists and is not a folder.")
+    for folder in (dest / "profiles", dest / "samples"):
+        if folder.exists() and not folder.is_dir():
+            raise UsageError(f"{folder} exists and is not a folder. Nothing was written.")
+    wrong_kind = [target for _, target in plan if target.exists() and not target.is_file()]
+    if wrong_kind:
+        raise UsageError(
+            f"{wrong_kind[0]} exists and is not a file. Nothing was written.",
+            hint="Move it, or pick another folder.",
+        )
     existing = [target for _, target in plan if target.exists()]
     if existing and not force:
         raise UsageError(

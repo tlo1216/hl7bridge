@@ -208,7 +208,17 @@ def lint_directory(directory: Path, registry: HospitalRegistry) -> LintReport:
     report = LintReport()
     for path in hl7_files(directory):
         # Bytes, then decode: text mode would rewrite bare CR segment ends.
-        findings = lint_text(path.read_bytes().decode("utf-8"), registry)
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            # The listener rejects these as parse_error; lint says the same.
+            findings = [
+                make_finding(
+                    "HL7-001", hospital_id=None, control_id=None, field="", detail="not UTF-8"
+                )
+            ]
+        else:
+            findings = lint_text(text, registry)
         report.files_checked += 1
         if findings:
             # Forward slashes on every OS so reports and keys match everywhere.

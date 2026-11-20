@@ -45,12 +45,16 @@ UNRECOGNIZED_ISSUE_CODE = "unrecognized-code"
 
 
 def _url_path(url: str) -> str:
-    """The path of ``url`` only: no scheme, host, user info, query or fragment."""
+    """The path of ``url`` only: no scheme, host, user info, query or
+    fragment. A mistyped URL can carry its user info in the path
+    (``http:/alice:pw@host``), so a path holding ``@`` is never shown."""
     try:
-        path = urlsplit(url).path
+        parts = urlsplit(url)
     except ValueError:
         return "[unparseable URL]"
-    return path or "/"
+    if "@" in parts.path or (parts.scheme and not parts.netloc):
+        return "[unparseable URL]"
+    return parts.path or "/"
 
 
 # Exit codes, documented once in docs/cli.md.

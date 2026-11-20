@@ -1084,6 +1084,7 @@ def test_cli_boundary_withholds_messages_that_quote_input(
             raise error from inner
 
     monkeypatch.setattr(cli, "message_counts", boom)
+    connect(tmp_path / "x.db").close()  # report commands open an existing database only
     argv = ["summary", "--db", str(tmp_path / "x.db")]
     rc = _run_cli(["--debug", *argv] if debug else argv)
     captured = capsys.readouterr()
@@ -1108,6 +1109,7 @@ def test_cli_credentials_in_fhir_base_are_never_printed(tmp_path, capsys, monkey
         raise httpx.ConnectError(f"refused {request.url}", request=request)
 
     secret_base = "http://demo-user:s3cr3t-token@fhir.test/fhir"
+    connect(tmp_path / "c.db").close()
     _patch_client(monkeypatch, denied)
     rc_probe = _run_cli(["fhir", "probe", "--fhir-base", secret_base])
     _patch_client(monkeypatch, refused)
@@ -1123,9 +1125,14 @@ def test_cli_credentials_in_fhir_base_are_never_printed(tmp_path, capsys, monkey
             secret_base,
         ]
     )
+    rc_doctor = _run_cli(["doctor", "--fhir-base", secret_base, "--db", str(tmp_path / "c.db")])
+    rc_doctor_json = _run_cli(["doctor", "--json", "--fhir-base", secret_base])
     captured = capsys.readouterr()
     assert rc_probe == 1
     assert rc_sync == 3
+    assert rc_doctor == rc_doctor_json == 1
+    assert "[FAIL] fhir: no answer from http://fhir.test/fhir/metadata" in captured.out
+    assert '"detail": "no answer from http://fhir.test/fhir/metadata"' in captured.out
     everything = captured.out + captured.err
     assert "server: http://fhir.test/fhir" in captured.out
     assert "FHIR /metadata probe failed for http://fhir.test/fhir" in captured.err
@@ -1266,3 +1273,23 @@ def socket_closed_port() -> Iterator[int]:
         s.bind(("127.0.0.1", 0))
         port = int(s.getsockname()[1])
     yield port
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "alice:s3cr3t@127.0.0.1:9/fhir",
+        "http:/alice:s3cr3t@host/fhir",
+        "https:alice:s3cr3t@host/fhir",
+        "http:///alice:s3cr3t@host/fhir",
+        "//alice:s3cr3t@host/fhir",
+        "http://alice:s3cr3t@host/fhir",
+        "http://alice:s3cr3t@host:notaport/fhir",
+    ],
+)
+def test_safe_url_and_error_paths_never_return_user_info(url):
+    """Even a mistyped URL: urlsplit then puts the password in the path."""
+    from hl7bridge.errors import _url_path
+
+    for shown in (safe_url(url), _url_path(url), str(FhirPostError(0, url))):
+        assert "s3cr3t" not in shown and "alice" not in shown, shown

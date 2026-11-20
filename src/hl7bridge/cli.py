@@ -13,7 +13,9 @@ import asyncio
 import errno
 import logging
 import os
+import re
 import socket
+import sqlite3
 import sys
 import traceback
 from collections import Counter
@@ -21,6 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -45,11 +48,12 @@ from .errors import (
 )
 from .fhir import HapiClient, render_sync_text, sync_to_fhir
 from .ingest import IngestPipeline, send_messages, serve
+from .ingest.ack import ALL_REASONS
 from .ingest.loaders import load_outbound, load_studies
 from .ingest.parser import get_field, parse_hl7
 from .jsonout import dumps, to_jsonable
 from .lint import lint_directory, render_lint_text
-from .logsafety import configure_logging, safe_url
+from .logsafety import configure_logging, printable, safe_url
 from .msgfiles import display_key, hl7_files
 from .profiles import Resolved, resolve_db, resolve_profiles
 from .reconcile import reconcile, render_reconcile_text
@@ -121,6 +125,14 @@ def _now_arg(value: str | None) -> datetime:
     return dt
 
 
+def _month(value: str) -> str:
+    """YYYY-MM with a real month, for ``tat --month``."""
+    match = re.fullmatch(r"(\d{4})-(\d{2})", value)
+    if match is None or not 1 <= int(match.group(2)) <= 12:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a month in the form YYYY-MM")
+    return value
+
+
 def _port(value: str) -> int:
     try:
         port = int(value)
@@ -145,14 +157,56 @@ def _fhir_headers() -> dict[str, str]:
     return headers
 
 
+def check_fhir_base(value: str, source: str) -> str:
+    """``value`` if it is a usable FHIR base URL, else UsageError.
+
+    The scheme must be http or https and a host must be present, with no
+    query or fragment. The error names where the value came from and never
+    echoes it: a mistyped URL can hold a password in a place no parser
+    recognizes as user info."""
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        parts.port  # noqa: B018  raises ValueError for a port that is not a number
+    except ValueError:
+        host = None
+        parts = None
+    if (
+        parts is None
+        or parts.scheme not in ("http", "https")
+        or not host
+        or parts.query
+        or parts.fragment
+        or "@" in parts.path
+    ):
+        raise UsageError(
+            f"{source} is not an http(s) URL with a host (value not shown).",
+            hint="Try: --fhir-base http://localhost:8080/fhir",
+        )
+    return value
+
+
 def _fhir_base(args: argparse.Namespace) -> tuple[str, bool]:
-    """(base URL, whether the user named it) from flag, environment, default."""
+    """(base URL, whether the user named it) from flag, environment, default.
+    A named value is checked before anything uses or prints it."""
     if getattr(args, "fhir_base", None):
-        return str(args.fhir_base), True
+        return check_fhir_base(str(args.fhir_base), "--fhir-base"), True
     env = os.environ.get(FHIR_BASE_ENV)
     if env:
-        return env, True
+        return check_fhir_base(env, FHIR_BASE_ENV), True
     return DEFAULT_FHIR_BASE, False
+
+
+def _warn_plain_http(base: str, headers: dict[str, str]) -> None:
+    """Credentials over plain http to another machine can be read on the way."""
+    parts = urlsplit(base)
+    has_credentials = bool(headers) or parts.username is not None
+    if has_credentials and parts.scheme == "http" and parts.hostname not in LOOPBACK_HOSTS:
+        print(
+            f"warning: sending credentials to {safe_url(base)} over plain http;"
+            " anyone on the network path can read them. Use https.",
+            file=sys.stderr,
+        )
 
 
 def _require_metadata(client: HapiClient, base: str) -> None:
@@ -164,7 +218,7 @@ def _require_metadata(client: HapiClient, base: str) -> None:
             f"no answer from {safe_url(base)}/metadata. Is the server running?",
             hint="Try: hl7bridge doctor",
         )
-    err = FhirPostError(status, f"{base}/metadata", reason="the server is not ready")
+    err = FhirPostError(status, f"{safe_url(base)}/metadata", reason="the server is not ready")
     if status in (401, 403):
         err.hint = f"Set {FHIR_APIKEY_ENV} or {FHIR_TOKEN_ENV} if the server needs one."
     raise err
@@ -184,9 +238,11 @@ def cmd_demo(args: argparse.Namespace) -> int:
         data_dir=Path(args.data_dir) if args.data_dir else None,
         keep=args.keep,
         seed=args.seed,
-        fhir_base=args.fhir_base,
+        # Only the flag, never HL7BRIDGE_FHIR_BASE: the demo writes into a
+        # server only when it is named on this command line.
+        fhir_base=check_fhir_base(args.fhir_base, "--fhir-base") if args.fhir_base else None,
         fhir_wait_s=args.fhir_wait,
-        fhir_headers=_fhir_headers(),
+        fhir_headers=_fhir_headers() if args.fhir_base else {},
         client_factory=HapiClient,
     )
     # The pipeline logs every rejection, and the demo seeds rejections on
@@ -195,6 +251,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
     saved_level = package_log.level
     if getattr(args, "verbose", 0) == 0 and not getattr(args, "debug", False):
         package_log.setLevel(logging.ERROR)
+    if opts.fhir_base:
+        _warn_plain_http(opts.fhir_base, opts.fhir_headers)
     try:
         return run_demo(opts, sys.stdout, sys.stderr)
     finally:
@@ -216,6 +274,10 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     base, named = _fhir_base(args)
+    # Credentials go only to a server the user named.
+    headers = _fhir_headers() if named else {}
+    if named:
+        _warn_plain_http(base, headers)
     # The FHIR line says when the server does not answer; the client's own
     # warning would say it twice.
     client_log = logging.getLogger("hl7bridge.fhir.client")
@@ -230,7 +292,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             port=args.port,
             fhir_base=base,
             fhir_named=named,
-            fhir_headers=_fhir_headers(),
+            fhir_headers=headers,
             client_factory=HapiClient,
         )
     finally:
@@ -263,7 +325,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
                 "files_checked": report.files_checked,
                 "error_count": report.error_count,
                 "findings": [
-                    {"file": name, **to_jsonable(f)}
+                    {"file": name, **_pick(f, LINT_FIELDS)}
                     for name, group in report.by_file
                     for f in group
                 ],
@@ -289,13 +351,19 @@ class _AckView:
     err: str
 
 
+_ACK_CODE = re.compile(r"[A-Z]{2}")
+
+
 def _read_ack(raw: bytes) -> _AckView:
+    """The ACK fields ``send`` shows. The receiver wrote them, so the code
+    must look like an ACK code and the texts lose control characters."""
     message = parse_hl7(raw.decode("utf-8", errors="replace"))
     err_parts = [get_field(message, f) for f in ("ERR-3", "ERR-1")]
+    code = get_field(message, "MSA-1") or ""
     return _AckView(
-        code=get_field(message, "MSA-1") or "??",
-        text=get_field(message, "MSA-3") or "",
-        err=next((p for p in err_parts if p), ""),
+        code=code if _ACK_CODE.fullmatch(code) else "??",
+        text=printable(get_field(message, "MSA-3") or ""),
+        err=printable(next((p for p in err_parts if p), "")),
     )
 
 
@@ -352,7 +420,7 @@ def _print_send_results(root: Path, paths: list[Path], acks: list[bytes]) -> int
         if view.err:
             print(f"  ERR: {view.err}")
         reason = view.text.split(":", 1)[0].strip()
-        if reason:
+        if reason in ALL_REASONS:  # only hl7bridge's own reason codes
             print(f"  quarantine reason: {reason}")
         print(f"  next: hl7bridge lint {path}")
     print(f"sent {len(paths)} message(s) from {root}, got {len(acks)} ACK(s)")
@@ -365,6 +433,8 @@ def _print_send_results(root: Path, paths: list[Path], acks: list[bytes]) -> int
 def cmd_synth(args: argparse.Namespace) -> int:
     registry = _registry(args)
     out = Path(args.out)
+    if out.exists() and not out.is_dir():
+        raise UsageError(f"--out {out} exists and is not a folder.")
     manifest = generate(out, registry, seed=args.seed)
     print(f"generated synthetic day under {out} (seed={args.seed})")
     print(f"  hospitals: {', '.join(manifest.hospitals)}")
@@ -449,14 +519,72 @@ def cmd_listen(args: argparse.Namespace) -> int:
 # -- Reports ---------------------------------------------------------------------------
 
 
+def _report_db(args: argparse.Namespace) -> sqlite3.Connection:
+    """The store for a report: an existing database only, never a new one."""
+    return connect(_db_path(args), create=False)
+
+
+# --json output names every field it prints. A field added to a report
+# dataclass later does not appear in JSON until it is listed here.
+RECONCILE_FIELDS = ("hospital_id", "display_name", "matched", "pending_orders", "pending_studies")
+FINDING_FIELDS = ("category", "hospital_id", "accession", "study_uid", "detail")
+OUTCOME_FIELDS = (
+    "hospital_id",
+    "control_id",
+    "accession",
+    "state",
+    "sent_at_utc",
+    "acked_at_utc",
+    "reason",
+    "duplicate_acks",
+    "conflicting_codes",
+)
+UNKNOWN_ACK_FIELDS = ("hospital_id", "msa_control_id", "msa_code", "received_at_utc")
+TAT_FIELDS = (
+    "hospital_id",
+    "display_name",
+    "month",
+    "finals",
+    "prelims",
+    "corrected",
+    "missing_exam_time",
+    "missing_final_time",
+    "missing_order",
+    "breaches",
+)
+MEASURED_FIELDS = (
+    "accession",
+    "modality",
+    "priority",
+    "exam_to_final_hours",
+    "exam_to_prelim_hours",
+    "order_to_exam_hours",
+    "target_hours",
+)
+GROUP_FIELDS = ("n", "median_hours", "p90_hours", "breaches", "target_hours")
+LINT_FIELDS = ("rule_id", "severity", "hospital_id", "control_id", "field", "message")
+
+
+def _pick(obj: object, names: Sequence[str]) -> dict[str, object]:
+    """Only the named fields of a dataclass, row or mapping, as JSON values."""
+    if isinstance(obj, sqlite3.Row):
+        return {n: to_jsonable(obj[n]) for n in names}
+    return {n: to_jsonable(getattr(obj, n)) for n in names}
+
+
 def cmd_reconcile(args: argparse.Namespace) -> int:
+    now = _now_arg(args.now)
     registry = _registry(args)
-    conn = connect(_db_path(args))
-    reports = reconcile(conn, registry, _now_arg(args.now))
+    conn = _report_db(args)
+    reports = reconcile(conn, registry, now)
     if args.json:
         _print_json(
             {
-                hosp: {**to_jsonable(r), "finding_count": len(r.findings)}
+                hosp: {
+                    **_pick(r, RECONCILE_FIELDS),
+                    "finding_count": len(r.findings),
+                    "findings": [_pick(f, FINDING_FIELDS) for f in r.findings],
+                }
                 for hosp, r in sorted(reports.items())
             }
         )
@@ -466,9 +594,10 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
 
 
 def cmd_ack_report(args: argparse.Namespace) -> int:
+    now = _now_arg(args.now)
     registry = _registry(args)
-    conn = connect(_db_path(args))
-    report = track_acks(conn, registry, _now_arg(args.now))
+    conn = _report_db(args)
+    report = track_acks(conn, registry, now)
     if args.json:
         by_hospital = {
             hosp: {state: len(items) for state, items in report.by_state(hosp).items()}
@@ -478,8 +607,8 @@ def cmd_ack_report(args: argparse.Namespace) -> int:
             {
                 "states": list(STATES),
                 "by_hospital": by_hospital,
-                "outcomes": report.outcomes,
-                "unknown_acks": report.unknown_acks,
+                "outcomes": [_pick(o, OUTCOME_FIELDS) for o in report.outcomes],
+                "unknown_acks": [_pick(a, UNKNOWN_ACK_FIELDS) for a in report.unknown_acks],
                 # The text report gives a count only; so does JSON.
                 "unconfigured_hospital_reports": len(report.unconfigured),
             }
@@ -491,12 +620,18 @@ def cmd_ack_report(args: argparse.Namespace) -> int:
 
 def cmd_tat(args: argparse.Namespace) -> int:
     registry = _registry(args)
-    conn = connect(_db_path(args))
+    conn = _report_db(args)
     reports = tat_report(conn, registry, args.month)
     if args.json:
         _print_json(
             {
-                hosp: {**to_jsonable(r), "breaches": r.breaches}
+                hosp: {
+                    **_pick(r, TAT_FIELDS),
+                    "measured": [_pick(m, MEASURED_FIELDS) for m in r.measured],
+                    "groups": {
+                        "/".join(key): _pick(g, GROUP_FIELDS) for key, g in r.groups.items()
+                    },
+                }
                 for hosp, r in sorted(reports.items())
             }
         )
@@ -506,7 +641,7 @@ def cmd_tat(args: argparse.Namespace) -> int:
 
 
 def cmd_summary(args: argparse.Namespace) -> int:
-    conn = connect(_db_path(args))
+    conn = _report_db(args)
     counts = message_counts(conn)
     quarantined = quarantine_summary(conn)
     total = sum(quarantined.values())
@@ -526,8 +661,13 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
 
 def cmd_fhir_probe(args: argparse.Namespace) -> int:
-    base, _named = _fhir_base(args)
-    with HapiClient(base, extra_headers=_fhir_headers()) as client:
+    base, named = _fhir_base(args)
+    # Read-only, so the default server is allowed; credentials only go to a
+    # server the user named.
+    headers = _fhir_headers() if named else {}
+    if named:
+        _warn_plain_http(base, headers)
+    with HapiClient(base, extra_headers=headers) as client:
         summary = client.capability_summary()
         print(f"server: {safe_url(base)}")
         print(f"  HTTP {summary['status_code']}")
@@ -538,11 +678,15 @@ def cmd_fhir_probe(args: argparse.Namespace) -> int:
                 if summary["status_code"] in (401, 403)
                 else ""
             )
-            err = FhirPostError(summary["status_code"], f"{base}/metadata", summary.get("body", ""))
+            err = FhirPostError(
+                summary["status_code"], f"{safe_url(base)}/metadata", summary.get("body", "")
+            )
             err.hint = hint
             raise err
-        print(f"  software: {summary.get('software')} {summary.get('software_version')}")
-        print(f"  fhirVersion: {summary.get('fhir_version')}")
+        # The server wrote these values; strip terminal control characters.
+        software = f"{summary.get('software')} {summary.get('software_version')}"
+        print(f"  software: {printable(software)}")
+        print(f"  fhirVersion: {printable(summary.get('fhir_version'))}")
         for resource in ("Patient", "ServiceRequest", "DiagnosticReport", "ImagingStudy"):
             total = client.search_total(resource)
             print(f"  {resource} on server: {total}")
@@ -550,10 +694,18 @@ def cmd_fhir_probe(args: argparse.Namespace) -> int:
 
 
 def cmd_fhir_sync(args: argparse.Namespace) -> int:
+    base, named = _fhir_base(args)
+    if not named:
+        # sync writes; it never picks a server on its own.
+        raise UsageError(
+            "fhir sync writes to a FHIR server, so it needs one named.",
+            hint=f"Pass --fhir-base URL or set {FHIR_BASE_ENV}.",
+        )
     registry = _registry(args)
-    conn = connect(_db_path(args))
-    base, _named = _fhir_base(args)
-    with HapiClient(base, extra_headers=_fhir_headers()) as client:
+    conn = _report_db(args)
+    headers = _fhir_headers()
+    _warn_plain_http(base, headers)
+    with HapiClient(base, extra_headers=headers) as client:
         _require_metadata(client, base)
         report = sync_to_fhir(conn, registry, client)
     print(render_sync_text(report))
@@ -564,17 +716,23 @@ def cmd_fhir_sync(args: argparse.Namespace) -> int:
 
 
 def cmd_load_studies(args: argparse.Namespace) -> int:
+    dicom = Path(args.dicom)
+    if not dicom.is_dir():
+        raise UsageError(f"--dicom {dicom} is not a folder.", hint="Try: hl7bridge synth --out DIR")
     registry = _registry(args)
     conn = connect(_db_path(args))
-    counts = load_studies(conn, registry, Path(args.dicom))
+    counts = load_studies(conn, registry, dicom)
     print(f"studies loaded: inserted={counts['inserted']} replaced={counts['replaced']}")
     return EXIT_OK
 
 
 def cmd_load_outbound(args: argparse.Namespace) -> int:
+    log_path = Path(args.path)
+    if not log_path.is_file():
+        raise UsageError(f"--path {log_path} is not a file.")
     registry = _registry(args)
     conn = connect(_db_path(args))
-    n = load_outbound(conn, registry, Path(args.path))
+    n = load_outbound(conn, registry, log_path)
     print(f"outbound report entries loaded: {n}")
     return EXIT_OK
 
@@ -717,7 +875,7 @@ COMMANDS: tuple[Command, ...] = (
         "FHIR",
         "post the store to a FHIR server",
         cmd_fhir_sync,
-        ("hl7bridge fhir sync", "hl7bridge fhir sync --fhir-base http://localhost:8080/fhir"),
+        ("hl7bridge fhir sync --fhir-base http://localhost:8080/fhir",),
         old_name="fhir-sync",
     ),
     Command(
@@ -777,7 +935,8 @@ EXIT_CODES_TEXT = f"""exit codes:
 DEFAULTS_TEXT = """defaults:
   --config  HL7BRIDGE_CONFIG, then ./hl7bridge/profiles, then the bundled profiles
   --db      HL7BRIDGE_DB, then ./hl7bridge.db
-  FHIR      --fhir-base, then HL7BRIDGE_FHIR_BASE, then http://localhost:8080/fhir
+  FHIR      --fhir-base, then HL7BRIDGE_FHIR_BASE; probe and doctor fall back to
+            http://localhost:8080/fhir, fhir sync needs one named, demo uses only the flag
   secrets   HL7BRIDGE_FHIR_APIKEY and HL7BRIDGE_FHIR_TOKEN, from the environment only"""
 
 
@@ -862,7 +1021,8 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--data-dir",
             metavar="DIR",
-            help="new, empty or earlier demo folder (default: a new temporary folder)",
+            help="a new or empty folder to write into and keep (default: a temporary folder"
+            " the demo removes after a clean run)",
         )
         p.add_argument("--keep", action="store_true", help="keep the temporary data folder")
         p.add_argument("--seed", type=int, default=42, help="generator seed (default: 42)")
@@ -927,7 +1087,9 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
     elif name == "tat":
         _add_db(p)
         _add_config(p)
-        p.add_argument("--month", required=True, help="YYYY-MM, in hospital local time")
+        p.add_argument(
+            "--month", required=True, type=_month, help="YYYY-MM, in hospital local time"
+        )
         _add_json(p)
     elif name == "summary":
         _add_db(p)
@@ -1051,6 +1213,15 @@ def _frames(exc: BaseException) -> str:
     return "".join(traceback.format_tb(exc.__traceback__)).rstrip()
 
 
+USER_FS_ERRORS = (
+    FileNotFoundError,
+    NotADirectoryError,
+    IsADirectoryError,
+    FileExistsError,
+    PermissionError,
+)
+
+
 def _report_error(exc: BaseException, *, debug: bool) -> int:
     """One ``error:`` line per failure, then the hint. No chained causes: a
     cause can quote the rejected input. A BridgeError whose class can quote
@@ -1068,6 +1239,16 @@ def _report_error(exc: BaseException, *, debug: bool) -> int:
             file=sys.stderr,
         )
         status = exc.exit_code
+    elif isinstance(exc, USER_FS_ERRORS):
+        # A path that is missing, of the wrong kind or not allowed. The file
+        # name is not printed: it can be a name read from a folder (a DICOM
+        # file is named by its study UID).
+        print(
+            f"error: {type(exc).__name__}: {exc.strerror or 'a file or folder cannot be used'}."
+            " Check the paths you passed.",
+            file=sys.stderr,
+        )
+        status = EXIT_USAGE
     else:
         print(
             f"error: internal error {type(exc).__name__} (message withheld: it can quote"
@@ -1079,6 +1260,8 @@ def _report_error(exc: BaseException, *, debug: bool) -> int:
         frames = _frames(exc)
         if frames:
             print(frames, file=sys.stderr)
+    elif isinstance(exc, USER_FS_ERRORS):
+        pass
     elif not isinstance(exc, BridgeError) or exc.quotes_input:
         print("Run again with --debug to see where it failed.", file=sys.stderr)
     return status

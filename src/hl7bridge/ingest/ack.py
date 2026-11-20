@@ -28,6 +28,24 @@ REASON_UNSUPPORTED_ORDER_CONTROL = "unsupported_order_control"
 REASON_NO_HANDLER = "no_handler_for_type"
 REASON_MISSING_MSA = "missing_msa"
 REASON_INTERNAL_ERROR = "internal_error"
+ALL_REASONS = frozenset(
+    {
+        REASON_PARSE_ERROR,
+        REASON_MLLP_JUNK,
+        REASON_UNKNOWN_HOSPITAL,
+        REASON_UNEXPECTED_TYPE,
+        REASON_MISSING_CONTROL_ID,
+        REASON_MISSING_MRN,
+        REASON_MISSING_MERGE_MRN,
+        REASON_MISSING_ACCESSION,
+        REASON_BAD_TIMESTAMP,
+        REASON_UNKNOWN_REPORT_STATUS,
+        REASON_UNSUPPORTED_ORDER_CONTROL,
+        REASON_NO_HANDLER,
+        REASON_MISSING_MSA,
+        REASON_INTERNAL_ERROR,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)

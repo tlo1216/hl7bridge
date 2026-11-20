@@ -2,7 +2,9 @@
 
 Every check is read-only. The database is opened read-only and never
 created. The port check binds and closes a socket. The FHIR check sends one
-GET for ``/metadata``.
+GET for ``/metadata``, with the credentials from the environment only when
+the server was named (``--fhir-base`` or ``HL7BRIDGE_FHIR_BASE``). For the
+default server any answer other than 200 is a warning, not a failure.
 """
 
 from __future__ import annotations
@@ -90,7 +92,7 @@ def check_database(resolved: Resolved) -> Check:
         return Check(
             "database",
             OK,
-            f"{where} does not exist yet; the first command that needs it creates it",
+            f"{where} does not exist yet; hl7bridge listen or hl7bridge load creates it",
         )
     if state == "ok":
         return Check("database", OK, f"{where}, schema version {version}")
@@ -161,6 +163,14 @@ def check_fhir(
             )
         return Check(
             "fhir", FAIL, f"no answer from {shown}/metadata", "start the server or check the URL."
+        )
+    if not named:
+        # Nobody asked for this server: something else may own the port.
+        return Check(
+            "fhir",
+            WARN,
+            f"{shown}/metadata answered HTTP {status}; it may not be a FHIR server",
+            "pass --fhir-base, or set HL7BRIDGE_FHIR_BASE, to check the server you use.",
         )
     fix = "set HL7BRIDGE_FHIR_APIKEY or HL7BRIDGE_FHIR_TOKEN." if status in (401, 403) else ""
     return Check("fhir", FAIL, f"{shown}/metadata answered HTTP {status}", fix)

@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import unicodedata
 from typing import TextIO
 from urllib.parse import urlsplit
 
@@ -84,21 +85,45 @@ def redact_url_queries(text: str) -> str:
     return _URL_USERINFO_RE.sub(lambda m: m.group(1) + _REDACTED_USERINFO, text)
 
 
+UNPARSEABLE_URL = "[unparseable URL]"
+
+
 def safe_url(url: object) -> str:
     """``scheme://host[:port]/path`` of ``url``, with no user info, query or
-    fragment. Use it wherever a configured or requested URL is printed."""
+    fragment. Use it wherever a configured or requested URL is printed.
+
+    It never returns user info, even for a mistyped URL: with no scheme or
+    one slash too few (``alice:pw@host/fhir``, ``http:/alice:pw@host``)
+    ``urlsplit`` puts the password in the path, so any path holding ``@``
+    gives ``[unparseable URL]``."""
     try:
         parts = urlsplit(str(url))
         host = parts.hostname or ""
         port = f":{parts.port}" if parts.port is not None else ""
     except ValueError:
-        return "[unparseable URL]"
+        return UNPARSEABLE_URL
+    if "@" in parts.path:
+        return UNPARSEABLE_URL
     if ":" in host:
         host = f"[{host}]"
     query = _REDACTED_QUERY if parts.query else ""
     if parts.scheme and host:
         return f"{parts.scheme}://{host}{port}{parts.path}{query}"
+    if parts.scheme or parts.netloc:
+        # A scheme with no host, or a host with no scheme: not a URL we can
+        # show in part without risking the user info.
+        return UNPARSEABLE_URL
     return f"{parts.path or '/'}{query}"
+
+
+def printable(text: object, limit: int = 160) -> str:
+    """Text from outside (an ACK, a server answer) made safe for a terminal.
+
+    Every control or format character (C0, C1, DEL, bidi overrides and the
+    like) becomes ``?``, so a remote party cannot move the cursor, set the
+    window title or hide text, and the length is capped."""
+    cleaned = "".join("?" if unicodedata.category(ch).startswith("C") else ch for ch in str(text))
+    return cleaned if len(cleaned) <= limit else cleaned[:limit] + "..."
 
 
 def _is_http_logger(name: str) -> bool:

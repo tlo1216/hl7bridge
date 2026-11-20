@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from ..config import HospitalRegistry
+from ..logsafety import printable
 from ..store.db import parse_utc_iso
 
 STATES = ("DELIVERED", "ERRORED", "REJECTED", "NO_ACK", "PENDING")
@@ -133,7 +134,8 @@ def render_ack_text(report: AckReport, registry: HospitalRegistry) -> str:
         lines.append("  " + "   ".join(f"{state}: {len(states[state])}" for state in STATES))
         for state in ("ERRORED", "REJECTED", "NO_ACK", "PENDING"):
             for o in states[state]:
-                reason = f"  reason: {o.reason}" if o.reason else ""
+                # The hospital wrote this text; strip terminal control characters.
+                reason = f"  reason: {printable(o.reason)}" if o.reason else ""
                 lines.append(
                     f"  [{state}] report={o.control_id} accession={o.accession}"
                     f" sent={o.sent_at_utc}{reason}"
