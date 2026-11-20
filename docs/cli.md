@@ -59,12 +59,16 @@ Accepted before or after the command.
 | --- | --- |
 | Profile folder | `--config`, `HL7BRIDGE_CONFIG`, `./hl7bridge/profiles`, the bundled profiles |
 | Database | `--db`, `HL7BRIDGE_DB`, `./hl7bridge.db` |
-| FHIR server | `--fhir-base`, `HL7BRIDGE_FHIR_BASE`, `http://localhost:8080/fhir` (`demo` uses only `--fhir-base`) |
+| FHIR server | `--fhir-base`, then `HL7BRIDGE_FHIR_BASE`. `fhir probe` and `doctor` fall back to `http://localhost:8080/fhir`; `fhir sync` writes, so it needs one of the two; `demo` uses only `--fhir-base` |
+| FHIR credentials go to | only a server named with `--fhir-base` or `HL7BRIDGE_FHIR_BASE`, never the fallback |
 | FHIR credentials | `HL7BRIDGE_FHIR_APIKEY` (an `apikey` header), `HL7BRIDGE_FHIR_TOKEN` (a bearer token), from the environment only |
 | Listener | `--host 127.0.0.1 --port 2575` |
 
 Every command that reads profiles or the store prints which folder and
-database it used, on stderr.
+database it used, on stderr. `listen` and `load` create the database if it
+is missing; `summary`, `reconcile`, `ack-report`, `tat` and `fhir sync`
+open an existing one only. A SQLite file that holds another program's
+tables is refused, never changed.
 
 ## Exit codes
 
@@ -75,7 +79,7 @@ database it used, on stderr.
 | 2 | Usage or configuration error: bad arguments, a bad profile, a path or database that cannot be used, a port that cannot be bound |
 | 3 | Connection error: a listener or server did not answer, or no ACK came in time |
 | 4 | Internal error: a bug in hl7bridge. Run again with `--debug` and report it |
-| 130 | Interrupted with Ctrl+C |
+| 130 | Interrupted with Ctrl+C. `listen` is the exception: Ctrl+C is how you stop it, so it prints `listener stopped` and exits 0 |
 
 ## Error messages
 
@@ -94,12 +98,19 @@ could do that print only their class name.
 | FHIR server down | `error: no answer from http://localhost:8080/fhir/metadata. Is the server running? Try: hl7bridge doctor` |
 | No `.hl7` files | `error: no *.hl7 files under ./msgs. Try: hl7bridge init` |
 | LF line ends in a file | A note on stdout, not an error: `note: a.hl7 uses LF line ends; converted to CR for sending.` |
-| ACK is AE or AR | On stdout: the code in words, MSA-3, ERR if present, the quarantine reason, and `next: hl7bridge lint <file>` |
+| ACK is AE or AR | On stdout: the code in words, MSA-3 and ERR if present (control characters replaced by `?`, length capped), the quarantine reason when MSA-3 starts with one of hl7bridge's own reason codes, and `next: hl7bridge lint <file>` |
 | No ACK in time | `error: no ACK from 127.0.0.1:2575 within 10 s. The message may or may not have been processed.` (exit 3) |
 | Listener not running | `error: cannot connect to 127.0.0.1:2575: connection refused. Is the listener running? Try: hl7bridge listen` |
 | Old database schema | `error: database hl7bridge.db has schema version 1; this hl7bridge needs version 2. There is no migration. Demo databases can be deleted and made again.` |
 | Not a database | `error: notes.txt is not an hl7bridge database (DatabaseError). Pass --db with another path, or delete the file if it is a demo database.` |
-| Demo folder not owned | `error: refusing to use data: it has no .hl7bridge-demo marker, so the demo did not create it. Remove it yourself, or pass --data-dir with a new folder.` |
+| Demo folder not empty | `error: refusing to use data: it is not empty. The demo writes only into a new or empty folder, and never deletes anything in a folder you name. Pass --data-dir with a new folder, or leave it out to use a temporary folder.` |
+| No database | `error: no database at hl7bridge.db. Run hl7bridge listen or hl7bridge load first, or pass --db with the database file.` |
+| Another program's database | `error: notes.sqlite is a SQLite database that hl7bridge did not create. Pass --db with another path.` |
+| `fhir sync` with no server | `error: fhir sync writes to a FHIR server, so it needs one named. Pass --fhir-base URL or set HL7BRIDGE_FHIR_BASE.` |
+| Bad FHIR URL | `error: --fhir-base is not an http(s) URL with a host (value not shown). Try: --fhir-base http://localhost:8080/fhir` |
+| Bad month | The usage line, then `error: argument --month: '2026-13' is not a month in the form YYYY-MM` (exit 2) |
+| Missing input file | `error: --path missing.jsonl is not a file.` (and `--dicom DIR is not a folder.`) |
+| File system error | `error: FileNotFoundError: No such file or directory. Check the paths you passed.` (exit 2; the file name is not printed, since it can be a name read from a folder) |
 
 Each row has a test on its text in `tests/unit/test_cli.py`,
 `tests/unit/test_config.py` or `tests/unit/test_demo.py`.

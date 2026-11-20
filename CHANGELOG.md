@@ -21,7 +21,17 @@ profile format may still change between minor versions.
   bundled profiles. Scripts that passed `--config config/hospitals` must
   drop the option or point at the new folder.
 - `--db` is no longer required: `--db`, `HL7BRIDGE_DB`, then
-  `./hl7bridge.db`.
+  `./hl7bridge.db`. `listen` and `load` create the database; `summary`,
+  `reconcile`, `ack-report`, `tat` and `fhir sync` open an existing one
+  only and exit 2 if there is none, so a report run in the wrong folder no
+  longer leaves an empty database behind. A SQLite file holding another
+  program's tables is refused instead of getting hl7bridge's tables added.
+- `fhir sync` needs a server named with `--fhir-base` or
+  `HL7BRIDGE_FHIR_BASE`; it no longer falls back to
+  `http://localhost:8080/fhir`. `fhir probe` and `doctor` still do, and send
+  no credentials to that fallback.
+- A `--fhir-base` or `HL7BRIDGE_FHIR_BASE` that is not an http or https URL
+  with a host and no query exits 2, without echoing the value.
 - Exit codes are fixed and documented in `docs/cli.md`: 0 success, 1
   findings or rejected messages, 2 usage or configuration error, 3
   connection error, 4 internal error, 130 Ctrl+C. Before, a configuration
@@ -36,19 +46,33 @@ profile format may still change between minor versions.
   `listen`, which logs at INFO. `-v` and `-vv` bring INFO and DEBUG back.
 - A database with another schema version, or a file that is not a
   database, raises a clear error instead of a `RuntimeError`.
-- `scripts/demo.sh` accepts only the marker it wrote itself, so it never
-  deletes a folder `hl7bridge demo` owns.
+- `scripts/demo.sh` is deprecated and goes away in 0.4.0. It now only runs
+  `hl7bridge demo` with the arguments given: no HAPI container, and no
+  deleting. `scripts/demo_guard.sh` is removed. Use the compose demo for
+  HAPI in containers.
+- `demo --data-dir` takes only a new or empty folder, writes there and
+  never deletes anything in it. Reusing an earlier demo folder, and the
+  `.hl7bridge-demo` marker that allowed it, are gone.
+- `tat --month` must be a real month (`YYYY-MM`, 01 to 12), and missing
+  input files (`load outbound --path`, `load studies --dicom`), an output
+  path that is a file (`synth --out`, `init`), and file system errors
+  exit 2 with a message, not 4 ("a bug in hl7bridge").
+- The demo exits 1 when the FHIR step skipped a row, and an HTTP error
+  from the FHIR server's `/metadata` exits 1 (3 is only for no answer).
 
 ### Added
 
 - `hl7bridge demo`: the whole pipeline in one process on every OS, with a
   listener on a free loopback port, a check of every count against the
   manifest, and an optional FHIR step against a server named with
-  `--fhir-base` (`--fhir-wait` polls a server that is still starting). The
-  demo owns its data folder: a fresh temporary folder by default, removed
-  at the end unless `--keep`; `--data-dir` only for a new, empty or earlier
-  demo folder. `remove_demo_dir` is the only code that deletes, and it
-  deletes only the files its marker lists, without following links.
+  `--fhir-base` (`--fhir-wait` polls a server that is still starting). By
+  default the demo writes into a new temporary folder and removes it after
+  a clean run, unless `--keep`. It removes only what it created in that
+  run: each file and folder is created exclusively and recorded with its
+  file identity, and is deleted only while it still has that identity,
+  without following links (on Windows through the handle that was
+  checked). Anything else is left and the folder is kept.
+  `hl7bridge.demofiles` is the only code in hl7bridge that deletes.
 - `hl7bridge init [FOLDER]`: copies the bundled profiles and twelve
   hand-made sample messages (one per type and dialect, two broken). Never
   overwrites without `--force`.
@@ -73,10 +97,15 @@ profile format may still change between minor versions.
   pinned by digest) and `compose.demo.yaml` (HAPI with no host port, the
   listener on 127.0.0.1 only, the demo against HAPI, named volumes), plus
   `compose.hapi-port.yaml` to browse HAPI on 127.0.0.1.
-- `tools/check_ports.py`: fails on any published port in a compose file or
-  `docker run` line that is not bound to 127.0.0.1.
+- `tools/check_ports.py`: fails on any published port that is not bound
+  to 127.0.0.1, in compose files (found by content, long and short port
+  forms), workflow service and job containers, and `docker run`,
+  `docker create`, `podman run` and `docker compose run` lines, including
+  clustered flags such as `-dp`, host networking and publish-all.
 - `tools/check_licenses.py`: checks every runtime dependency's license
-  against an allow list.
+  against an allow list. Without a `License-Expression`, the `License`
+  field and every license classifier must all be allowed; an unknown one
+  fails. CI runs it on every OS in the test matrix.
 - `docs/cli.md`: commands, defaults, exit codes and error messages.
 
 ### Changed
@@ -89,16 +118,35 @@ profile format may still change between minor versions.
 - New CI jobs: license and port checks, the reference check on commit
   messages, the README quickstart, and a Docker job that builds the image,
   checks the user is not root and runs the compose demo.
+- Every CI job has a timeout (15 to 30 minutes), and the HAPI service
+  container in CI is published on 127.0.0.1 only.
+- The image builds its wheel with hatchling from the hashed build lock
+  (`uv build --build-constraints ... --require-hashes`).
+- The compose demo no longer keeps its data in a volume; it uses a
+  temporary folder in its container, so `up` can run again and again.
 
 ### Fixed
 
 - `listen` prints its banner only after the socket is bound, names the
   real cause of a bind failure, and no longer labels a later error as a
   bind failure.
-- `scripts/demo.sh` ends the listener's whole process tree on Windows.
-  Killing only the launcher could leave the Python listener running and
-  holding the port; reproduced when the listener is started through a
-  subshell.
+- `lint` reports a file that is not UTF-8 as `HL7-001` instead of
+  stopping with an internal error.
+
+### Security
+
+- User names and passwords in a FHIR URL are never printed, including in a
+  mistyped URL where the parser puts them in the path.
+- `HL7BRIDGE_FHIR_APIKEY` and `HL7BRIDGE_FHIR_TOKEN` go only to a server
+  you named, with a warning when they would go over plain http to another
+  machine.
+- Text a remote party wrote (MSA-3 and ERR in `send`, the ACK reason in
+  `ack-report`, the server software name in `fhir probe`) is printed with
+  control characters replaced, so a listener cannot move the cursor, set
+  the terminal title or hide lines. `send` shows a quarantine reason only
+  for hl7bridge's own reason codes.
+- `--json` output lists every field by name for each report, so a field
+  added to a report later does not reach JSON by accident.
 
 ## [0.2.0] - Unreleased
 
