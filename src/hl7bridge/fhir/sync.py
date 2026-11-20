@@ -6,7 +6,7 @@ the same post as ``to-fhir --post`` (``hl7bridge.v2fhir`` and
 ``fhir/post.py``), so the two paths write identical content and never undo
 each other:
 
-every accepted ADT^A01, A04, A08, ORM^O01 and ORU^R01, in one pass in the
+every accepted ADT^A01, A04, A08, A40, ORM^O01 and ORU^R01, in one pass in the
 order they were received (``messages.id``), as ``to-fhir --post`` would post
 them. Only ADT changes a Patient, and ORM and ORU create it when it is
 missing, so the order across message types decides which message creates
@@ -19,10 +19,18 @@ it creates the Patient exactly when a direct post of it would have.
 ImagingStudy has no message; it is still built from the ``studies`` rows,
 and refers to the Patient and ServiceRequest posted above.
 
-A message whose patient was merged into another (ADT^A40) is left out, as
-the merged patient is. A message that cannot be mapped (a code not in its
-table, say) is SKIPPED LOUDLY: counted, listed with the field and reason,
-and surfaced in the rendered report. A sync that skipped anything never
+ADT^A40 is posted like any other message, in its place in the order: the
+surviving Patient is updated and the merged-away one is set inactive with a
+``replaced-by`` link (a bare stub when the server has none). The merged-away
+patient's own messages are posted too, exactly as ``to-fhir --post`` posts
+them, so the two paths agree; nothing is moved onto the survivor. Chains
+(A to B, then B to C) are posted edge by edge. An A40 that the server's
+current state contradicts (the merged-away Patient already replaced by
+another, or a survivor that is itself merged away), a message that cannot
+be mapped (a code not in its table, say), and a report older than the
+version the server holds are the three reasons a message is SKIPPED LOUDLY:
+counted, listed with the field and reason, and surfaced in the rendered
+report. A sync that skipped anything never
 looks like a clean one. Identifier systems come from each hospital's
 profile.
 """
@@ -37,10 +45,10 @@ from dataclasses import dataclass, field
 from ..config import HospitalRegistry, IdentifierSystems
 from ..errors import FhirMappingError, MappingError
 from ..v2fhir import message_to_bundle
-from ..v2fhir.bundle import ADT_EVENTS, MappedMessage, patient_only
+from ..v2fhir.bundle import ADT_EVENTS, MERGE_EVENT, patient_only
 from .client import HapiClient
 from .mapper import imaging_study_resource
-from .post import StaleResultError, post_mapped
+from .post import MergeRefusedError, StaleResultError, post_mapped
 
 KINDS = (
     "Patient",
@@ -64,33 +72,21 @@ class FhirSyncReport:
     updated: Counter[str] = field(default_factory=Counter)
     skipped: list[tuple[str, str, str]] = field(default_factory=list)  # (kind, key, reason)
     retired: int = 0  # Observations set to entered-in-error by a correction
-    merged_away: int = 0  # messages left out: their patient was merged into another
 
     def total(self, kind: str) -> int:
         return self.created[kind] + self.updated[kind]
-
-
-def _patient_key(mapped: MappedMessage) -> str:
-    entry = (mapped.bundle.entry or [])[0]
-    return str(entry.resource.identifier[0].value)  # type: ignore[union-attr]
 
 
 def sync_to_fhir(
     conn: sqlite3.Connection, registry: HospitalRegistry, client: HapiClient
 ) -> FhirSyncReport:
     report = FhirSyncReport()
-    merged = {
-        (row["hospital_id"], row["mrn"])
-        for row in conn.execute(
-            "SELECT hospital_id, mrn FROM patients WHERE merged_into_mrn IS NOT NULL"
-        )
-    }
     # (kind, key) -> "created" or "updated"; a key created once stays created.
     outcome: dict[tuple[str, str], str] = {}
     patient_ids: dict[tuple[str, str], str] = {}
     order_ids: dict[tuple[str, str], str] = {}
 
-    types = (*ADT_EVENTS, ORDER_TYPE, REPORT_TYPE)
+    types = (*ADT_EVENTS, MERGE_EVENT, ORDER_TYPE, REPORT_TYPE)
     marks = ", ".join("?" for _ in types)
     rows = conn.execute(
         f"SELECT id, hospital_id, message_type, raw FROM messages"  # the marks are fixed "?" only
@@ -109,14 +105,13 @@ def sync_to_fhir(
             continue
         if mapped.message_type == REPORT_TYPE and int(row["id"]) not in current:
             mapped = patient_only(mapped)
-        mrn = _patient_key(mapped)
-        if (mapped.hospital_id, mrn) in merged:
-            report.merged_away += 1
-            continue
         try:
             committed = post_mapped(client, mapped)
         except StaleResultError:
             report.skipped.append((row["message_type"], key_text, STALE))
+            continue
+        except MergeRefusedError as exc:
+            report.skipped.append((row["message_type"], key_text, str(exc.reason)))
             continue
         for done in committed:
             if done.retired:
@@ -151,7 +146,7 @@ def sync_to_fhir(
 
     for row in conn.execute("SELECT * FROM studies ORDER BY study_uid").fetchall():
         mrn = row["patient_mrn"] or ""
-        if not mrn or (row["hospital_id"], mrn) in merged:
+        if not mrn:
             report.skipped.append(("ImagingStudy", row["study_uid"], NO_SUBJECT))
             continue
         try:
@@ -201,8 +196,6 @@ def render_sync_text(report: FhirSyncReport) -> str:
         lines.append(f"  {kind}: created {report.created[kind]}, updated {report.updated[kind]}")
     if report.retired:
         lines.append(f"  Observations retired by a correction: {report.retired}")
-    if report.merged_away:
-        lines.append(f"  messages left out (patient merged into another): {report.merged_away}")
     if report.skipped:
         lines.append(f"  SKIPPED {len(report.skipped)} rows (these need attention):")
         for kind, key, reason in report.skipped:

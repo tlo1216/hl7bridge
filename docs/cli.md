@@ -224,7 +224,7 @@ the folder's ACL is whatever that location gives it.
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | Findings, rejected messages (AE or AR, or any ACK that is not `--expect`), messages that could not be mapped or explained, a Bundle the server did not fully commit, or a failed check |
+| 1 | Findings, rejected messages (AE or AR, or any ACK that is not `--expect`), messages that could not be mapped or explained, a Bundle the server did not fully commit, an ADT^A40 refused by `--post` (`to-fhir`), or a merge or create another writer got to first (send again), or a failed check |
 | 2 | Usage or configuration error: bad arguments, a bad profile, a path or database that cannot be used, a port that cannot be bound |
 | 3 | Connection error: a listener or server did not answer, or no ACK came in time |
 | 4 | Internal error: a bug in hl7bridge. Run again with `--debug` and report it |
@@ -271,6 +271,8 @@ could do that print only their class name.
 | Not UTF-8 (`to-fhir`) | `error: bad.hl7: not valid UTF-8; not converted.` (`explain` shows such bytes as U+FFFD instead) |
 | `--post` with a failure | `nothing posted: 1 message(s) could not be mapped; fix them, or pass --skip-failures to post the rest.` (exit 1) |
 | Older report after a newer one | `error: b.hl7 holds an older version of the same report as a.hl7 (OBR-22, then OBR-25); posting it after would undo the newer one. Post the messages in the order they were sent, or leave the older one out.` (nothing posted) |
+| A40 the server contradicts (`to-fhir --post`) | `error: FHIR request to Patient failed: the merged-away Patient is already replaced by another Patient; a contradicting merge is not applied` (nothing posted; exit 1; `fhir sync` skips it loudly instead) |
+| Another writer created a Patient mid-merge | `error: FHIR request to Patient failed: another writer created the Patient while the merge was posted; the merge may be only partly applied (the other Patient may already be updated, or the link missing); send again (a resend is safe)` (exit 1) |
 | Several messages, no `--out` | `error: 15 messages need a folder for their Bundles. Pass --out DIR, or --post to send them.` |
 | Bundle file exists | `error: bundles/a.json already exists; to-fhir never overwrites a file. Pass --out with a new folder.` |
 | `to-fhir --post` with no server | `error: to-fhir --post writes to a FHIR server, so it needs one named. Pass --fhir-base URL or set HL7BRIDGE_FHIR_BASE.` |

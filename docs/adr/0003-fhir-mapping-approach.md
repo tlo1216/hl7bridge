@@ -46,8 +46,7 @@ real deployment:
 - OBX segments collapse into `DiagnosticReport.conclusion` instead of
   Observation resources (`presentedForm` would be the next step).
 - No Provenance, Encounter, or practitioner resources.
-- Patients merged away (A40) are simply not posted; nothing resolves merge
-  chains onto resources yet (planned with the A40 merge work). Rows whose subject
+- Patients merged away (A40): see the Update below. Rows whose subject
   cannot be resolved are skipped loudly and reported, never dropped.
 
 ## Update, 0.4.0
@@ -86,3 +85,36 @@ real deployment:
   it. Provenance and practitioner resources are still not mapped.
 - Every field each mapper reads, and every deviation from the IG, is a row
   in `src/hl7bridge/v2fhir/spec.py`; `docs/mapping.md` is generated from it.
+
+## Update, ADT^A40 merge
+
+`to-fhir` and `fhir sync` map ADT^A40. The survivor (PID) is merged as for any
+ADT. The merged-away Patient (MRG-1) is set `active=false` with a
+`replaced-by` link to the survivor. The survivor gets no link, so a second
+merge into it rewrites nothing.
+
+- The v2-to-FHIR IG 1.0.0 has no ADT_A40 message map and no MRG-to-Patient
+  map (its only MRG map targets Account, with MRG-1 unmapped), so this is
+  hl7bridge's own reading of `Patient.link`, and the spec row says so.
+- `active` and `link` are owned elements in the post merge. `link` is
+  additive: entries on the server stay, the message's is added when no entry of
+  the same type and target is there.
+- Refused before anything is written: more than one PID or MRG, a repeated,
+  empty or null MRG-1, MRG-1.5 other than MR, MRG-1.4 different from PID-3.4,
+  an MRG-1 equal to PID-3, a merged-away Patient already replaced by another
+  Patient, a survivor that is inactive or merged away itself (a reversed merge),
+  and two entries that resolve to one resource on the server. A resend of a
+  merge already on the server passes.
+- Chains are posted edge by edge (A to B, then B to C); they are not flattened.
+- Not done: orders, reports and encounters of the merged-away Patient are not
+  moved onto the survivor, and nothing reactivates a merged-away Patient, so
+  later messages can still write onto it.
+- The offline Bundle makes the merged-away Patient a conditional create, never
+  a PUT, so a file posted as is cannot replace a Patient with a bare body.
+- `fhir sync` posts every stored message in order, the merged-away patient's
+  own messages too, so it and `to-fhir --post` write the same content.
+- The merged-away entry is a conditional create when the server has none. If
+  another writer creates it between the read and the commit, the survivor
+  update commits and the post raises "send again"; a resend is safe.
+- A bare stub has no `meta.profile` and no required US Core elements, so a
+  server that enforces US Core may refuse it.

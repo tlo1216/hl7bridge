@@ -12,7 +12,8 @@ from typing import Any
 from fhir.resources.R4B.address import Address
 from fhir.resources.R4B.contactpoint import ContactPoint
 from fhir.resources.R4B.humanname import HumanName
-from fhir.resources.R4B.patient import Patient
+from fhir.resources.R4B.patient import Patient, PatientLink
+from fhir.resources.R4B.reference import Reference
 
 from ..errors import MappingError
 from ..ingest.parser import pick_mrn_repetition
@@ -111,3 +112,41 @@ def _telecom(ctx: MapContext) -> ContactPoint | None:
         return ContactPoint(system="email", value=email, use="home") if email else None
     number = r.get("PID-13", comp=1)
     return ContactPoint(system="phone", value=number, use="home") if number else None
+
+
+def merged_patient(
+    ctx: MapContext, survivor_ref: str, survivor_mrn: str, survivor_authority: str = ""
+) -> Patient:
+    """MRG-1 to the Patient that an ADT^A40 merged away: inactive, with a
+    ``replaced-by`` link to the surviving Patient. Only the MRN is known,
+    so the post merges this into the current Patient (nothing else of it
+    changes, existing links stay) and, when the server has none, writes a
+    bare inactive stub rather than guess its demographics. The survivor
+    gets no link: a second merge into it would otherwise have to rewrite
+    the first. One PID and one MRG only: a message with repeated groups
+    would silently lose all but the first, so it is refused."""
+    r = ctx.reader
+    if not r.count("MRG"):
+        raise MappingError("MRG-1", "the message has no MRG segment")
+    if r.count("MRG") > 1 or r.count("PID") > 1:
+        raise MappingError("MRG-1", "more than one PID/MRG group; not mapped")
+    reps = r.repetitions("MRG-1")
+    if reps > 1:
+        raise MappingError("MRG-1", "more than one merged identifier; not mapped")
+    mrn = r.get("MRG-1")
+    if not mrn or mrn == '""':
+        # '""' is HL7's explicit null; it is not an identifier.
+        raise MappingError("MRG-1", "no prior patient identifier; a merge needs one")
+    id_type = r.get("MRG-1", comp=5)
+    if id_type and id_type != "MR":
+        raise MappingError("MRG-1", "identifier type (MRG-1.5) is not MR")
+    authority = r.get("MRG-1", comp=4).split("&", 1)[0]
+    if authority and survivor_authority and authority != survivor_authority:
+        raise MappingError("MRG-1", "assigning authority (MRG-1.4) differs from PID-3.4")
+    if check_key(mrn, "MRG-1") == survivor_mrn:
+        raise MappingError("MRG-1", "is the same patient identifier as PID-3")
+    return Patient(
+        identifier=[typed_identifier("MR", ctx.hospital.systems.mrn, mrn)],
+        active=False,
+        link=[PatientLink(other=Reference(reference=survivor_ref), type="replaced-by")],
+    )

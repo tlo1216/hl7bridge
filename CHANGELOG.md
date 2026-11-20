@@ -5,6 +5,44 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+
+- `to-fhir` and `fhir sync` map ADT^A40 (patient merge). The surviving
+  Patient (PID) is merged as for any ADT; the merged-away Patient (MRG-1) is
+  set inactive with a `replaced-by` link to the survivor, keeping what the
+  server already holds for it (its other links stay), or written bare when
+  the server has none. The offline Bundle makes the merged-away Patient a
+  conditional create, so a file posted as is never replaces it with a bare
+  body. The offline file does not apply the merge (the survivor entry is
+  still a conditional update and an existing merged-away Patient is left
+  untouched); use `--post` to apply one.
+  Refused: a message with more than one PID or MRG, an MRG-1 that is empty,
+  repeated, typed with anything but MR, the same as PID-3 or from another
+  assigning authority than PID-3, an A40 whose merged-away Patient is
+  already replaced by another Patient, one whose survivor is inactive or
+  merged away itself, and one whose two Patients are one resource on the
+  server. `fhir sync` posts every A40 in order, chains edge by edge, and
+  the merged-away patient's own messages too, as `to-fhir --post` does; an
+  A40 the server contradicts is skipped loudly. Orders, reports and
+  encounters of the merged-away Patient are not moved onto the survivor, and
+  nothing reactivates a merged-away Patient: later messages can still
+  write onto it. A bare merged-away Patient may fail a server that enforces
+  US Core. `listen --target fhir` still answers A40 with AR
+  `patient_read_only`.
+
+### Changed
+
+- `fhir sync` no longer leaves a merged-away patient out. Its messages and
+  its ImagingStudy rows are posted like any other patient's, so the sync
+  and `to-fhir --post` agree; the "messages left out (patient merged into
+  another)" line of the report and `FhirSyncReport.merged_away` are gone.
+- `to-fhir --post` and `fhir sync` fail an ADT^A40 the server contradicts,
+  and a Patient another writer created mid-merge, with exit 1 (findings),
+  not exit 3 (connection error). A lost create on either side of a merge
+  says the merge may be only partly applied and to send again.
+
 ## [0.5.0] - 2026-11-20
 
 ### Added

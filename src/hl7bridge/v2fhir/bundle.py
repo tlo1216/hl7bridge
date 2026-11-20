@@ -23,11 +23,16 @@ Supported messages, by MSH-9:
 | Message | Entries |
 | --- | --- |
 | ADT^A01, ADT^A04, ADT^A08 | Patient, and Encounter when PV1-19 holds a visit number |
+| ADT^A40 | Patient (survivor), Patient (merged away: inactive, linked `replaced-by`) |
 | ORM^O01 | Patient, ServiceRequest |
 | ORU^R01 | Patient, one Observation per structured OBX, DiagnosticReport |
 
-Anything else raises ``MappingError``: ADT^A40 (merges wait for the A40
-work), ACKs, and every type the hospital profile does not list.
+Offline, the merged-away Patient of an A40 is a conditional create, never a PUT:
+its body holds only the MRN, so posting the file as is must not replace a Patient
+with it. ``--post`` merges it into the current Patient instead.
+
+Anything else raises ``MappingError``: ACKs, and every type the hospital
+profile does not list.
 """
 
 from __future__ import annotations
@@ -53,11 +58,12 @@ from .fields import FieldReader
 from .jsontext import resource_dict
 from .observation import KEY_JOIN, notes_after, obx_to_observation
 from .order import accession_value, orc_obr_to_service_request
-from .patient import mrn_authority, pid_to_patient
+from .patient import merged_patient, mrn_authority, mrn_value, pid_to_patient
 from .report import is_narrative, obr_to_diagnostic_report, report_text
 
 ADT_EVENTS = ("ADT^A01", "ADT^A04", "ADT^A08")
-SUPPORTED = (*ADT_EVENTS, "ORM^O01", "ORU^R01")
+MERGE_EVENT = "ADT^A40"
+SUPPORTED = (*ADT_EVENTS, MERGE_EVENT, "ORM^O01", "ORU^R01")
 REPLACE, MERGE, CREATE = "replace", "merge", "create"
 # A fixed namespace for the uuid5 full URLs, so they are stable across runs.
 _NAMESPACE = uuid.UUID("6f1c2b0e-3a52-5a7e-9d0c-6c1f6a0b8e41")
@@ -106,11 +112,15 @@ def search_query(system: str, value: str) -> str:
     return "identifier=" + quote(f"{system}|{value}", safe=":/|")
 
 
-def _entry(resource: Resource, policy: str) -> BundleEntry:
+def _entry(resource: Resource, policy: str, *, offline_create: bool = False) -> BundleEntry:
+    """``offline_create``: a merge entry whose offline request is a
+    conditional create, not a PUT. A merged-away Patient has only its MRN,
+    so a file posted as is must never replace a Patient with that bare body;
+    a post (``fhir/post.py``) replaces the request either way."""
     ident = resource.identifier[0]  # type: ignore[attr-defined]
     kind = resource.get_resource_type()
     query = search_query(ident.system, ident.value)
-    if policy == CREATE:
+    if policy == CREATE or offline_create:
         request = BundleEntryRequest(method="POST", url=kind, ifNoneExist=query)
     else:
         request = BundleEntryRequest(method="PUT", url=f"{kind}?{query}")
@@ -162,11 +172,15 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
     with _mapping(reader, "pid_to_patient", "PID"):
         patient = pid_to_patient(ctx)
         authority = mrn_authority(ctx)
+        survivor_mrn = mrn_value(ctx)
     patient_ref = _full_url(patient)
-    is_adt = msg_type in ADT_EVENTS
+    is_adt = msg_type in ADT_EVENTS or msg_type == MERGE_EVENT
     planned: list[tuple[Resource, str]] = [(patient, MERGE if is_adt else CREATE)]
 
-    if is_adt:
+    if msg_type == MERGE_EVENT:
+        with _mapping(reader, "mrg_to_patient", "MRG"):
+            planned.append((merged_patient(ctx, patient_ref, survivor_mrn, authority), MERGE))
+    elif is_adt:
         with _mapping(reader, "pv1_to_encounter", "PV1"):
             encounter = pv1_to_encounter(ctx, patient_ref)
         if encounter is not None:
@@ -185,7 +199,13 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
                 "OBX-3/OBX-4", "two results in one message share a key (code and sub-id)"
             )
         seen.add(url)
-    bundle = Bundle(type="transaction", entry=[_entry(r, p) for r, p in planned])
+    bundle = Bundle(
+        type="transaction",
+        entry=[
+            _entry(r, p, offline_create=msg_type == MERGE_EVENT and n == 1)
+            for n, (r, p) in enumerate(planned)
+        ],
+    )
     report = planned[-1][0] if msg_type == "ORU^R01" else None
     return MappedMessage(
         bundle=bundle,
@@ -264,6 +284,7 @@ __all__ = [
     "ADT_EVENTS",
     "CREATE",
     "MERGE",
+    "MERGE_EVENT",
     "REPLACE",
     "SUPPORTED",
     "MappedMessage",
