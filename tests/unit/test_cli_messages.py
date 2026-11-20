@@ -303,6 +303,24 @@ def test_replay_from_the_store_is_all_duplicates_on_the_same_store(tmp_path, cap
     conn.close()
 
 
+def test_replay_from_the_store_sends_the_exact_stored_bytes(tmp_path, capsys):
+    db = tmp_path / "src.db"
+    _store_with_rejects(db)
+    target = tmp_path / "target.db"
+    with _Listener(target) as listener:
+        rc = cli.main(["replay", "--db", str(db), "--from", "store", "--port", str(listener.port)])
+    assert rc == EXIT_OK
+    capsys.readouterr()
+
+    def raws(path: Path) -> list[str]:
+        conn = connect(path)
+        rows = [r["raw"] for r in conn.execute("SELECT raw FROM messages ORDER BY raw")]
+        conn.close()
+        return rows
+
+    assert raws(target) == raws(db)
+
+
 def test_replay_failures_name_the_row_not_the_message(tmp_path, capsys):
     db = tmp_path / "src.db"
     _store_with_rejects(db)

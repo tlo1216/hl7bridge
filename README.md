@@ -3,10 +3,13 @@
 A tested HL7 v2, DICOM and FHIR integration toolkit for radiology work. It
 runs an MLLP listener that gives every message one explicit ACK, reconciles
 orders against imaging studies, tracks delivery of the reports you send,
-reports turnaround times, lints messages against per-hospital profiles, and
-syncs everything to a FHIR server. A deterministic generator makes a full
-synthetic day of traffic with a labeled list of seeded defects, so every
-result can be checked against known answers.
+reports turnaround times, and lints messages against per-hospital
+profiles. It explains a message field by field, sends and replays messages
+over MLLP, and maps ADT, orders and results to FHIR (Patient, Encounter,
+ServiceRequest, DiagnosticReport and one Observation per result), offline
+as transaction Bundles or straight to a server. A deterministic generator
+makes a full synthetic day of traffic with a labeled list of seeded
+defects, so every result can be checked against known answers.
 
 > **Synthetic data only.** Everything in this repository is made up:
 > patient names come from pools like `ZZZTEST ALPHA`, MRNs look like
@@ -134,8 +137,9 @@ not name and never starts Docker itself.
 
 ## Your own folder: init, doctor, lint, send
 
-`init` copies the bundled profiles and twelve hand-made sample messages
-(one per type and dialect, plus two broken ones) into `./hl7bridge`. Every
+`init` copies the bundled profiles and fifteen hand-made sample messages
+(one per type and dialect, an inpatient visit and its discharge, a result
+with structured values, plus two broken ones) into `./hl7bridge`. Every
 command then finds those profiles on its own:
 
 <!-- readme-test -->
@@ -166,6 +170,50 @@ hl7bridge send hl7bridge/samples
 For each message that is not accepted, `send` shows the ACK code in words,
 MSA-3, the quarantine reason and the command to run next. Stop the
 listener with Ctrl+C.
+
+## Read, convert and resend messages
+
+<!-- readme-test -->
+```
+hl7bridge explain hl7bridge/samples/14_hospa_oru_r01_structured.hl7
+hl7bridge to-fhir hl7bridge/samples/14_hospa_oru_r01_structured.hl7
+```
+
+`explain` prints one line per field with its position and name
+(`PID-5 Patient name: ZZZSAMPLE^ONE`), splits components out, decodes
+coded fields (`OBR-25 Result status: F = final`) and hides empty fields
+unless `--all`. It reads a file, a folder or `-` for stdin, and takes
+`--json`.
+
+`to-fhir` turns each message into a FHIR transaction Bundle and prints it;
+it talks to no server. Every entry is a conditional update keyed on an
+identifier, so posting the same message twice changes nothing.
+`--out DIR` writes one Bundle per message (never over an existing file),
+and `--post --fhir-base URL` posts them in order and stops at the first one
+the server does not fully commit: the answer must be a
+`transaction-response` with every entry at 200 or 201, not only a 2xx
+status. What each field maps to, which page of the HL7 v2-to-FHIR guide it
+follows and where hl7bridge differs is in [docs/mapping.md](docs/mapping.md),
+which is generated from the code. A code that is not in its table is
+refused with the field position; it is never guessed.
+
+`send` also reads stdin (`-`), sends a set several times with `--repeat`,
+paces itself with `--rate` (messages per second), and with `--expect AE`
+checks that a broken message is refused. `replay` resends what the store
+holds, oldest first and byte for byte:
+
+```
+hl7bridge replay --dry-run
+hl7bridge replay --only-reason unexpected_message_type --port 2575
+hl7bridge replay --from store --since 2026-10-07T00:00:00+00:00 --rate 5
+```
+
+By default it takes the quarantine (bytes that arrived outside MLLP
+framing are left out), so a message refused under an old profile can be
+sent again after the profile is fixed. It opens the store read-only and
+never changes a stored message: a retry carries the same MSH-7 and MSH-10.
+Neither `send` nor `replay` prints a value from the message; a host that is
+not loopback gets a warning, since MLLP has no encryption.
 
 ## Step by step on a synthetic day
 
@@ -225,14 +273,6 @@ wheel is built with the build tools from the hashed build lock
 (`.github/requirements/build.txt`), and its dependencies are installed from
 `uv.lock` with hashes.
 
-### The bash demo script (deprecated)
-
-`scripts/demo.sh` now only runs `hl7bridge demo` with the arguments you
-give it, and goes away in 0.4.0. It no longer starts a HAPI container and
-no longer deletes anything. For the demo with HAPI, use the compose demo
-above. If an older version of the script left a `data/demo` folder, delete
-it by hand.
-
 ## Architecture: the boundaries data crosses
 
 Most integration defects are born at boundaries, so the diagram shows those
@@ -275,7 +315,8 @@ flowchart LR
     DB --> REC
     DB --> TRK
     DB --> MAP
-    MAP -- "Patient, ServiceRequest,<br/>DiagnosticReport, ImagingStudy<br/>(PHI: BAA-covered target in production)" --> HAPI
+    MAP -- "Patient, Encounter, ServiceRequest,<br/>DiagnosticReport, ImagingStudy<br/>(PHI: BAA-covered target in production)" --> HAPI
+    V2F["to-fhir<br/>message to transaction Bundle"] -- "plus Observation per OBX" --> HAPI
 ```
 
 Where PHI does and does not go:
@@ -285,7 +326,7 @@ Where PHI does and does not go:
 | Hospital to MLLP listener | Yes | VPN or TLS in any real deployment |
 | Store (SQLite) and quarantine | Yes | Quarantine keeps raw bytes for diagnosis |
 | ACKs back to hospitals | No new PHI | The sender's own routing fields (MSH-3, MSH-4, MSH-10) echoed back, the ACK code, and MSA-3 text that is a reason code plus a field name (`bad_timestamp: PID-7`), never the rejected value |
-| Reports on stdout | Yes | Reports are the product: they name accessions, MRNs and study UIDs. `send` lists message file names and the receiver's MSA-3 and ERR text here too, with control characters replaced by `?` and the length capped. `--json` prints only the fields each command lists by name |
+| Reports on stdout | Yes | Reports are the product: they name accessions, MRNs and study UIDs. `explain` prints the message itself and `to-fhir` prints Bundles that hold all of it. `send` lists message file names and the receiver's MSA-3 and ERR text here too, with control characters replaced by `?` and the length capped; `replay` names store row ids only. `--json` prints only the fields each command lists by name |
 | Log output and error text | **Never** | Store row ids, hospital ids, configured message types, counts and reason codes. MSH-10 is not logged, not even as a hash. HTTP client records are rebuilt from safe fields (method, URL with no query or user info, version, status); pydicom's own messages are captured and replaced; the CLI prints one sanitized line per error and no chained causes, and `--debug` adds only stack frames (code, not data). Enforced by `tests/unit/test_phi_logging.py` |
 | FHIR server | Yes | BAA-covered, access-controlled target in production |
 
@@ -295,7 +336,10 @@ bodies that echo the identifier, 412, transport errors, timeouts), a real
 HTTP server whose reason phrase and `Location` header echo the identifier,
 invalid DICOM values, `fhir probe`, hostile MSH-10 and MSH-9 values, parse
 errors, internal errors, ACK text, a whole `demo` run at DEBUG, `send`
-failures, and the CLI's own logging and error handling. Error text is checked as the full traceback. It shows paths you
+failures, `to-fhir` over the whole corpus and its `--post` failures,
+`explain`, `replay`, sync rows skipped for a code that is not in its table,
+and the CLI's own logging and error handling. Mapping errors carry a field
+position and a fixed reason; the error class has no argument for a value. Error text is checked as the full traceback. It shows paths you
 passed in, never values read from a message, a DICOM file name or a server
 response. A `--fhir-base` (or `HL7BRIDGE_FHIR_BASE`) must be an http or
 https URL with a host and no query; anything else is refused with exit 2
@@ -358,6 +402,10 @@ tat:
   exam_to_final_target_hours_by_priority: {S: 1}
 lint:
   disabled_rules: []
+fhir:                                # optional; these are the defaults
+  identifier_systems:
+    mrn: urn:hl7bridge:hospa:mrn
+    accession: urn:hl7bridge:hospa:accession
 ```
 
 Environment variables:
@@ -366,7 +414,7 @@ Environment variables:
 | --- | --- | --- |
 | `HL7BRIDGE_CONFIG` | every command that reads profiles | Profile folder when `--config` is not given |
 | `HL7BRIDGE_DB` | every command that reads the store | Database file when `--db` is not given. `listen` and `load` create it; the report commands and `fhir sync` need it to exist |
-| `HL7BRIDGE_FHIR_BASE` | `fhir sync`, `fhir probe`, `doctor`, FHIR system tests (not `demo`) | FHIR base URL when `--fhir-base` is not given. `fhir sync` needs one of the two; `probe` and `doctor` fall back to `http://localhost:8080/fhir` |
+| `HL7BRIDGE_FHIR_BASE` | `fhir sync`, `to-fhir --post`, `fhir probe`, `doctor`, FHIR system tests (not `demo`) | FHIR base URL when `--fhir-base` is not given. `fhir sync` and `to-fhir --post` need one of the two; `probe` and `doctor` fall back to `http://localhost:8080/fhir` |
 | `HL7BRIDGE_FHIR_APIKEY` | FHIR commands | Sent as an `apikey` header, for servers that expect one |
 | `HL7BRIDGE_FHIR_TOKEN` | FHIR commands | Sent as `Authorization: Bearer ...` |
 | `HL7BRIDGE_FHIR_REQUIRED` | FHIR system tests | `1` turns a missing server into a failure instead of a skip |
@@ -399,6 +447,7 @@ uv run mypy
 uv run python tools/check_references.py
 uv run python tools/check_licenses.py
 uv run python tools/check_ports.py
+uv run python tools/gen_mapping_doc.py --check
 ```
 
 Without uv, `python -m pip install -e . pytest ruff mypy types-pyyaml`
@@ -424,13 +473,13 @@ reports: see [SECURITY.md](SECURITY.md). Changes: see
 
 ```
 Dockerfile  compose.demo.yaml  compose.hapi-port.yaml
-docs/                    # cli, profiles, principles, testing, ADRs
-scripts/demo.sh          # deprecated: runs hl7bridge demo
+docs/                    # cli, mapping, profiles, principles, testing, ADRs
 src/hl7bridge/
   cli.py  config.py  errors.py  hl7time.py  logsafety.py
   demo.py    # hl7bridge demo
   demofiles.py  # the demo's own files, and the one function that deletes
   doctor.py  scaffold.py (init)  jsonout.py  msgfiles.py
+  explain.py # hl7bridge explain
   profiles/  # bundled hospital profiles (in the wheel)
   samples/   # bundled sample messages (in the wheel)
   ingest/    # MLLP, parser, ACK, pipeline, loaders
@@ -440,9 +489,10 @@ src/hl7bridge/
   acks/      # report delivery and ACK tracking
   tat/       # turnaround-time engine and report
   lint/      # rule catalog and runner
-  fhir/      # mapper, client, sync
-tests/unit/  tests/system/
-tools/       # check_references.py  check_licenses.py  check_ports.py
+  fhir/      # store-row mapper, client, sync
+  v2fhir/    # message to FHIR: segment mappers, code tables, mapping spec
+tests/unit/  tests/system/  tests/golden/ (explain and to-fhir output)
+tools/       # check_references.py  check_licenses.py  check_ports.py  gen_mapping_doc.py
 ```
 
 ## License

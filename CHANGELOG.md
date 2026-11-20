@@ -5,6 +5,103 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
+## [0.4.0] - Unreleased
+
+### Breaking changes
+
+- The command names renamed in 0.3.0 are gone: `serve`, `fhir-sync`,
+  `fhir-probe`, `load-studies` and `load-outbound` now exit 2 as unknown
+  commands. Use `listen`, `fhir sync`, `fhir probe`, `load studies` and
+  `load outbound`. `scripts/demo.sh` is removed; use `hl7bridge demo`.
+- The database schema is version 3 (a visits table, the report's own
+  OBR-4 code and OBR-7 time, and a reference to the stored message on
+  every report row). There is still no migration: a version 2 database
+  gives the "old schema" message, and demo databases can be made again.
+- `fhir sync` refuses codes it cannot map instead of defaulting them. A
+  patient whose sex code is not in table 0001 used to be posted with
+  gender `unknown`; it is now skipped and listed with the field and the
+  reason, and its rows are skipped as having no subject.
+- DiagnosticReport from `fhir sync` follows the IG for its times and code:
+  `effectiveDateTime` is OBR-7 (was OBR-22), `issued` is OBR-22 (was the
+  time hl7bridge received the message), and the code is the ORU's own
+  OBR-4 (was the order's). It also gains a plain-text `presentedForm`.
+  ServiceRequest gains the placer order number (ORC-2, else OBR-2) as a
+  second identifier with type PLAC; the store fills it from OBR-2 when
+  ORC-2 is empty.
+
+### Added
+
+- `hl7bridge explain`: a message one field per line, with field names for
+  the common segments, components split out, repetitions numbered, coded
+  fields decoded (`OBR-25 Result status: F = final`) and empty fields
+  hidden unless `--all`. Reads a file, a folder or stdin; `--json`.
+- `hl7bridge to-fhir`: each message becomes a FHIR transaction Bundle of
+  conditional updates, printed as JSON with no server involved, written
+  one file per message with `--out DIR` (never over an existing file), or
+  posted in order with `--post`. A post counts as committed only when the
+  answer is a `transaction-response` with one entry per request and every
+  entry at 200 or 201; the first Bundle that falls short stops the run.
+- `hl7bridge.v2fhir`: pure functions from a parsed message to FHIR R4B
+  resources. PID to Patient (identifier, name, birth date, sex, address,
+  telecom), PV1 to Encounter for ADT A01, A04 and A08 (one mapping; an A08
+  updates the same Encounter), ORC and OBR to ServiceRequest, OBR to
+  DiagnosticReport, and every OBX to an Observation linked from
+  `DiagnosticReport.result`: NM to `valueQuantity` (UCUM only when OBX-6
+  says so), ST, TX and FT to `valueString`, CE and CWE to
+  `valueCodeableConcept`, DT, DTM and TS to `valueDateTime`, OBX-7 to the
+  reference range text, OBX-8 to interpretation, OBX-11 to status, OBX-14
+  to the effective time, and the NTE after an OBX to its note. Each result
+  is keyed `<accession>/<OBX-3.1>/<OBX-4>`, with `set-<OBX-1>` when OBX-4
+  is empty, so a resend updates in place. Codes go through tables that
+  follow the HL7 v2-to-FHIR IG's vocabulary maps; a code outside a table,
+  an OBX-2 hl7bridge does not map, or an NM value that is not a plain
+  number is refused with the field position and never guessed.
+- The mapping spec (`src/hl7bridge/v2fhir/spec.py`): every field each
+  mapper reads, the FHIR element it writes, the IG page it follows and
+  where it differs. `docs/mapping.md` is generated from it
+  (`tools/gen_mapping_doc.py`), and tests fail when the two differ, when a
+  mapper reads a field with no row, or when a row is never read.
+- Visits: the store keeps PV1 from ADT A01, A04 and A08 when PV1-19 holds
+  a visit number, and `fhir sync` posts them as Encounters.
+- `hl7bridge replay`: resend quarantined messages (or, with `--from
+  store`, stored ones) oldest first and byte for byte, with
+  `--only-reason`, `--since`, `--hospital`, `--limit` and `--dry-run`. It
+  opens the store read-only and leaves out bytes received outside MLLP
+  framing.
+- `send` reads stdin (`-`) and takes `--repeat N` (the same bytes again,
+  never restamped), `--rate` (messages per second) and `--expect CODE`
+  (exit 1 when any ACK differs). `send` and `replay` warn when the host
+  is not loopback.
+- Profile block `fhir.identifier_systems` (`mrn`, `accession`, `placer`,
+  `visit`, `observation`), validated strictly; the defaults are the
+  `urn:hl7bridge:<hospital>:...` systems used before.
+- Three samples: an inpatient A01 with a visit number, its A08 discharge,
+  and an ORU with numeric, coded and text results and a note. HOSPC lists
+  ADT^A01.
+- `MappingError`, whose text is built only from a field position and a
+  fixed reason; it has no argument for a value.
+- CI checks `docs/mapping.md` against the spec, runs `explain` and
+  `to-fhir` from the installed wheel, and runs the new `to-fhir` HAPI
+  system test beside the sync one.
+
+### Changed
+
+- The demo's threat model is written down in `demofiles.py`, the README
+  and `docs/cli.md`: what deletion guarantees, and that the races left
+  need write access to the user's own private temp folder. A test checks
+  that the folder comes from `mkdtemp` and is mode 0700 on POSIX.
+- `send_messages` takes `interval_s`, the pause between an ACK and the
+  next send.
+
+### Not changed, on purpose
+
+- The pip install CI job still resolves the wheel's runtime dependencies
+  unhashed, the way a pip user gets them; see `docs/testing.md`.
+- Ingest identity stays hospital and MSH-10. Replay and `--repeat` send
+  stored bytes unchanged, so they stay correct when identity widens to
+  MSH-3 and MSH-4 with a body hash; the new `message_id` columns are the
+  reference later features join on.
+
 ## [0.3.0] - Unreleased
 
 ### Breaking changes

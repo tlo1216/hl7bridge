@@ -22,9 +22,9 @@ Every command prints the folder it used on stderr (`using profiles: ...`).
 | --- | --- |
 | `hospa.yaml` | v2.3, accession in OBR-3, local time with no UTC offset |
 | `hospb.yaml` | v2.4, accession in ORC-3, a Z-segment on orders, local time |
-| `hospc.yaml` | v2.5, accession in OBR-3 (ORC-3 filled too), explicit UTC offsets, ACKs for outbound reports |
+| `hospc.yaml` | v2.5, accession in OBR-3 (ORC-3 filled too), explicit UTC offsets, ACKs for outbound reports, inpatient visits (ADT^A01) |
 
-All three are synthetic. `hl7bridge init` copies them, with twelve sample
+All three are synthetic. `hl7bridge init` copies them, with fifteen sample
 messages, into a folder you can edit.
 
 ## Commands

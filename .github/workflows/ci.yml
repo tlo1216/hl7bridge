@@ -51,6 +51,8 @@ jobs:
         run: uv run python tools/check_licenses.py
       - name: Published ports are bound to 127.0.0.1
         run: uv run python tools/check_ports.py
+      - name: docs/mapping.md matches the mapping spec
+        run: uv run python tools/gen_mapping_doc.py --check
 
   tests:
     name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
@@ -101,7 +103,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # pip, build and hatchling come from a hashed lock file.
+          # pip, build and hatchling come from a hashed lock file. The wheel's
+          # runtime dependencies are resolved the way a pip user gets them,
+          # unhashed, on purpose: this job checks that the declared ranges
+          # still install and work, which the locked jobs cannot see. The job
+          # holds no secrets and a read-only token. A hashed requirements file
+          # for people who pin a release comes with the PyPI release work.
           python -m pip install --require-hashes -r .github/requirements/build.txt
           python -m build --wheel --no-isolation --outdir dist
           python -m venv "$RUNNER_TEMP/venv"
@@ -115,6 +122,9 @@ jobs:
           "$BIN/hl7bridge" profile check
           "$BIN/hl7bridge" doctor
           "$BIN/hl7bridge" demo
+          "$BIN/hl7bridge" explain hl7bridge/samples/14_hospa_oru_r01_structured.hl7 > explain.txt
+          "$BIN/hl7bridge" to-fhir hl7bridge/samples/14_hospa_oru_r01_structured.hl7 > bundle.json
+          "$BIN/python" -c "import json; b = json.load(open('bundle.json')); assert b['type'] == 'transaction', b['type']"
           "$BIN/hl7bridge" synth --out synth
           # The corpus holds seeded defects, so lint exits 1 by design. The
           # expected file count is read from the corpus, not hard-coded.
@@ -212,6 +222,6 @@ jobs:
         env:
           HL7BRIDGE_FHIR_BASE: http://127.0.0.1:8080/fhir
           HL7BRIDGE_FHIR_REQUIRED: "1"
-        run: uv run pytest tests/system/test_fhir_hapi.py -m fhir -q
+        run: uv run pytest tests/system/test_fhir_hapi.py tests/system/test_to_fhir_hapi.py -m fhir -q
       - name: hl7bridge demo against HAPI
         run: uv run hl7bridge demo --fhir-base http://127.0.0.1:8080/fhir

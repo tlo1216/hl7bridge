@@ -26,9 +26,12 @@ environment.
 | `test_acks.py` | Report delivery tracking outcomes |
 | `test_tat.py` | Turnaround-time statistics against hand-computed values, DST intervals, full precision |
 | `test_lint.py` | Every lint rule fires on a bad message and stays silent on a good one; path keys and line endings |
-| `test_fhir_mapper.py`, `test_fhir_client.py` | FHIR mapping and the conditional-update client against a mock transport |
+| `test_fhir_mapper.py`, `test_fhir_client.py` | Store-row FHIR mapping (shared code tables, profile identifier systems, Encounter) and the conditional-update client against a mock transport |
+| `test_v2fhir.py` | Message to FHIR: every sample against its golden Bundle in `tests/golden/to-fhir`; every refusal names the field and never the value (a canary is planted in each refused field); the result key (`<accession>/<OBX-3.1>/<OBX-4 or set-N>`) and its refusals; every OBX-2 value type; each code table against the IG maps; Encounter from PV1 and A08 updating the same key; and the spec drift checks: `docs/mapping.md` equals the spec, no mapper reads a field the spec does not list, every spec row is read by a fixture, and no mapper module reads the message except through the field reader |
+| `test_fhir_sync_mapping.py` | `fhir sync` posts stored visits as Encounters and skips (and reports) rows whose code is not in its table; `fhir sync` and `to-fhir` write the same keys and codes; the transaction check accepts only a `transaction-response` with one entry per request, each 200 or 201 |
+| `test_cli_messages.py` | `explain` against golden files in `tests/golden/explain`, escapes, control characters and refusals; `send` from stdin, `--repeat` (same bytes, one stored row), `--rate` (pauses between messages only), `--expect`, the loopback warning; `replay` (dry run, read-only store, exact bytes after a profile fix, duplicates on the same store, filters, usage errors, never creating a database); `to-fhir` (stdout, `--out` never overwriting, batch files, `--post` in order and stopping at the first Bundle not committed, a named server required) |
 | `test_phi_logging.py` | No PHI in logs or error text, on every path (below) |
-| `test_cli.py` | CLI behavior: grouped help and examples for every command, old names, defaults for profiles and database, exit codes, the exact text of every error message in `docs/cli.md`, the listener's bind errors and banner, `send` (AE details, LF note, no ACK in time, refused), `--json`, `init`, `doctor`, `profile show` and `check` |
+| `test_cli.py` | CLI behavior: grouped help and examples for every command, the 0.3 names gone, defaults for profiles and database, exit codes, the exact text of every error message in `docs/cli.md`, the listener's bind errors and banner, `send` (AE details, LF note, no ACK in time, refused), `--json`, `init`, `doctor`, `profile show` and `check` |
 | `test_demo.py` | `hl7bridge demo` end to end, where it writes, and `remove_owned`, the only code that deletes: a named `--data-dir` is never deleted from and a non-empty one is refused; files and folders are created exclusively; a foreign file, a replaced file, a hard link to another file, a replaced folder, a folder or file swapped for a symlink or junction (before the run and right before the step that would delete through it), and a root swapped for another folder or a link are all left alone; the listener binds 127.0.0.1; `HL7BRIDGE_FHIR_BASE` never makes the demo write to FHIR; credentials in `--fhir-base` are never printed |
 | `test_packaging_files.py` | Bundled samples get the expected ACKs and lint findings; every profile key is in `docs/profiles.md`; Dockerfile pins, user, health check and labels; compose services, volumes and loopback ports; `tools/check_ports.py` and `tools/check_licenses.py` on good and bad input |
 | `test_check_references.py` | The reference check's matching works on stand-in words and the tool does not match itself; with `HL7BRIDGE_REFCHECK_SAMPLES` set, every real rule catches a local sample |
@@ -55,9 +58,11 @@ report phrase in the synthetic store, plus hand-made canaries planted in:
   write fails too.
 
 It runs ingest over the whole corpus, both loaders, a full FHIR sync through
-a mock transport (creates, updates and skipped rows), each FHIR failure,
-`fhir probe`, and the CLI through `main()` with the real logging setup and
-error boundary. Error text is checked as the full formatted traceback, so a
+a mock transport (creates, updates and skipped rows, including a row skipped
+for a code outside its table), each FHIR failure, `fhir probe`, `to-fhir`
+over the whole corpus and each `--post` failure, `explain` (values on stdout
+only), `replay --dry-run`, and the CLI through `main()` with the real
+logging setup and error boundary. Error text is checked as the full formatted traceback, so a
 chained cause cannot hide a value. Each test also asserts that logging
 happened, so none can pass by being silent. An autouse fixture removes the
 hl7bridge filters from the HTTP client loggers before each test, so no test
@@ -70,8 +75,26 @@ passes on a filter an earlier test left behind.
 | `test_mllp_end_to_end.py` | The generated corpus over real sockets matches the manifest, TAT outcomes included |
 | `test_lint_corpus.py` | Lint findings over the whole corpus equal the seeded defects as an exact set |
 | `test_fhir_hapi.py` | Against a live HAPI server: post everything twice, prove idempotency and corrected-report update in place |
+| `test_to_fhir_hapi.py` | Against a live HAPI server: every sample Bundle posted twice; every entry committed, the second round all 200 with counts unchanged; the structured report links its three Observations; the A08 left the Encounter finished |
 | `test_readme.py` | The README blocks marked `readme-test` run as written in a fresh folder, and every `hl7bridge` command in the README and `docs/cli.md` parses |
 
 The HAPI tests skip unless `HL7BRIDGE_FHIR_BASE` points at a server. CI
 starts HAPI as a service container and sets `HL7BRIDGE_FHIR_REQUIRED=1`, so
 a missing server fails the job instead of skipping.
+
+## Golden files
+
+`tests/golden/to-fhir` holds the Bundle for each bundled sample that maps,
+and `tests/golden/explain` the `explain` text for each sample. After an
+intended change, run the two tests once with `HL7BRIDGE_UPDATE_GOLDEN=1`
+and read the diff before committing it.
+
+## The wheel install job
+
+The `pip-path` CI job builds the wheel with build tools from a hashed lock
+file, then installs it with plain pip, so the runtime dependencies resolve
+the way a pip user gets them, unhashed. That is on purpose: it checks that
+the version ranges in `pyproject.toml` still install and work, which the
+locked jobs cannot see. The job holds no secrets and a read-only token. A
+hashed requirements file for people who pin a release belongs with the
+PyPI release.

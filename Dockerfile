@@ -36,7 +36,7 @@ RUN uv build --wheel --out-dir /dist \
 
 # -- runtime: the wheel and its locked dependencies, nothing else ---------------
 FROM ${PYTHON_IMAGE} AS runtime
-ARG VERSION=0.3.0.dev0
+ARG VERSION=0.4.0.dev0
 LABEL org.opencontainers.image.title="hl7bridge" \
       org.opencontainers.image.description="HL7 v2, DICOM and FHIR integration toolkit. Synthetic data only." \
       org.opencontainers.image.source="https://github.com/tlo1216/hl7bridge" \

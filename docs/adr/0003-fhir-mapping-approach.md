@@ -49,3 +49,28 @@ real deployment:
 - Patients merged away (A40) are simply not posted; nothing resolves merge
   chains onto resources yet (planned with the A40 merge work). Rows whose subject
   cannot be resolved are skipped loudly and reported, never dropped.
+
+## Update, 0.4.0
+
+- The message path (`hl7bridge.v2fhir`, used by `to-fhir`) maps every OBX
+  to an Observation and posts one transaction Bundle per message, with
+  conditional-update entries and `urn:uuid` references. A transaction fits
+  there because one message is one unit: either all of it is committed or
+  none of it is, and `to-fhir --post` checks the answer entry by entry.
+  `fhir sync` keeps the sequential upserts of decision 4.
+- Both paths share the code tables (sex, patient class, report status,
+  order status) and the identifier keys, so they update the same
+  resources. Status maps follow the IG's vocabulary maps; a code outside a
+  table is refused. A sex code outside table 0001 used to become
+  `unknown` on the store path and is now refused, with the row skipped
+  and reported.
+- Identifier systems come from the hospital profile
+  (`fhir.identifier_systems`); the URNs above stay the defaults.
+- DiagnosticReport now carries `presentedForm` (the report text as
+  plain text) beside `conclusion`, takes its code from its own OBR-4, its
+  effective time from OBR-7 and its issued time from OBR-22, as the IG
+  does. Before, `issued` was the time hl7bridge received the message.
+- Encounter is mapped from PV1 when PV1-19 holds a visit number, keyed on
+  it. Provenance and practitioner resources are still not mapped.
+- Every field each mapper reads, and every deviation from the IG, is a row
+  in `src/hl7bridge/v2fhir/spec.py`; `docs/mapping.md` is generated from it.
