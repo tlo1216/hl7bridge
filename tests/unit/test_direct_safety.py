@@ -8,11 +8,13 @@ from __future__ import annotations
 import pytest
 
 from hl7bridge.config import HospitalRegistry
-from hl7bridge.ingest.ack import AckDecision, build_ack
+from hl7bridge.errors import UsageError
+from hl7bridge.fhir.client import HapiClient
+from hl7bridge.fromfhir import Renderer, escape, patient_messages, pick_mrn
 from hl7bridge.v2fhir import hooks
 
 from ..fakefhir import FakeFhir
-from .test_direct import NOW, PROFILE, Lab, _patient
+from .test_direct import BASE, NOW, PROFILE, Lab, _patient
 
 RUN_TAG = {"system": "urn:test:tag/lab-run", "code": "run-a"}
 
@@ -48,35 +50,59 @@ def _segments(ack: str) -> list[list[str]]:
     return [s.split("|") for s in ack.split("\r") if s]
 
 
-# -- ACK escaping --------------------------------------------------------------------------
+# -- from-fhir ------------------------------------------------------------------------------
 
 
-def test_build_ack_escapes_every_echoed_value():
-    ack = build_ack(
-        decision=AckDecision("AR", "parse_error", ack_text="MSH-3"),
-        original_control_id="C|1\rMSA|AA|X",
-        ack_control_id="B1",
-        sending_app="HUB",
-        sending_facility="HUB",
-        receiving_app="APP\rMSA|AA|X",
-        receiving_facility="F^A~C&D\\E\x1c",
-        trigger_event="R01",
-        version="2.5\x0b",
-        now=NOW,
+def test_escape_drops_every_control_character():
+    assert escape("A\x0bB\x1cC\tD\rE\nF") == "A B C D E F"
+
+
+def test_a_birth_date_that_is_not_a_fhir_date_is_refused(registry):
+    r = Renderer(registry.by_id["LAB"], NOW)
+    patient = _patient(birthDate="1980-01-01\rOBX|9|ST|X||INJECTED")
+    with pytest.raises(UsageError, match="birthDate"):
+        r.pid(patient, pick_mrn(patient))
+
+
+def test_from_fhir_takes_only_a_known_mrn_system(registry):
+    server = FakeFhir()
+    server._write(
+        "Patient",
+        "p7",
+        {"resourceType": "Patient", "identifier": [{"system": "urn:x", "value": "1"}]},
     )
-    segments = _segments(ack)
-    assert [s[0] for s in segments] == ["MSH", "MSA"]
-    msh, msa = segments
-    assert len(msh) == 12 and msh[4] == "APPMSA\\F\\AA\\F\\X"
-    assert msh[5] == "F\\S\\A\\R\\C\\T\\D\\E\\E"
-    assert msh[11] == "2.5"
-    assert msa[:3] == ["MSA", "AR", "C\\F\\1MSA\\F\\AA\\F\\X"] and len(msa) == 4
+    with (
+        HapiClient(BASE, transport=server.transport()) as client,
+        pytest.raises(UsageError, match="MRN system"),
+    ):
+        patient_messages(client, "p7", registry.by_id["LAB"], NOW)
 
 
-def test_an_escaped_cr_in_msh3_cannot_forge_an_aa(lab):
-    text = lab.oru().replace("|FROMFHIR|", "|APP\\X0D\\MSA\\F\\AA\\F\\X|", 1)
-    text = text.replace("|T|2.5.1", "|P|2.5.1", 1)
-    ack = lab.handler.handle_bytes(text.encode())
-    segments = _segments(ack)
-    assert [s[0] for s in segments] == ["MSH", "MSA"]
-    assert segments[1][1] == "AR"
+def test_from_fhir_skips_an_mr_identifier_under_another_system(registry):
+    server = FakeFhir()
+    patient = _patient()
+    stranger = {**patient["identifier"][0], "system": "urn:x", "value": "OTHER1"}
+    patient["identifier"] = [stranger, {"system": "urn:test:mrn", "value": "MRN001"}]
+    server._write("Patient", "p8", patient)
+    with HapiClient(BASE, transport=server.transport()) as client:
+        files, mrn = patient_messages(client, "p8", registry.by_id["LAB"], NOW)
+    assert (mrn.value, mrn.typed_mr) == ("MRN001", False)
+    assert "|MRN001^^^^MR|" in files["04_oru_r01.hl7"]
+
+
+def test_the_profile_mrn_system_gets_an_empty_authority(registry):
+    r = Renderer(registry.by_id["LAB"], NOW)
+    assert "|MRN001^^^^MR|" in r.pid(_patient(), pick_mrn(_patient()))
+
+
+def test_two_patients_in_one_second_get_their_own_ids(registry):
+    server = FakeFhir()
+    server._write("Patient", "p1", _patient())
+    server._write("Patient", "p2", _patient("MRN002"))
+    with HapiClient(BASE, transport=server.transport()) as client:
+        one, _ = patient_messages(client, "p1", registry.by_id["LAB"], NOW)
+        two, _ = patient_messages(client, "p2", registry.by_id["LAB"], NOW)
+    for name in one:
+        msh_one, msh_two = one[name].split("|")[9], two[name].split("|")[9]
+        assert msh_one != msh_two and len(msh_one) <= 20
+    assert one["03_orm_o01.hl7"].split("ORC|NW|")[1] != two["03_orm_o01.hl7"].split("ORC|NW|")[1]

@@ -7,15 +7,27 @@ patients (Synthea, say) have no v2 messages and their ids differ on every
 deployment. ``--report ID`` instead renders a basic ORU^R01 from a
 DiagnosticReport and its Observations.
 
-The MRN is the identifier typed MR (v2 table 0203), else the first
-identifier; ``pick_mrn`` says which, and the command prints it. Every
-value from the server is HL7-escaped, so a ``|`` or ``^`` in a name cannot
-shift a field. MSH-11 is T (training): the direct listener refuses P.
-Codes in the sample order and result are local (``99HUB``), not LOINC.
+The MRN comes only from an identifier under the profile's MRN system or
+a system that ``fhir.identifier_systems.mrn_by_authority`` maps: the one
+typed MR (v2 table 0203) among those, else the first of them; ``pick_mrn``
+says which, and the command prints it. PID-3.4 is the mapped authority,
+or empty for the profile's own MRN system, so the listener looks the MRN
+up under the system it came from and never under another. Every value
+from the server is HL7-escaped and loses its control characters, so a
+``|``, ``^`` or CR in a name cannot shift a field or start a segment, and
+``birthDate`` must be a FHIR date. MSH-10, the accession and the visit
+number carry a short hash of the resource id, so two patients rendered in
+the same second do not share them. MSH-11 is T (training): the direct
+listener refuses P. Codes in the sample order and result are local
+(``99HUB``), not LOINC.
 """
 
 from __future__ import annotations
 
+import hashlib
+import re
+import unicodedata
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -27,6 +39,7 @@ from .hl7time import format_hl7_ts
 from .v2fhir.tables import V2_0203
 
 PROCESSING_ID = "T"
+_FHIR_DATE = re.compile(r"[0-9]{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12][0-9]|3[01]))?)?")
 _ESCAPES = (("\\", "\\E\\"), ("|", "\\F\\"), ("^", "\\S\\"), ("&", "\\T\\"), ("~", "\\R\\"))
 _GENDER = {"male": "M", "female": "F", "other": "O", "unknown": "U"}
 _REPORT_STATUS = {
@@ -52,11 +65,18 @@ _OBS_STATUS = {
 
 
 def escape(value: object) -> str:
-    """One value as HL7 v2 text: separators escaped, line breaks removed."""
+    """One value as HL7 v2 text: separators escaped, every control
+    character (CR, LF, tab, the MLLP framing bytes) turned into a space."""
     text = "" if value is None else str(value)
     for raw, escaped in _ESCAPES:
         text = text.replace(raw, escaped)
-    return " ".join(text.replace("\r", "\n").split("\n")).strip()
+    return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text).strip()
+
+
+def mrn_systems(hospital: HospitalConfig) -> frozenset[str]:
+    """The identifier systems an MRN may come from: the profile's MRN
+    system and each one ``mrn_by_authority`` maps."""
+    return frozenset({hospital.systems.mrn, *(s for _, s in hospital.fhir.mrn_by_authority)})
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +86,23 @@ class Mrn:
     typed_mr: bool
 
 
-def pick_mrn(patient: dict[str, Any]) -> Mrn:
-    """The identifier typed MR, else the first one with a value."""
+def pick_mrn(patient: dict[str, Any], systems: Collection[str] | None = None) -> Mrn:
+    """The identifier typed MR, else the first one with a value. With
+    ``systems``, only identifiers under one of them count."""
     identifiers = [
-        i for i in patient.get("identifier") or [] if isinstance(i, dict) and i.get("value")
+        i
+        for i in patient.get("identifier") or []
+        if isinstance(i, dict)
+        and i.get("value")
+        and (systems is None or i.get("system") in systems)
     ]
+    if not identifiers and systems is not None:
+        raise UsageError(
+            "the Patient has no identifier under the profile's MRN system or a system"
+            " mrn_by_authority maps; PID-3 would name another patient.",
+            hint="Add the Patient's MRN system to fhir.identifier_systems (mrn or"
+            " mrn_by_authority) in the profile.",
+        )
     if not identifiers:
         raise UsageError("the Patient has no identifier with a value; nothing to put in PID-3.")
     for ident in identifiers:
@@ -84,15 +116,21 @@ def pick_mrn(patient: dict[str, Any]) -> Mrn:
 class Renderer:
     """Builds messages for one hospital profile at one time."""
 
-    def __init__(self, hospital: HospitalConfig, now: datetime) -> None:
+    def __init__(self, hospital: HospitalConfig, now: datetime, salt: str = "") -> None:
+        """``salt`` (a resource id) goes into MSH-10 and the sample keys as
+        a short hash, so renderings for two resources in one second differ."""
         self.hospital = hospital
         self.now = now.astimezone(hospital.tzinfo)
         self.stamp = format_hl7_ts(self.now, include_offset=hospital.timestamps_include_offset)
         self._seq = 0
+        self.tag = hashlib.sha256(salt.encode()).hexdigest()[:4].upper() if salt else ""
 
     def _msh(self, message_type: str) -> str:
         self._seq += 1
-        control = f"FF{self.now:%Y%m%d%H%M%S}{self._seq:02d}"
+        if self.tag:  # 20 characters, the MSH-10 length in v2.3 to v2.5.1
+            control = f"FF{self.now:%y%m%d%H%M%S}{self._seq:02d}{self.tag}"
+        else:
+            control = f"FF{self.now:%Y%m%d%H%M%S}{self._seq:02d}"
         h = self.hospital
         return "|".join(
             [
@@ -112,10 +150,18 @@ class Renderer:
         )
 
     def _authority(self, mrn: Mrn) -> str:
+        """PID-3.4: the authority mapped to the MRN's system, or empty for
+        the profile's own MRN system. Any other system is refused: no
+        authority would lead the listener to the same Patient."""
         for authority, system in self.hospital.fhir.mrn_by_authority:
             if system == mrn.system:
                 return authority
-        return self.hospital.hospital_id
+        if mrn.system == self.hospital.systems.mrn:
+            return ""
+        raise UsageError(
+            "the MRN's system is neither the profile's MRN system nor mapped by"
+            " mrn_by_authority; refusing to label it with another authority."
+        )
 
     def pid(self, patient: dict[str, Any], mrn: Mrn) -> str:
         name = (patient.get("name") or [{}])[0]
@@ -127,7 +173,10 @@ class Renderer:
                 escape(given[1] if len(given) > 1 else ""),
             ]
         ).rstrip("^")
-        born = str(patient.get("birthDate", "")).replace("-", "")[:8]
+        raw_born = patient.get("birthDate", "")
+        if raw_born and not (isinstance(raw_born, str) and _FHIR_DATE.fullmatch(raw_born)):
+            raise UsageError("the Patient's birthDate is not a FHIR date; nothing was written.")
+        born = str(raw_born).replace("-", "")
         sex = _GENDER.get(str(patient.get("gender", "")), "")
         cx = f"{escape(mrn.value)}^^^{escape(self._authority(mrn))}^MR"
         return "|".join(["PID", "1", "", cx, "", xpn, "", born, sex])
@@ -216,10 +265,10 @@ def patient_messages(
     patient = client.read_by_id("Patient", patient_id)
     if patient is None:
         raise FhirPostError(404, "Patient", reason="no Patient with that id")
-    mrn = pick_mrn(patient)
-    r = Renderer(hospital, now)
-    accession = f"ACC{r.now:%Y%m%d%H%M%S}"
-    visit = f"V{r.now:%Y%m%d%H%M%S}"
+    mrn = pick_mrn(patient, mrn_systems(hospital))
+    r = Renderer(hospital, now, salt=f"Patient/{patient_id}")
+    accession = f"ACC{r.now:%Y%m%d%H%M%S}{r.tag}"
+    visit = f"V{r.now:%Y%m%d%H%M%S}{r.tag}"
     return {
         "01_adt_a04.hl7": r.adt("A04", patient, mrn, visit),
         "02_adt_a08.hl7": r.adt("A08", patient, mrn, visit),
@@ -261,7 +310,7 @@ def report_message(
     patient = client.read_by_id("Patient", subject.split("/", 1)[1].split("/")[0])
     if patient is None:
         raise FhirPostError(404, "Patient", reason="the report's Patient is not on the server")
-    mrn = pick_mrn(patient)
+    mrn = pick_mrn(patient, mrn_systems(hospital))
     idents = [i for i in report.get("identifier") or [] if isinstance(i, dict) and i.get("value")]
     if not idents:
         raise UsageError("the DiagnosticReport has no identifier to use as the accession.")
@@ -285,7 +334,7 @@ def report_message(
         )
     coding = ((report.get("code") or {}).get("coding") or [{}])[0]
     procedure = f"{escape(coding.get('code', ''))}^{escape(coding.get('display', ''))}^99HUB"
-    r = Renderer(hospital, now)
+    r = Renderer(hospital, now, salt=f"DiagnosticReport/{report_id}")
     issued = ""
     if report.get("issued"):
         try:
@@ -307,4 +356,12 @@ def report_message(
     return text, mrn, skipped
 
 
-__all__ = ["Mrn", "Renderer", "escape", "patient_messages", "pick_mrn", "report_message"]
+__all__ = [
+    "Mrn",
+    "Renderer",
+    "escape",
+    "mrn_systems",
+    "patient_messages",
+    "pick_mrn",
+    "report_message",
+]
