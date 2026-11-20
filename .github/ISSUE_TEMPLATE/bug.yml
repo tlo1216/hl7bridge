@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste real patient data.** Use `hl7bridge synth` or a hand-made fake
+        with names like `ZZZTEST ALPHA`. Issues are public once the repository is.
+  - type: input
+    id: version
+    attributes:
+      label: hl7bridge version
+      description: Output of `hl7bridge --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux, Other]
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Error text and output. Synthetic data only.
+    validations:
+      required: true
+  - type: checkboxes
+    id: synthetic
+    attributes:
+      label: Data check
+      options:
+        - label: Everything in this issue is synthetic. It holds no real patient data.
+          required: true
