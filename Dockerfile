@@ -20,13 +20,17 @@ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80
 FROM ${UV_IMAGE} AS uv
 
 # -- build: the wheel, and a hashed requirements file from uv.lock ---------------
+# The build backend (hatchling) and its dependencies come from the hashed
+# build lock that CI uses too, so the wheel is built with pinned tools.
 FROM ${PYTHON_IMAGE} AS build
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never
 WORKDIR /src
 COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
+COPY .github/requirements/build.txt ./.github/requirements/build.txt
 COPY src ./src
 RUN uv build --wheel --out-dir /dist \
+        --build-constraints .github/requirements/build.txt --require-hashes \
     && uv export --frozen --no-dev --no-emit-project --format requirements-txt \
         --output-file /dist/requirements.txt
 
@@ -52,11 +56,11 @@ RUN python -m pip install --require-hashes --only-binary=:all: -r /tmp/dist/requ
     && groupadd --system --gid 10001 hl7bridge \
     && useradd --system --uid 10001 --gid 10001 --home-dir /home/hl7bridge --create-home \
         --shell /usr/sbin/nologin hl7bridge \
-    && mkdir -p /data /demo \
-    && chown 10001:10001 /data /demo
+    && mkdir -p /data \
+    && chown 10001:10001 /data
 
-# Named volumes mounted on /data and /demo start out owned by this user.
-VOLUME ["/data", "/demo"]
+# A named volume mounted on /data starts out owned by this user.
+VOLUME ["/data"]
 WORKDIR /data
 USER 10001:10001
 EXPOSE 2575

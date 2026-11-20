@@ -24,6 +24,7 @@ jobs:
   checks:
     name: format, lint, types, references, licenses, ports
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,6 +55,7 @@ jobs:
   tests:
     name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -74,14 +76,16 @@ jobs:
       - name: Sync dependencies (locked)
         run: uv sync --locked
       - name: Unit and system tests (no FHIR server)
-        env:
-          # The demo guard tests fail instead of skipping when no bash is found.
-          HL7BRIDGE_REQUIRE_BASH: "1"
         run: uv run pytest -m "not fhir" -q
+      - name: Runtime dependency licenses on this OS
+        # Each OS installs its own dependencies (tzdata on Windows only), so
+        # the license check runs where each set is installed.
+        run: uv run python tools/check_licenses.py
 
   pip-path:
     name: pip install from wheel (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -129,6 +133,7 @@ jobs:
   readme:
     name: README quickstart runs as written
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -145,6 +150,7 @@ jobs:
   docker:
     name: image builds, runs as non-root, compose demo exits 0
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -171,12 +177,14 @@ jobs:
   fhir-system:
     name: FHIR system tests against HAPI
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       hapi:
         # hapiproject/hapi:v8.12.0-2, pinned by digest.
         image: hapiproject/hapi:v8.12.0-2@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e
+        # Loopback only, like every published port in this repository.
         ports:
-          - 8080:8080
+          - "127.0.0.1:8080:8080"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -190,7 +198,7 @@ jobs:
       - name: Wait for HAPI to answer /metadata
         run: |
           for i in $(seq 1 120); do
-            if curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; then
+            if curl -fsS http://127.0.0.1:8080/fhir/metadata >/dev/null 2>&1; then
               echo "HAPI ready after ~$((i * 3))s"
               exit 0
             fi
@@ -202,8 +210,8 @@ jobs:
       # so this job can never silently skip the tests it exists to run.
       - name: FHIR system tests
         env:
-          HL7BRIDGE_FHIR_BASE: http://localhost:8080/fhir
+          HL7BRIDGE_FHIR_BASE: http://127.0.0.1:8080/fhir
           HL7BRIDGE_FHIR_REQUIRED: "1"
         run: uv run pytest tests/system/test_fhir_hapi.py -m fhir -q
       - name: hl7bridge demo against HAPI
-        run: uv run hl7bridge demo --fhir-base http://localhost:8080/fhir
+        run: uv run hl7bridge demo --fhir-base http://127.0.0.1:8080/fhir

@@ -13,14 +13,17 @@
 # authentication, and this HAPI server accepts writes from anyone who can
 # reach it. A bare "2575:2575" would publish on every network interface,
 # so anyone on your network could send to the listener or write into HAPI.
-# tests/unit/test_network_exposure.py fails the build on any port in this
-# repository that is not bound to 127.0.0.1.
+# tools/check_ports.py (run in CI) fails the build on any published port in
+# this repository that is not bound to 127.0.0.1.
 #
 # To browse HAPI at http://127.0.0.1:8080/fhir, add the override:
 #   docker compose -f compose.demo.yaml -f compose.hapi-port.yaml up --build
 #
-# Demo data lives in named volumes that compose owns, never in a host
-# folder. `docker compose -f compose.demo.yaml down -v` removes them.
+# The listener's database lives in a named volume that compose owns, never
+# in a host folder. The demo service writes into a temporary folder inside
+# its own container and removes it after a clean run, so `up` can be run
+# again and again. `docker compose -f compose.demo.yaml down -v` removes
+# the volume.
 
 name: hl7bridge-demo
 
@@ -57,10 +60,6 @@ services:
       - "http://hapi:8080/fhir"
       - "--fhir-wait"
       - "300"
-      - "--data-dir"
-      - "/demo/run"
-    volumes:
-      - demo-data:/demo
     # The image's health check probes the listener port; this service runs
     # the demo, not a listener. The demo's own listener binds 127.0.0.1
     # inside this container only.
@@ -69,4 +68,3 @@ services:
 
 volumes:
   bridge-data:
-  demo-data:

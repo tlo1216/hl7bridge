@@ -1,11 +1,13 @@
-# Only pyproject.toml, uv.lock, README.md, LICENSE, NOTICE and src/ are
-# copied into the build stage. Everything else stays out of the context.
+# Only pyproject.toml, uv.lock, README.md, LICENSE, NOTICE, the hashed
+# build lock and src/ are copied into the build stage. Everything else
+# stays out of the context.
 *
 !pyproject.toml
 !uv.lock
 !README.md
 !LICENSE
 !NOTICE
+!.github/requirements/build.txt
 !src/
 **/__pycache__/
 **/*.py[cod]

@@ -190,7 +190,10 @@ def test_compose_demo_shape():
         for volume in service.get("volumes", []):
             source = volume.split(":", 1)[0]
             assert not source.startswith((".", "/", "~")), f"host folder mounted: {volume}"
-    assert set(_compose("compose.demo.yaml")["volumes"]) == {"bridge-data", "demo-data"}
+    assert set(_compose("compose.demo.yaml")["volumes"]) == {"bridge-data"}
+    # The demo uses a temporary folder in its container, so `up` can run again.
+    assert "--data-dir" not in demo["command"]
+    assert "volumes" not in demo
 
 
 def test_compose_images_are_pinned():
@@ -245,11 +248,57 @@ def test_compose_check_catches_open_ports():
             "b": {"ports": ["0.0.0.0:80:80"]},
             "c": {"ports": [{"target": 80, "published": 8080}]},
             "d": {"network_mode": "host"},
-            "ok": {"ports": ["127.0.0.1:1:1", {"published": 9, "host_ip": "127.0.0.1"}]},
+            "e": {"ports": [{"target": 2575}]},
+            "f": {"ports": ["2575"]},
+            "g": {"ports": [{"target": 80, "published": 8080, "host_ip": "0.0.0.0"}]},
+            "ok": {
+                "ports": [
+                    "127.0.0.1:1:1",
+                    {"published": 9, "host_ip": "127.0.0.1"},
+                    {"target": 9, "host_ip": "127.0.0.1"},
+                ]
+            },
         }
     }
     problems = check_ports.check_compose(data, "x.yaml")
-    assert sorted(p.where.split()[-1] for p in problems) == ["a", "b", "c", "d"]
+    assert sorted(p.where.split()[-1] for p in problems) == ["a", "b", "c", "d", "e", "f", "g"]
+
+
+def test_workflow_service_ports_are_checked():
+    data = {
+        "jobs": {
+            "a": {"services": {"db": {"ports": ["8080:8080"]}}},
+            "b": {"container": {"image": "x", "ports": ["9000:9000"]}},
+            "c": {"services": {"db": {"options": "--network host"}}},
+            "ok": {"services": {"db": {"ports": ["127.0.0.1:8080:8080"]}}},
+        }
+    }
+    problems = check_ports.check_workflow(data, "ci.yml")
+    assert sorted(p.where.split()[1].split(".")[1] for p in problems) == ["a", "b", "c"]
+
+
+def test_compose_files_are_found_by_content_not_name(tmp_path):
+    for name in ("stack.yml", "demo.compose.yaml", "Compose.yaml", "included.yaml"):
+        (tmp_path / name).write_text(
+            "services:\n  x:\n    ports: ['9000:9000']\n", encoding="utf-8"
+        )
+    (tmp_path / "not-compose.yaml").write_text(
+        "services: [a, b]\nports: ['1:1']\n", encoding="utf-8"
+    )
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n  t:\n    services:\n      h:\n        ports: ['8080:8080']\n",
+        encoding="utf-8",
+    )
+    problems = check_ports.check_tree(tmp_path)
+    assert sorted({p.where.split()[0] for p in problems}) == [
+        ".github/workflows/ci.yml",
+        "Compose.yaml",
+        "demo.compose.yaml",
+        "included.yaml",
+        "stack.yml",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -261,6 +310,20 @@ def test_compose_check_catches_open_ports():
         "docker run -p8080:8080 img",
         "docker run -P img",
         "sudo docker container run -d -p 2575:2575 img",
+        "docker run -dp 8080:8080 img",
+        "docker run -itp 8080:8080 img",
+        "docker run -dp8080:8080 img",
+        "docker run -dP img",
+        "docker run --network host img",
+        "docker run --network=host img",
+        "docker run --net=host img",
+        "docker run --net host img",
+        "docker create -p 8080:8080 img",
+        "docker container create -p 8080:8080 img",
+        "podman run -p 8080:8080 img",
+        "docker compose run -p 8080:8080 web",
+        "docker-compose run --publish 8080:8080 web",
+        "docker run -p 2575 img",
     ],
 )
 def test_docker_run_check_catches_open_ports(line):
@@ -274,6 +337,10 @@ def test_docker_run_check_catches_open_ports(line):
         'docker run -d --name "$X" -p 127.0.0.1:8080:8080 "$IMG"',
         "docker run --rm hl7bridge:local demo",
         "docker build -t x .",
+        "docker run -dp 127.0.0.1:8080:8080 img",
+        "docker run --network bridge -p 127.0.0.1:1:1 img",
+        "docker run -e PORT=8080 -v data:/data img",
+        "docker compose run --rm demo",
     ],
 )
 def test_docker_run_check_allows_loopback(line):
@@ -322,9 +389,27 @@ class _Meta:
         ({"License-Expression": "MIT"}, "MIT"),
         ({"License": "BSD license"}, "BSD"),
         ({"Classifiers": ["License :: OSI Approved :: MIT License"]}, "MIT"),
-        ({"License": "GPL-3.0-only"}, None),
+        ({"License": "GPL-3.0-only"}, "GPL-3.0-only"),
+        ({"License": "UNKNOWN", "Classifiers": ["License :: OSI Approved :: MIT License"]}, "MIT"),
         ({"License": "Some very long license text\nwith lines"}, None),
+        ({"Classifiers": ["License :: OSI Approved"]}, None),
         ({}, None),
+        (
+            {
+                "License": "GPL-3.0-or-later",
+                "Classifiers": ["License :: OSI Approved :: BSD License"],
+            },
+            "BSD AND GPL-3.0-or-later",
+        ),
+        (
+            {
+                "Classifiers": [
+                    "License :: OSI Approved :: MIT License",
+                    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+                ]
+            },
+            "(GNU General Public License v3 (GPLv3)) AND MIT",
+        ),
     ],
 )
 def test_license_of(fields, expected):
@@ -338,6 +423,8 @@ def test_license_of(fields, expected):
         ("MIT OR Apache-2.0", True),
         ("GPL-3.0-only", False),
         ("MIT AND GPL-2.0-or-later", False),
+        ("BSD AND GPL-3.0-or-later", False),
+        ("(GNU General Public License v3 (GPLv3)) AND MIT", False),
         (None, False),
     ],
 )
@@ -363,3 +450,24 @@ def test_license_check_fails_on_a_copyleft_dependency(monkeypatch):
 
 def test_hl7bridge_metadata_is_apache():
     assert metadata.metadata("hl7bridge")["License-Expression"] == "Apache-2.0"
+
+
+def test_every_ci_job_has_a_timeout():
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text("utf-8"))
+    jobs = workflow["jobs"]
+    assert jobs
+    for name, job in jobs.items():
+        assert isinstance(job.get("timeout-minutes"), int), name
+        assert job["timeout-minutes"] <= 30, name
+
+
+def test_image_build_dependencies_are_hashed():
+    """The build stage installs hatchling from the hashed build lock, so the
+    wheel is built with pinned tools, not whatever PyPI serves that day."""
+    dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
+    assert "--build-constraints .github/requirements/build.txt" in dockerfile
+    assert "--require-hashes" in dockerfile.split("AS runtime")[0]
+    assert "!.github/requirements/build.txt" in (REPO / ".dockerignore").read_text("utf-8")
+    lock = (REPO / ".github" / "requirements" / "build.txt").read_text(encoding="utf-8")
+    assert re.search(r"^hatchling==\S+ \\$", lock, re.MULTILINE)
+    assert "--hash=sha256:" in lock

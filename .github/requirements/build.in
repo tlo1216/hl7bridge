@@ -1,4 +1,5 @@
-# Build tools for the pip install job in ci.yml, pinned with hashes.
+# Build tools, pinned with hashes: the pip install job in ci.yml installs
+# them, and the Dockerfile uses build.txt as hashed build constraints.
 # Regenerate with:
 #   uv pip compile .github/requirements/build.in --generate-hashes --universal --python-version 3.12 -o .github/requirements/build.txt
 pip==26.3

@@ -3,9 +3,12 @@
 Walks the installed dependency tree of a distribution (``hl7bridge`` by
 default), following only requirements whose environment markers hold here
 and skipping extras, then reads each package's license from its metadata:
-``License-Expression`` first, then a short ``License`` field, then the
-trove classifiers. A package whose license is not on the allow list, or
-cannot be read, fails the check.
+``License-Expression`` when present, otherwise a short ``License`` field
+and every ``License ::`` trove classifier together. A package fails the
+check when any license it names is not on the allow list, or when none
+can be read. Markers are evaluated on the machine running the check, so
+CI runs it on every OS in the test matrix (tzdata is a Windows-only
+dependency).
 
 Usage: python tools/check_licenses.py [--dist NAME]
 """
@@ -79,22 +82,32 @@ class Result:
 def split_expression(expression: str) -> list[str]:
     """The license ids in an SPDX expression. ``MIT OR Apache-2.0`` gives
     both; every one must be allowed, which is stricter than SPDX needs."""
-    return [p for p in re.split(r"\s+(?:AND|OR|WITH)\s+|[()]", expression) if p.strip()]
+    return [p.strip() for p in re.split(r"\s+(?:AND|OR|WITH)\s+|[()]", expression) if p.strip()]
 
 
 def license_of(meta: metadata.PackageMetadata) -> str | None:
+    """The license of one package, as an expression of ids.
+
+    ``License-Expression`` wins when present. Otherwise every other source
+    counts, and every one must be allowed: a short ``License`` field (mapped
+    to an id, or kept as written so an unknown one fails) and every
+    ``License ::`` classifier (one not in the table is kept as written, so
+    it fails too). A long ``License`` field is the license text itself and
+    is skipped; the classifiers then decide."""
     expression = meta.get("License-Expression")
     if expression:
         return expression.strip()
+    found: set[str] = set()
     text = (meta.get("License") or "").strip()
-    if text and "\n" not in text and len(text) < 40:
-        mapped = FREE_TEXT.get(text.lower())
-        if mapped:
-            return mapped
-    found = [CLASSIFIERS[c] for c in meta.get_all("Classifier") or [] if c in CLASSIFIERS]
-    if found:
-        return " AND ".join(sorted(set(found)))
-    return None
+    if text and "\n" not in text and len(text) < 60 and text.upper() != "UNKNOWN":
+        found.add(FREE_TEXT.get(text.lower(), text))
+    for classifier in meta.get_all("Classifier") or []:
+        if not classifier.startswith("License ::") or classifier == "License :: OSI Approved":
+            continue
+        found.add(CLASSIFIERS.get(classifier, classifier.rsplit("::", 1)[-1].strip()))
+    if not found:
+        return None
+    return " AND ".join(f"({part})" if " " in part else part for part in sorted(found))
 
 
 def walk(
