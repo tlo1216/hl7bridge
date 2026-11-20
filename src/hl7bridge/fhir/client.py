@@ -16,20 +16,36 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 from fhir.resources.R4B.bundle import Bundle
 from fhir.resources.R4B.resource import Resource
 
-from ..errors import FhirPostError
+from ..errors import FhirPostError, MappingError
 from ..logsafety import install_third_party_redaction, safe_url
+from ..v2fhir.common import check_key
+from ..v2fhir.jsontext import dumps, loads, resource_dict
 
 log = logging.getLogger(__name__)
 
 FHIR_JSON = "application/fhir+json"
 # A transaction-response entry status: "201 Created", "200 OK".
 _ENTRY_STATUS = re.compile(r"([1-5][0-9]{2})(?: |$)")
+# A response location: "Patient/12/_history/1", relative or absolute.
+_LOCATION = re.compile(r"(?:^|/)([A-Z][A-Za-z]+)/([A-Za-z0-9.\-]{1,64})(?:/_history/[^/]+)?$")
+_ID = re.compile(r"[A-Za-z0-9.\-]{1,64}")
+
+
+@dataclass(frozen=True, slots=True)
+class EntryResult:
+    """One committed transaction entry: the resource type sent, the entry
+    status (200 or 201), and the server id from its location, if given."""
+
+    kind: str
+    code: int
+    server_id: str | None
 
 
 class HapiClient:
@@ -82,13 +98,16 @@ class HapiClient:
             )
         ident = identifiers[0]
         resource_type = resource.get_resource_type()
+        # The same rule as every v2fhir key: a value a token search would
+        # split or misread is refused, never sent.
+        check_key(str(ident.value or ""), f"{resource_type}.identifier")
         url = f"{self.base_url}/{resource_type}"
         params = {"identifier": f"{ident.system}|{ident.value}"}
         response = self._send(
             "PUT",
             url,
             params=params,
-            content=resource.model_dump_json(exclude_none=True),
+            content=dumps(resource_dict(resource)),
             headers={"Content-Type": FHIR_JSON},
         )
         if response.status_code not in (200, 201):
@@ -102,19 +121,25 @@ class HapiClient:
         return server_id, "created" if response.status_code == 201 else "updated"
 
     def transaction(self, bundle: Bundle) -> list[tuple[str, int]]:
-        """POST a transaction Bundle and check that all of it was committed.
+        """POST a transaction Bundle model; (resource type, status) per
+        entry. See ``commit``."""
+        return [(r.kind, r.code) for r in self.commit(resource_dict(bundle))]
+
+    def commit(self, body: dict[str, Any]) -> list[EntryResult]:
+        """POST a transaction Bundle (a dict from ``jsontext``) and check
+        that all of it was committed.
 
         A 2xx status alone is not enough. The answer must be a Bundle of
         type ``transaction-response`` with exactly one entry per request
         entry, and every entry status must be 200 or 201. Anything else
         raises FhirPostError, whose text holds counts and positions only.
-        Returns (resource type, status code) per entry, in request order.
+        Returns one EntryResult per entry, in request order.
         """
-        requests = bundle.entry or []
+        requests: list[dict[str, Any]] = body.get("entry") or []
         response = self._send(
             "POST",
             self.base_url,
-            content=bundle.model_dump_json(exclude_none=True),
+            content=dumps(body),
             headers={"Content-Type": FHIR_JSON},
         )
         url = str(response.url)
@@ -136,21 +161,93 @@ class HapiClient:
             raise FhirPostError(
                 200, url, reason=f"the answer has {got} entries for {len(requests)} requests"
             )
-        results: list[tuple[str, int]] = []
+        results: list[EntryResult] = []
         for i, (sent, answer) in enumerate(zip(requests, entries, strict=True), start=1):
-            status = answer.get("response", {}).get("status") if isinstance(answer, dict) else None
+            reply = answer.get("response") if isinstance(answer, dict) else None
+            reply = reply if isinstance(reply, dict) else {}
+            status = reply.get("status")
             match = _ENTRY_STATUS.match(status) if isinstance(status, str) else None
             code = int(match.group(1)) if match else 0
             if code not in (200, 201):
                 raise FhirPostError(200, url, reason=f"entry {i} was not committed")
-            kind = sent.resource.get_resource_type() if sent.resource else "?"
-            results.append((kind, code))
+            resource = sent.get("resource") if isinstance(sent, dict) else None
+            kind = str(resource.get("resourceType", "?")) if isinstance(resource, dict) else "?"
+            location = reply.get("location")
+            found = _LOCATION.search(location) if isinstance(location, str) else None
+            server_id = found.group(2) if found and found.group(1) == kind else None
+            results.append(EntryResult(kind, code, server_id))
         return results
+
+    def search_identifier(
+        self, resource_type: str, system: str, value: str
+    ) -> list[dict[str, Any]]:
+        """The resources whose identifier is exactly ``system|value``, at
+        most two (enough to tell one from many). A paged answer counts as
+        many. Decimals are read as Decimal, so a resource written back
+        keeps them. The value passes the key check first."""
+        try:
+            check_key(value, f"{resource_type}.identifier")
+        except MappingError as exc:
+            raise FhirPostError(0, resource_type, reason=str(exc)) from None
+        # no-cache: HAPI reuses a recent search result by default, and a
+        # merge must see what is on the server now, not a minute ago.
+        response = self._send(
+            "GET",
+            f"{self.base_url}/{resource_type}",
+            params={"identifier": f"{system}|{value}", "_count": "2"},
+            headers={"Cache-Control": "no-cache"},
+        )
+        if response.status_code != 200:
+            raise FhirPostError(response.status_code, str(response.url), response.text)
+        try:
+            body = loads(response.content)
+        except ValueError:
+            raise FhirPostError(200, str(response.url), reason="the answer is not JSON") from None
+        if not isinstance(body, dict) or body.get("resourceType") != "Bundle":
+            raise FhirPostError(200, str(response.url), reason="the answer is not a Bundle")
+        found = [
+            e["resource"]
+            for e in body.get("entry") or []
+            if isinstance(e, dict)
+            and isinstance(e.get("resource"), dict)
+            and e["resource"].get("resourceType") == resource_type
+        ]
+        paged = any(
+            isinstance(link, dict) and link.get("relation") == "next"
+            for link in body.get("link") or []
+        )
+        if paged and len(found) < 2:
+            found = found * 2  # more on a next page: at least two, never "the first"
+        return found
+
+    def read_by_id(self, resource_type: str, server_id: str) -> dict[str, Any] | None:
+        """``GET <type>/<id>``; None when the server has no such resource."""
+        if not _ID.fullmatch(server_id):
+            raise FhirPostError(0, resource_type, reason="not a FHIR resource id")
+        response = self._send("GET", f"{self.base_url}/{resource_type}/{server_id}")
+        if response.status_code in (404, 410):
+            return None
+        if response.status_code != 200:
+            raise FhirPostError(response.status_code, str(response.url), response.text)
+        try:
+            body = loads(response.content)
+        except ValueError:
+            raise FhirPostError(200, str(response.url), reason="the answer is not JSON") from None
+        if not isinstance(body, dict) or body.get("resourceType") != resource_type:
+            raise FhirPostError(
+                200, str(response.url), reason=f"the answer is not a {resource_type}"
+            )
+        return body
 
     def search_total(self, resource_type: str, params: dict[str, str] | None = None) -> int:
         """Server-side count. _summary=count means no resources transfer."""
         query: dict[str, str] = {"_summary": "count", **(params or {})}
-        response = self._send("GET", f"{self.base_url}/{resource_type}", params=query)
+        response = self._send(
+            "GET",
+            f"{self.base_url}/{resource_type}",
+            params=query,
+            headers={"Cache-Control": "no-cache"},  # a count of now, not of a cached search
+        )
         if response.status_code != 200:
             raise FhirPostError(response.status_code, str(response.url), response.text)
         body = response.json()

@@ -22,6 +22,7 @@ from hl7bridge.ingest import mllp as mllp_module
 from hl7bridge.profiles import BUNDLED_PROFILES, SAMPLES_DIR
 from hl7bridge.store import connect
 
+from ..fakefhir import FakeFhir
 from .test_cli import _Listener, clean_env, restore_logging  # noqa: F401  autouse fixtures
 
 REPO = Path(__file__).resolve().parents[2]
@@ -200,6 +201,43 @@ def test_send_expect_ae_passes_on_ae_and_fails_on_aa(tmp_path, capsys):
     assert "  expected AE: 0 of 1\n" in out_aa
 
 
+def test_send_expect_ae_prints_an_unexpected_aa_and_not_the_expected_ae(tmp_path, capsys):
+    broken = SAMPLES_DIR / "11_broken_missing_accession.hl7"
+    folder = tmp_path / "m"
+    folder.mkdir()
+    (folder / "a.hl7").write_bytes(A04.read_bytes())
+    (folder / "b.hl7").write_bytes(broken.read_bytes())
+    with _Listener(tmp_path / "s.db") as listener:
+        rc = cli.main(["send", str(folder), "--port", str(listener.port), "--expect", "AE"])
+    out = capsys.readouterr().out
+    assert rc == EXIT_FINDINGS
+    assert "a.hl7: AA (" in out
+    assert "b.hl7: AE" not in out
+
+
+def test_send_splits_a_batch_into_one_frame_per_message(tmp_path, capsys):
+    """Two messages in one frame would get one ACK and be read as one."""
+    db = tmp_path / "s.db"
+    batch = tmp_path / "batch.hl7"
+    batch.write_bytes(A04.read_bytes() + ORU.read_bytes())
+    with _Listener(db) as listener:
+        rc = cli.main(["send", str(batch), "--port", str(listener.port)])
+    out = capsys.readouterr().out
+    assert rc == EXIT_OK
+    assert "sent 2 message(s)" in out and "got 2 ACK(s)" in out
+    conn = connect(db)
+    types = [r[0] for r in conn.execute("SELECT message_type FROM messages ORDER BY id")]
+    conn.close()
+    assert types == ["ADT^A04", "ORU^R01"]
+
+
+def test_send_refuses_input_that_does_not_start_with_msh(tmp_path, capsys):
+    path = tmp_path / "x.hl7"
+    path.write_bytes(b"PID|1\r" + A04.read_bytes())
+    assert cli.main(["send", str(path)]) == EXIT_USAGE
+    assert "x.hl7 does not start with an MSH segment; nothing sent." in capsys.readouterr().err
+
+
 def test_send_warns_when_the_host_is_not_loopback(monkeypatch, capsys):
     async def refuse(*_a, **_k):
         raise ConnectionRefusedError
@@ -361,7 +399,8 @@ def test_replay_filters(tmp_path, capsys):
         (["--only-reason", "mllp_junk"], "--only-reason takes one of"),
         (["--only-reason", "nope"], "--only-reason takes one of"),
         (["--from", "store", "--only-reason", "bad_timestamp"], "applies to --from quarantine"),
-        (["--since", "2026-10-07T00:00:00"], "has no UTC offset"),
+        (["--since", "2026-10-07T00:00:00"], "--since '2026-10-07T00:00:00' has no UTC offset"),
+        (["--since", "yesterday"], "--since 'yesterday' is not an ISO 8601 timestamp"),
     ],
 )
 def test_replay_usage_errors(tmp_path, capsys, argv, message):
@@ -369,6 +408,56 @@ def test_replay_usage_errors(tmp_path, capsys, argv, message):
     _store_with_rejects(db)
     assert cli.main(["replay", "--db", str(db), *argv]) == EXIT_USAGE
     assert message in capsys.readouterr().err
+
+
+def test_replay_sends_each_distinct_message_once(tmp_path, capsys):
+    """A sender that retried put the same bytes in the quarantine twice;
+    replaying into the listener that filled it must not multiply it."""
+    db = tmp_path / "src.db"
+    _store_with_rejects(db)
+    conn = connect(db)
+    pipeline = IngestPipeline(HospitalRegistry.load_dir(BUNDLED_PROFILES), conn)
+    pipeline.handle_bytes((SAMPLES_DIR / "11_broken_missing_accession.hl7").read_bytes())
+    assert (
+        conn.execute("SELECT COUNT(*) FROM quarantine WHERE reason != 'mllp_junk'").fetchone()[0]
+        == 4
+    )
+    conn.close()
+    assert cli.main(["replay", "--db", str(db), "--dry-run"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "skipping 1 duplicate(s): the same bytes as an older row" in out
+    assert "3 message(s) would be sent" in out
+
+
+def test_replay_reads_a_version_2_store(tmp_path, capsys):
+    """Version 2 has the same messages and quarantine tables, so replay is
+    the way to carry an old store's messages into a new listener."""
+    db = tmp_path / "old.db"
+    _store_with_rejects(db)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE schema_version SET version = 2")
+    conn.commit()
+    conn.close()
+    assert cli.main(["replay", "--db", str(db), "--dry-run"]) == EXIT_OK
+    assert "3 message(s) would be sent" in capsys.readouterr().out
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE schema_version SET version = 1")
+    conn.commit()
+    conn.close()
+    assert cli.main(["replay", "--db", str(db), "--dry-run"]) == EXIT_USAGE
+    assert "has schema version 1" in capsys.readouterr().err
+
+
+def test_replay_dry_run_strips_control_characters(tmp_path, capsys):
+    db = tmp_path / "src.db"
+    _store_with_rejects(db)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE messages SET message_type = 'ADT^A04\x1b[2J'")
+    conn.commit()
+    conn.close()
+    assert cli.main(["replay", "--db", str(db), "--dry-run", "--from", "store"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "ADT^A04?[2J" in out
 
 
 def test_replay_never_creates_a_database(tmp_path, capsys):
@@ -401,13 +490,37 @@ def test_to_fhir_prints_one_bundle(capsys):
     assert cli.main(["to-fhir", str(ORU)]) == EXIT_OK
     bundle = json.loads(capsys.readouterr().out)
     assert bundle["type"] == "transaction"
+    # The TX line is report text (conclusion), not an Observation.
     assert [e["resource"]["resourceType"] for e in bundle["entry"]] == [
         "Patient",
         "Observation",
         "Observation",
-        "Observation",
         "DiagnosticReport",
     ]
+
+
+def test_to_fhir_writes_decimals_as_sent(tmp_path, capsys):
+    path = tmp_path / "n.hl7"
+    path.write_bytes(ORU.read_bytes().replace(b"|12.5|", b"|12.50|"))
+    assert cli.main(["to-fhir", str(path)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert '"value": 12.50,' in out
+    out_dir = tmp_path / "o"
+    assert cli.main(["to-fhir", str(path), "--out", str(out_dir)]) == EXIT_OK
+    assert b'"value": 12.50,' in (out_dir / "n.json").read_bytes()
+    capsys.readouterr()
+
+
+def test_to_fhir_refuses_bytes_that_are_not_utf8(tmp_path, capsys):
+    """Lossy decoding would turn two different bad bytes into the same
+    U+FFFD and two patients into one key."""
+    path = tmp_path / "bad.hl7"
+    path.write_bytes(A04.read_bytes().replace(b"SA1001", b"SA1\xff01"))
+    rc = cli.main(["to-fhir", str(path)])
+    captured = capsys.readouterr()
+    assert rc == EXIT_FINDINGS
+    assert "error: bad.hl7: not valid UTF-8; not converted." in captured.err
+    assert captured.out == ""
 
 
 def test_to_fhir_reads_stdin(monkeypatch, capsys):
@@ -459,27 +572,31 @@ def test_to_fhir_errors_never_quote_the_message(tmp_path, capsys, caplog):
     assert canary not in captured.err + captured.out + caplog.text
 
 
-class _TransactionServer:
+class _TransactionServer(FakeFhir):
+    """The in-memory server, failing the nth transaction when asked."""
+
     def __init__(self, fail_on: int | None = None) -> None:
-        self.posted: list[dict] = []
+        super().__init__()
         self.fail_on = fail_on
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/metadata"):
-            return httpx.Response(200, json={"resourceType": "CapabilityStatement"})
-        bundle = json.loads(request.content)
-        self.posted.append(bundle)
-        status = "201 Created"
-        if self.fail_on is not None and len(self.posted) == self.fail_on:
-            status = "400 Bad Request"
-        return httpx.Response(
-            200,
-            json={
-                "resourceType": "Bundle",
-                "type": "transaction-response",
-                "entry": [{"response": {"status": status}} for _ in bundle["entry"]],
-            },
-        )
+        def maybe_fail(body: dict) -> httpx.Response | None:
+            if self.fail_on is not None and len(self.transactions) == self.fail_on:
+                entries = [{"response": {"status": "400 Bad Request"}} for _ in body["entry"]]
+                return httpx.Response(
+                    200,
+                    json={
+                        "resourceType": "Bundle",
+                        "type": "transaction-response",
+                        "entry": entries,
+                    },
+                )
+            return None
+
+        self.before_commit = maybe_fail
+
+    @property
+    def posted(self) -> list[dict]:
+        return self.transactions
 
 
 def _patch(monkeypatch, server) -> None:
@@ -502,12 +619,15 @@ def test_to_fhir_post_commits_each_bundle_in_order(tmp_path, monkeypatch, capsys
     assert rc == EXIT_OK
     assert out == (
         "13_hospc_adt_a01_inpatient.hl7: committed (Patient 201, Encounter 201)\n"
-        "15_hospc_adt_a08_discharge.hl7: committed (Patient 201, Encounter 201)\n"
+        "15_hospc_adt_a08_discharge.hl7: committed (Patient 200, Encounter 200)\n"
     )
     assert [b["entry"][1]["resource"]["status"] for b in server.posted] == [
         "in-progress",
         "finished",
     ]
+    # The A08 went to the resources the A01 made, by id, with If-Match.
+    assert server.posted[1]["entry"][0]["request"]["ifMatch"] == 'W/"1"'
+    assert server.posted[1]["entry"][1]["request"]["url"].startswith("Encounter/")
 
 
 def test_to_fhir_post_stops_at_the_first_bundle_not_committed(tmp_path, monkeypatch, capsys):
@@ -530,6 +650,67 @@ def test_to_fhir_post_needs_a_named_server(capsys):
     assert "to-fhir --post writes to a FHIR server, so it needs one named" in (
         capsys.readouterr().err
     )
+
+
+def _two_with_one_broken(tmp_path):
+    folder = tmp_path / "m"
+    folder.mkdir()
+    (folder / "1.hl7").write_bytes((SAMPLES_DIR / "02_hospa_orm_o01.hl7").read_bytes())
+    (folder / "2.hl7").write_bytes(
+        (SAMPLES_DIR / "02_hospa_orm_o01.hl7").read_bytes().replace(b"ORC|NW|", b"ORC|XO|")
+    )
+    (folder / "3.hl7").write_bytes((SAMPLES_DIR / "03_hospa_oru_r01_final.hl7").read_bytes())
+    return folder
+
+
+def test_to_fhir_post_sends_nothing_when_one_message_fails_to_map(tmp_path, monkeypatch, capsys):
+    """A later message can depend on a failed one, so a run with a failure
+    posts nothing unless --skip-failures says to go on."""
+    server = _TransactionServer()
+    _patch(monkeypatch, server)
+    folder = _two_with_one_broken(tmp_path)
+    base = ["--post", "--fhir-base", "http://fhir.test/fhir"]
+    rc = cli.main(["to-fhir", str(folder), *base])
+    captured = capsys.readouterr()
+    assert rc == EXIT_FINDINGS
+    assert server.posted == []
+    assert "error: 2.hl7: ORC-1: code not in table 0119" in captured.err
+    assert "nothing posted: 1 message(s) could not be mapped" in captured.err
+    rc = cli.main(["to-fhir", str(folder), *base, "--skip-failures"])
+    captured = capsys.readouterr()
+    assert rc == EXIT_FINDINGS
+    assert len(server.posted) == 2
+    assert "1 of 3 message(s) could not be mapped" in captured.err
+
+
+def test_skip_failures_needs_post(capsys):
+    assert cli.main(["to-fhir", str(A04), "--skip-failures"]) == EXIT_USAGE
+    assert "--skip-failures applies to --post only." in capsys.readouterr().err
+
+
+def test_to_fhir_post_refuses_an_older_report_after_a_newer_one(tmp_path, monkeypatch, capsys):
+    server = _TransactionServer()
+    _patch(monkeypatch, server)
+    folder = tmp_path / "m"
+    folder.mkdir()
+    final = (SAMPLES_DIR / "03_hospa_oru_r01_final.hl7").read_bytes()
+    (folder / "a_final.hl7").write_bytes(final)
+    (folder / "b_prelim.hl7").write_bytes(
+        final.replace(b"|CR|F", b"|CR|P").replace(b"SMPA0003", b"SMPA0103")
+    )
+    rc = cli.main(["to-fhir", str(folder), "--post", "--fhir-base", "http://fhir.test/fhir"])
+    captured = capsys.readouterr()
+    assert rc == EXIT_FINDINGS
+    assert server.posted == []
+    assert "b_prelim.hl7 holds an older version of the same report as a_final.hl7" in (captured.err)
+    # A later OBR-22 wins over the status order: a correction issued later
+    # than a final is fine, and so is the final after its preliminary.
+    (folder / "b_prelim.hl7").unlink()
+    (folder / "0_prelim.hl7").write_bytes(
+        final.replace(b"|CR|F", b"|CR|P").replace(b"SMPA0003", b"SMPA0103")
+    )
+    rc = cli.main(["to-fhir", str(folder), "--post", "--fhir-base", "http://fhir.test/fhir"])
+    assert rc == EXIT_OK, capsys.readouterr()
 
 
 def test_to_fhir_post_sends_nothing_when_no_message_maps(tmp_path, monkeypatch, capsys):

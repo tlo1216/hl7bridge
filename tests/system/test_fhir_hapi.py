@@ -118,10 +118,13 @@ def test_report_links_to_service_request_by_accession(synced):
     defect = manifest.by_category("corrected_report")[0]
     system = accession_system(defect.hospital_id)
     dr = client.read("DiagnosticReport", {"identifier": f"{system}|{defect.accession}"})
-    based_on = dr["entry"][0]["resource"]["basedOn"][0]["reference"]
-    assert based_on.startswith("ServiceRequest/")
+    # A logical reference by the accession, the same as to-fhir --post writes.
+    based_on = dr["entry"][0]["resource"]["basedOn"][0]
+    assert based_on["type"] == "ServiceRequest"
+    assert based_on["identifier"]["system"] == system
+    assert based_on["identifier"]["value"] == defect.accession
     sr = client.read("ServiceRequest", {"identifier": f"{system}|{defect.accession}"})
-    assert based_on.endswith(sr["entry"][0]["resource"]["id"])
+    assert len(sr["entry"]) == 1
 
 
 def test_run_recorded(synced):

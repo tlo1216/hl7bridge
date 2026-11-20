@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from hl7bridge.errors import FhirPostError
+from hl7bridge.errors import FhirPostError, MappingError
 from hl7bridge.fhir.client import HapiClient
 from hl7bridge.fhir.mapper import patient_resource
 
@@ -131,3 +131,17 @@ def test_capability_summary_transport_error_raises():
         client.capability_summary()
     assert e.value.status_code == 0
     assert "refused" in e.value.body  # kept on the object, never in the message
+
+
+@pytest.mark.parametrize("bad", [",", "|", "$", "\\", "\r"])
+def test_upsert_refuses_a_key_a_token_search_would_misread(bad):
+    """A comma in the key would make the conditional update an OR search."""
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(201, json={"resourceType": "Patient", "id": "1"})
+
+    with make_client(handler) as client, pytest.raises(MappingError, match="FHIR search key"):
+        client.upsert(patient_resource(patient_row(mrn=f"MA1{bad}001")))
+    assert sent == []

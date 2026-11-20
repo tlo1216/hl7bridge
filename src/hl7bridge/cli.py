@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import errno
-import json
 import logging
 import os
 import re
@@ -51,6 +50,7 @@ from .errors import (
 )
 from .explain import as_json, explain_message, render_text, split_messages
 from .fhir import HapiClient, render_sync_text, sync_to_fhir
+from .fhir.post import check_run_order, post_mapped
 from .ingest import IngestPipeline, send_messages, serve
 from .ingest.ack import ALL_REASONS
 from .ingest.loaders import load_outbound, load_studies
@@ -66,7 +66,7 @@ from .store import connect, message_counts, quarantine_summary, utc_iso
 from .store.db import inspect_db, schema_mismatch_message
 from .synth import generate, verify_manifest
 from .tat import render_tat_text, tat_report
-from .v2fhir import MappedMessage, bundle_json, message_to_bundle
+from .v2fhir import MappedMessage, bundle_json, json_text, message_to_bundle
 
 log = logging.getLogger(__name__)
 
@@ -115,17 +115,17 @@ def _db_path(args: argparse.Namespace) -> Path:
     return resolved.path
 
 
-def _now_arg(value: str | None) -> datetime:
+def _now_arg(value: str | None, flag: str = "--now") -> datetime:
     if value is None:
         return datetime.now(UTC)
     try:
         dt = datetime.fromisoformat(value)
     except ValueError:
-        raise UsageError(f"--now {value!r} is not an ISO 8601 timestamp.") from None
+        raise UsageError(f"{flag} {value!r} is not an ISO 8601 timestamp.") from None
     if dt.tzinfo is None:
         raise UsageError(
-            f"--now {value!r} has no UTC offset.",
-            hint="Try --now 2026-10-08T12:00:00+00:00",
+            f"{flag} {value!r} has no UTC offset.",
+            hint=f"Try {flag} 2026-10-08T12:00:00+00:00",
         )
     return dt
 
@@ -350,7 +350,9 @@ def _inputs(args: argparse.Namespace) -> list[_Input]:
 
 
 def _decode(item: _Input) -> str:
-    """Message text. Bytes that are not UTF-8 become U+FFFD, with a note."""
+    """Message text for display (``explain``). Bytes that are not UTF-8
+    become U+FFFD, with a note. Conversion never uses this: two different
+    identifiers must not collapse into the same replacement character."""
     try:
         return item.data.decode("utf-8")
     except UnicodeDecodeError:
@@ -361,12 +363,15 @@ def _decode(item: _Input) -> str:
         return item.data.decode("utf-8", errors="replace")
 
 
+def _label(name: str, messages: list[str]) -> list[tuple[str, str]]:
+    if len(messages) == 1:
+        return [(name, messages[0])]
+    return [(f"{name} message {n}", text) for n, text in enumerate(messages, start=1)]
+
+
 def _labelled_messages(item: _Input) -> list[tuple[str, str]]:
     """(label, text) for each message in a file; a file may hold several."""
-    messages = split_messages(_decode(item))
-    if len(messages) == 1:
-        return [(item.name, messages[0])]
-    return [(f"{item.name} message {n}", text) for n, text in enumerate(messages, start=1)]
+    return _label(item.name, split_messages(_decode(item)))
 
 
 def cmd_explain(args: argparse.Namespace) -> int:
@@ -399,7 +404,8 @@ def cmd_explain(args: argparse.Namespace) -> int:
 
 
 def _bundle_text(mapped: MappedMessage) -> str:
-    return json.dumps(bundle_json(mapped), indent=2) + "\n"
+    # jsontext keeps each decimal's digits (12.50 stays 12.50).
+    return json_text(bundle_json(mapped), indent=2) + "\n"
 
 
 def _bundle_name(label: str) -> str:
@@ -412,9 +418,21 @@ def _bundle_name(label: str) -> str:
 
 def cmd_to_fhir(args: argparse.Namespace) -> int:
     registry = _registry(args)
+    if args.skip_failures and not args.post:
+        raise UsageError("--skip-failures applies to --post only.")
     jobs: list[tuple[str, str]] = []
+    failed = undecodable = 0
     for item in _inputs(args):
-        jobs.extend(_labelled_messages(item) or [(item.name, "")])
+        try:
+            # Strict: an identifier with a bad byte must not become U+FFFD
+            # and collide with another one.
+            text = item.data.decode("utf-8")
+        except UnicodeDecodeError:
+            print(f"error: {item.name}: not valid UTF-8; not converted.", file=sys.stderr)
+            failed += 1
+            undecodable += 1
+            continue
+        jobs.extend(_label(item.name, split_messages(text)) or [(item.name, "")])
     out_dir = Path(args.out) if args.out else None
     if out_dir is None and not args.post and len(jobs) > 1:
         raise UsageError(
@@ -427,7 +445,6 @@ def cmd_to_fhir(args: argparse.Namespace) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
 
     mapped: list[tuple[str, MappedMessage]] = []
-    failed = 0
     for label, text in jobs:
         try:
             mapped.append((label, message_to_bundle(text, registry)))
@@ -435,6 +452,17 @@ def cmd_to_fhir(args: argparse.Namespace) -> int:
             # A field position and a fixed reason, never a value.
             print(f"error: {label}: {exc}", file=sys.stderr)
             failed += 1
+    if args.post and failed and not args.skip_failures:
+        # A later message can depend on a failed one (an ORU on its ORM),
+        # so nothing is posted unless the user says to go on without it.
+        print(
+            f"nothing posted: {failed} message(s) could not be mapped;"
+            " fix them, or pass --skip-failures to post the rest.",
+            file=sys.stderr,
+        )
+        return EXIT_FINDINGS
+    if args.post:
+        check_run_order(mapped)
 
     if out_dir is not None:
         names = [_bundle_name(label) for label, _ in mapped]
@@ -458,14 +486,18 @@ def cmd_to_fhir(args: argparse.Namespace) -> int:
     if args.post and mapped:
         _post_bundles(args, mapped)
     if failed:
-        print(f"{failed} of {len(jobs)} message(s) could not be mapped", file=sys.stderr)
+        print(
+            f"{failed} of {len(jobs) + undecodable} message(s) could not be mapped",
+            file=sys.stderr,
+        )
     return EXIT_FINDINGS if failed else EXIT_OK
 
 
 def _post_bundles(args: argparse.Namespace, mapped: list[tuple[str, MappedMessage]]) -> None:
-    """Post each Bundle as one transaction, in order. The first one the
-    server does not fully commit stops the run: later messages can depend
-    on it. What was committed before it has been printed."""
+    """Post each Bundle as one transaction, in order, through the same post
+    as ``fhir sync`` (merges and retirements, ``fhir/post.py``). The first
+    one the server does not fully commit stops the run: later messages can
+    depend on it. What was committed before it has been printed."""
     base, named = _fhir_base(args)
     if not named:
         raise UsageError(
@@ -477,8 +509,8 @@ def _post_bundles(args: argparse.Namespace, mapped: list[tuple[str, MappedMessag
     with HapiClient(base, extra_headers=headers) as client:
         _require_metadata(client, base)
         for label, result in mapped:
-            entries = client.transaction(result.bundle)
-            counts = Counter(f"{kind} {code}" for kind, code in entries)
+            entries = post_mapped(client, result)
+            counts = Counter(f"{c.kind} {'retired' if c.retired else c.code}" for c in entries)
             summary = ", ".join(f"{key} x{n}" if n > 1 else key for key, n in counts.items())
             print(f"{label}: committed ({summary})")
 
@@ -593,6 +625,22 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
     return _print_send_results(outgoing, acks, source, args.expect)
 
 
+def _split_frames(payload: bytes) -> list[bytes]:
+    """One payload per message: a new message starts at each segment that
+    begins with MSH. Bytes before the first MSH are refused (None)."""
+    segments = [s for s in payload.split(b"\r") if s]
+    if not segments:
+        return []
+    if not segments[0].startswith(b"MSH"):
+        raise ValueError("does not start with an MSH segment")
+    frames: list[list[bytes]] = []
+    for segment in segments:
+        if segment.startswith(b"MSH"):
+            frames.append([])
+        frames[-1].append(segment)
+    return [b"\r".join(f) + b"\r" for f in frames]
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     outgoing: list[_Outgoing] = []
     for item in _inputs(args):
@@ -600,7 +648,20 @@ def cmd_send(args: argparse.Namespace) -> int:
         if converted:
             print(f"note: {item.name} uses LF line ends; converted to CR for sending.")
         hint = f"hl7bridge lint {item.path}" if item.path else "hl7bridge explain -"
-        outgoing.append(_Outgoing(item.name, payload, hint))
+        try:
+            frames = _split_frames(payload)
+        except ValueError:
+            raise UsageError(
+                f"{item.name} does not start with an MSH segment; nothing sent.",
+                hint=hint.replace("lint", "explain"),
+            ) from None
+        if not frames:
+            raise UsageError(f"{item.name} holds no HL7 segments; nothing sent.")
+        # Each message is its own MLLP frame: a listener answers one ACK per
+        # frame and would read two messages in one frame as one.
+        for n, frame in enumerate(frames, start=1):
+            label = item.name if len(frames) == 1 else f"{item.name} message {n}"
+            outgoing.append(_Outgoing(label, frame, hint))
     source = STDIN_NAME if _reads_stdin(args) else str(_message_path(args))
     # --repeat sends the same bytes again, never restamped: a listener that
     # keys on the control id answers AA and stores nothing new.
@@ -614,7 +675,7 @@ def _print_send_results(
     for item, raw in zip(outgoing, acks, strict=False):
         view = _read_ack(raw)
         counts[view.code] += 1
-        if view.code == "AA":
+        if view.code == expect:
             continue
         words = ACK_CODE_WORDS.get(view.code, "not a known ACK code")
         print(f"{item.label}: {view.code} ({words})")
@@ -639,14 +700,22 @@ REPLAY_SOURCES = ("quarantine", "store")
 NOT_REPLAYED = "mllp_junk"  # bytes received outside framing are not a message
 
 
+# The schema versions replay can read. Version 2 has the same messages and
+# quarantine tables as version 3, so replaying an old store into a new
+# listener is the way to carry its messages over (there is no migration).
+REPLAY_SCHEMAS = (2, 3)
+
+
 def _readonly_db(args: argparse.Namespace) -> sqlite3.Connection:
     """The store, opened read-only: replay never writes to it."""
     path = _db_path(args)
     state, version = inspect_db(path)
     if state == "missing":
         raise UsageError(f"no database at {path}.", hint="Pass --db with the database file.")
-    if state == "old_schema":
+    if state == "old_schema" and version not in REPLAY_SCHEMAS:
         raise UsageError(schema_mismatch_message(str(path), version))
+    if state == "old_schema":
+        state = "ok"
     if state != "ok":
         raise UsageError(f"{path} is not an hl7bridge database.")
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
@@ -668,7 +737,7 @@ def _replay_rows(args: argparse.Namespace, conn: sqlite3.Connection) -> list[sql
         query = "SELECT id, hospital_id, message_type AS kind, received_at_utc, raw FROM messages"
     if args.since:
         where.append("received_at_utc >= ?")
-        params.append(utc_iso(_now_arg(args.since)))
+        params.append(utc_iso(_now_arg(args.since, "--since")))
     if args.hospital:
         where.append("hospital_id = ?")
         params.append(args.hospital)
@@ -699,7 +768,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 hint=f"Known: {known}.",
             )
     if args.since:
-        _now_arg(args.since)  # a bad time is a usage error before anything opens
+        _now_arg(args.since, "--since")  # a bad time is a usage error before anything opens
     conn = _readonly_db(args)
     try:
         rows = _replay_rows(args, conn)
@@ -709,11 +778,28 @@ def cmd_replay(args: argparse.Namespace) -> int:
     if not rows:
         print(f"nothing to replay from the {args.source}")
         return EXIT_OK
+    # The same bytes quarantined twice (a sender retrying) go out once, the
+    # oldest copy: replaying the quarantine into the listener that filled it
+    # must not multiply it.
+    seen: set[bytes] = set()
+    unique: list[sqlite3.Row] = []
+    for row in rows:
+        raw = _stored_bytes(row["raw"])
+        if raw in seen:
+            continue
+        seen.add(raw)
+        unique.append(row)
+    duplicates = len(rows) - len(unique)
+    rows = unique
+    if duplicates:
+        print(f"skipping {duplicates} duplicate(s): the same bytes as an older row")
     if args.dry_run:
         for row in rows:
+            # Stored fields come from senders; strip control characters.
             print(
-                f"{label} #{row['id']}  {row['received_at_utc']}  {row['hospital_id'] or '-'}"
-                f"  {row['kind']}  {len(_stored_bytes(row['raw']))} bytes"
+                f"{label} #{row['id']}  {printable(row['received_at_utc'])}"
+                f"  {printable(row['hospital_id'] or '-')}"
+                f"  {printable(row['kind'])}  {len(_stored_bytes(row['raw']))} bytes"
             )
         print(f"{len(rows)} message(s) would be sent, oldest first (dry run: nothing sent)")
         return EXIT_OK
@@ -1479,6 +1565,11 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         p.add_argument("--out", metavar="DIR", help="write one Bundle per message into a folder")
         p.add_argument(
             "--post", action="store_true", help="post each Bundle to a FHIR server, in order"
+        )
+        p.add_argument(
+            "--skip-failures",
+            action="store_true",
+            help="with --post, post the messages that map even when others do not",
         )
         p.add_argument(
             "--fhir-base", metavar="URL", help=f"the server for --post (default: {FHIR_BASE_ENV})"

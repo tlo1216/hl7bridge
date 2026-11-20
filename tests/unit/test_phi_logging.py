@@ -80,6 +80,8 @@ from hl7bridge.synth.generator import (
 )
 from hl7bridge.synth.patients import FAMILY_NAMES, GIVEN_NAMES, make_pool
 
+from ..fakefhir import FakeFhir
+
 CONFIG_DIR = BUNDLED_PROFILES
 REGISTRY = HospitalRegistry.load_dir(CONFIG_DIR)
 # No leading word boundary: percent-encoded URLs put a hex digit right
@@ -248,22 +250,10 @@ def restore_logging(isolated_logging) -> Iterator[None]:
 
 
 def ok_handler() -> Handler:
-    """A FHIR server that answers every write: 201 the first time a URL is
-    seen, 200 after that, so a second sync exercises the update path."""
-    seen: set[str] = set()
-    counter = iter(range(1, 1_000_000))
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/metadata"):
-            return httpx.Response(200, json={"resourceType": "CapabilityStatement"})
-        if request.method == "GET":
-            return httpx.Response(200, json={"resourceType": "Bundle", "total": 0})
-        key = str(request.url)
-        status = 200 if key in seen else 201
-        seen.add(key)
-        return httpx.Response(status, json={"id": str(next(counter))})
-
-    return handler
+    """A FHIR server that answers every write (the in-memory one): created
+    the first time, updated after that, so a second sync exercises the
+    update path."""
+    return FakeFhir()
 
 
 def failing_handler(mode: str) -> Handler:
@@ -341,7 +331,7 @@ def test_no_phi_in_fhir_sync_logs_create_update_skip(loaded_db, caplog):
     assert sum(second.updated.values()) > 0
     assert first.skipped, "the planted orphan rows must be skipped"
     # The keys are in the report (product output) ...
-    assert any(CANARY_ACC in key for _, key, _ in first.skipped)
+    assert any(CANARY_STUDY_UID in key for _, key, _ in first.skipped)
 
     log_text = caplog.text
     assert "HTTP Request: PUT" in log_text, "httpx logging not captured; test would be vacuous"
@@ -585,7 +575,7 @@ def test_cli_fhir_sync_stderr_has_no_phi(cli_db, capsys, monkeypatch):
     assert "HTTP Request" not in captured.err
     assert find_leaks(captured.err, values) == []
     # Stdout is the report and does name the skipped keys (D16).
-    assert CANARY_ACC in captured.out
+    assert CANARY_STUDY_UID in captured.out
 
 
 @pytest.mark.usefixtures("restore_logging")
@@ -1371,10 +1361,16 @@ def test_sync_skip_reasons_for_unmapped_codes_hold_no_value(loaded_db, caplog):
     canary = "QX7"
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    saved = conn.execute("SELECT hospital_id, mrn, sex FROM patients LIMIT 1").fetchone()
+    # sync maps the stored messages, so the canary goes into one of them.
+    saved = conn.execute(
+        "SELECT id, raw FROM messages WHERE message_type = 'ADT^A04' ORDER BY id LIMIT 1"
+    ).fetchone()
+    pid = next(seg for seg in saved["raw"].split("\r") if seg.startswith("PID|"))
+    fields = pid.split("|")
+    fields[8] = canary
     conn.execute(
-        "UPDATE patients SET sex = ? WHERE hospital_id = ? AND mrn = ?",
-        (canary, saved["hospital_id"], saved["mrn"]),
+        "UPDATE messages SET raw = ? WHERE id = ?",
+        (saved["raw"].replace(pid, "|".join(fields)), saved["id"]),
     )
     conn.commit()
     try:
@@ -1382,14 +1378,60 @@ def test_sync_skip_reasons_for_unmapped_codes_hold_no_value(loaded_db, caplog):
         with caplog.at_level(logging.DEBUG), mock_client(ok_handler()) as client:
             report = sync_to_fhir(conn, registry, client)
     finally:
-        conn.execute(
-            "UPDATE patients SET sex = ? WHERE hospital_id = ? AND mrn = ?",
-            (saved["sex"], saved["hospital_id"], saved["mrn"]),
-        )
+        conn.execute("UPDATE messages SET raw = ? WHERE id = ?", (saved["raw"], saved["id"]))
         conn.commit()
         conn.close()
-    reasons = [reason for kind, _, reason in report.skipped if kind == "Patient"]
+    reasons = [reason for kind, _, reason in report.skipped if kind == "ADT^A04"]
     assert reasons == ["PID-8: code not in table 0001 (administrative sex); refusing to guess"]
-    assert "fhir sync skipped 1 Patient row(s)" in caplog.text
+    assert "fhir sync skipped 1 ADT^A04 row(s)" in caplog.text
     assert canary not in caplog.text
     assert find_leaks(caplog.text, values) == []
+
+
+# -- python-hl7's own diagnostics --------------------------------------------
+
+
+HL7_CANARY = "CANARYHL7Q"
+BAD_ESCAPE_ORU = (
+    "MSH|^~\\&|RIS|HOSPA|HL7BRIDGE|HUB|20261007120000||ORU^R01|PHL7X|T|2.3\r"
+    "PID|1||SA1001^^^HOSPA^MR||ZZZSAMPLE^ONE||19800101|F\r"
+    "OBR|1|PL1|ACCQ001|71046^XR^local|R||20261007110000|||||||||||||||20261007120000||CR|F\r"
+    f"OBX|1|TX|RPT^Text||{HL7_CANARY}\\XZZ\\ more||||||F\r"
+    "OBX|2|ST|S1^Str^99HUB|1|x||||||F\r"
+    f"NTE|1||{HL7_CANARY}\\Zlocal\\ note\r"
+)
+
+
+def test_python_hl7_escape_diagnostics_never_reach_the_log(caplog):
+    """python-hl7 logs a bad escape with the whole field and a traceback.
+    Those records are withheld, on the ingest path and in the mapper."""
+    from hl7bridge.v2fhir import message_to_bundle
+
+    conn = connect(":memory:")
+    with caplog.at_level(logging.DEBUG):
+        IngestPipeline(REGISTRY, conn).handle_bytes(BAD_ESCAPE_ORU.encode())
+        with pytest.raises(BridgeError) as info:
+            message_to_bundle(BAD_ESCAPE_ORU, REGISTRY)
+    conn.close()
+    assert str(info.value) == "OBX-5: holds a malformed escape sequence"
+    assert "python-hl7 diagnostic withheld" in caplog.text, "nothing logged; test is vacuous"
+    assert HL7_CANARY not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+def test_python_hl7_records_are_withheld_by_the_cli_handler(capsys):
+    """The CLI's handler filter withholds them too, whatever the logger."""
+    configure_logging(logging.DEBUG)
+    record = logging.LogRecord(
+        name="some.other.name",
+        level=logging.ERROR,
+        pathname=__import__("hl7.util").util.__file__,
+        lineno=1,
+        msg="Error decoding value [%s]",
+        args=(HL7_CANARY,),
+        exc_info=None,
+    )
+    logging.getLogger("some.other.name").handle(record)
+    err = capsys.readouterr().err
+    assert "python-hl7 diagnostic withheld" in err
+    assert HL7_CANARY not in err

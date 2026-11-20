@@ -29,6 +29,8 @@ from hl7bridge.fhir.client import HapiClient
 from hl7bridge.fhir.sync import FhirSyncReport
 from hl7bridge.profiles import BUNDLED_PROFILES
 
+from ..fakefhir import FakeFhir
+
 
 def _make_dir_link(link: Path, target: Path) -> str:
     """A directory symlink, or on Windows without the symlink right, a junction."""
@@ -512,14 +514,8 @@ def test_demo_ignores_the_fhir_base_environment_variable(temp_root, capsys, monk
 
 
 def _fhir_ok():
-    counter = iter(range(1, 1_000_000))
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/metadata"):
-            return httpx.Response(200, json={"resourceType": "CapabilityStatement"})
-        return httpx.Response(201, json={"id": str(next(counter))})
-
-    return handler
+    """An in-memory FHIR server that commits every write."""
+    return FakeFhir()
 
 
 def _factory(handler):
@@ -594,13 +590,14 @@ def test_demo_fhir_http_error_exits_1_not_3(tmp_path, capsys, monkeypatch):
 
 def test_demo_waits_for_fhir(tmp_path, capsys, monkeypatch):
     calls = {"n": 0}
+    server = _fhir_ok()
 
     def booting(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/metadata"):
             calls["n"] += 1
             if calls["n"] < 3:
                 return httpx.Response(503)
-        return _fhir_ok()(request)
+        return server(request)
 
     monkeypatch.setattr(demo_module.time, "sleep", lambda s: None)
     opts = DemoOptions(
