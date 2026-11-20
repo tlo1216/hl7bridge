@@ -61,7 +61,9 @@ def load_studies(
         try:
             study_at = parse_hl7_ts(f"{study_date}{study_time}{offset}", default_tz=hospital.tzinfo)
         except TimestampError as exc:
-            raise StudyLoadError(f"{path}: bad StudyDate/StudyTime: {exc}") from exc
+            raise StudyLoadError(
+                f"{path}: StudyDate, StudyTime or TimezoneOffsetFromUTC is not a valid timestamp"
+            ) from exc
 
         accession = str(getattr(ds, "AccessionNumber", "") or "").strip() or None
         mrn = str(getattr(ds, "PatientID", "") or "").strip() or None

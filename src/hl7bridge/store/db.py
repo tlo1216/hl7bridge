@@ -26,7 +26,7 @@ def utc_iso(dt: datetime) -> str:
 def parse_utc_iso(value: str) -> datetime:
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        raise ValueError(f"stored timestamp {value!r} is naive; storage invariant violated")
+        raise ValueError("stored timestamp is naive; storage invariant violated")
     return dt
 
 

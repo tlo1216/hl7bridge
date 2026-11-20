@@ -476,6 +476,25 @@ def test_loader_errors_do_not_echo_field_values(tmp_path):
     assert find_leaks(str(ei.value)) == []
 
 
+def test_study_loader_error_does_not_echo_the_timestamp(corpus, tmp_path, monkeypatch):
+    from hl7bridge.errors import TimestampError
+    from hl7bridge.ingest import loaders
+
+    _, out, registry = corpus
+
+    def quoting_parser(value, **_kwargs):
+        raise TimestampError(f"malformed HL7 timestamp: {CANARY_MRN!r} {value!r}")
+
+    monkeypatch.setattr(loaders, "parse_hl7_ts", quoting_parser)
+    conn = connect(tmp_path / "studies.db")
+    with pytest.raises(loaders.StudyLoadError) as ei:
+        load_studies(conn, registry, out / "dicom")
+    conn.close()
+    assert "not a valid timestamp" in str(ei.value)
+    assert find_leaks(str(ei.value)) == []
+    assert CANARY_MRN in str(ei.value.__cause__), "the cause keeps the detail for debugging"
+
+
 # -- 8. the CLI with its real logging setup ------------------------------------
 
 
