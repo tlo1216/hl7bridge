@@ -204,8 +204,12 @@ Patient, Encounter and ServiceRequest into the server's current version
 (read, then written back with `If-Match`): a thin A08 never erases the
 address an A01 wrote. An ADT^A40 merge updates the surviving Patient (PID)
 and sets the merged-away one (MRG-1) inactive with a `replaced-by` link to
-the survivor; the merged-away Patient's other data stays, and a bare one is
-written when the server has none. A corrected report that drops a result sets that
+the survivor; the merged-away Patient's other data and links stay, and a bare
+one is written when the server has none. A contradicting or reversed merge is
+refused. Orders, reports and encounters are not moved onto the survivor, and
+later messages can still write onto a merged-away Patient. The Bundle that
+`--out` writes makes the merged-away Patient a conditional create, so posting
+the file as is never replaces a Patient. A corrected report that drops a result sets that
 Observation to `entered-in-error`. Narrative report lines (OBX-2 TX or FT)
 are the report's text, not Observations.
 `--out DIR` writes one Bundle per message (never over an existing file),

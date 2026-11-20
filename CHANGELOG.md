@@ -12,9 +12,21 @@ profile format may still change between minor versions.
 - `to-fhir` and `fhir sync` map ADT^A40 (patient merge). The surviving
   Patient (PID) is merged as for any ADT; the merged-away Patient (MRG-1) is
   set inactive with a `replaced-by` link to the survivor, keeping what the
-  server already holds for it, or written bare when the server has none.
-  An MRG-1 that is empty, repeated, not typed MR or the same as PID-3 is
-  refused. `listen --target fhir` still answers A40 with AR
+  server already holds for it (its other links stay), or written bare when
+  the server has none. The offline Bundle makes the merged-away Patient a
+  conditional create, so a file posted as is never replaces a Patient.
+  Refused: a message with more than one PID or MRG, an MRG-1 that is empty,
+  repeated, typed with anything but MR, the same as PID-3 or from another
+  assigning authority than PID-3, an A40 whose merged-away Patient is
+  already replaced by another Patient, one whose survivor is inactive or
+  merged away itself, and one whose two Patients are one resource on the
+  server. `fhir sync` posts every A40 in order, chains edge by edge, and
+  the merged-away patient's own messages too, as `to-fhir --post` does; an
+  A40 the server contradicts is skipped loudly. Orders, reports and
+  encounters of the merged-away Patient are not moved onto the survivor, and
+  nothing reactivates a merged-away Patient: later messages can still
+  write onto it. A bare merged-away Patient may fail a server that enforces
+  US Core. `listen --target fhir` still answers A40 with AR
   `patient_read_only`.
 
 ## [0.5.0] - 2026-11-20
