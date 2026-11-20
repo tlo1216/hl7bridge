@@ -70,6 +70,32 @@ is missing; `summary`, `reconcile`, `ack-report`, `tat` and `fhir sync`
 open an existing one only. A SQLite file that holds another program's
 tables is refused, never changed.
 
+## What `demo` deletes
+
+Guaranteed:
+
+- Nothing in a folder named with `--data-dir` is ever deleted.
+- Deletion happens only inside the folder `tempfile.mkdtemp` made in the
+  same run, only to names that run created exclusively, only while each
+  name still leads to an object of the recorded kind and file identity,
+  never through a link and never recursively. Anything else is left and
+  the folder is kept.
+- Other users cannot change anything in that folder. On Linux and macOS
+  `mkdtemp` makes it with mode 0700 (a test checks this). On Windows the
+  default temp folder is in your profile, whose ACL admits only you,
+  SYSTEM and administrators.
+
+Not guaranteed: protection against a program that runs as you, or as an
+administrator, and writes into that private folder while the demo runs.
+It could rename another file onto a recorded name between the last check
+and the delete (Linux and macOS), replace a folder between its creation
+and the identity read, or, on a file system that reuses file ids (FAT,
+some ReFS volumes), make a new file that carries a recorded identity.
+Each needs write access to a folder only you can write to, so that
+program could already delete your files directly; the race gives it
+nothing new. If you set `TMP` or `TEMP` to a shared folder on Windows,
+the folder's ACL is whatever that location gives it.
+
 ## Exit codes
 
 | Code | Meaning |

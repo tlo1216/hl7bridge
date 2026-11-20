@@ -104,6 +104,30 @@ def test_default_is_a_new_temporary_folder(temp_root):
     assert files.root_identity is not None
 
 
+def test_the_temporary_folder_comes_from_mkdtemp(temp_root, monkeypatch):
+    """The privacy of the folder (0700 on POSIX, the per-user temp folder on
+    Windows) comes from mkdtemp; a plain mkdir would not give it."""
+    calls: list[str] = []
+    real = tempfile.mkdtemp
+
+    def spy(*args, **kwargs):
+        made = real(*args, **kwargs)
+        calls.append(made)
+        return made
+
+    monkeypatch.setattr(tempfile, "mkdtemp", spy)
+    files = claim_demo_dir(None)
+    assert calls == [str(files.root)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+def test_the_temporary_folder_is_private(temp_root):
+    import stat
+
+    files = claim_demo_dir(None)
+    assert stat.S_IMODE(os.stat(files.root).st_mode) == 0o700
+
+
 def test_a_new_data_dir_is_created_and_is_not_temporary(tmp_path):
     files = claim_demo_dir(tmp_path / "new" / "run")
     assert files.root.is_dir()

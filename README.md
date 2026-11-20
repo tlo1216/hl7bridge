@@ -107,11 +107,19 @@ Where the demo writes, and what it deletes:
   through the same handle (a junction swapped in on the way leads to a
   file with another identity, which is left alone); on Linux and macOS
   each folder on the way down is opened without following links and must
-  have its recorded identity. On Linux and macOS a program running as you
-  could still swap a file in the instant between the last check and the
-  delete; no other user can, since the folder is yours alone. If anything
-  else is in the folder, or something it created was changed, it leaves
-  it, keeps the folder and prints its path.
+  have its recorded identity. If anything else is in the folder, or
+  something it created was changed, it leaves it, keeps the folder and
+  prints its path.
+- What this does not cover: a program running as you (or as an
+  administrator) that writes into the private temp folder during the run.
+  It could swap a name in the instant between the last check and the
+  delete, replace a folder before its identity is read, or, on a file
+  system that reuses file ids (FAT, some ReFS volumes), make a file that
+  carries a recorded identity. All of these need write access to a folder
+  only you can write to (mode 0700 on Linux and macOS, your profile's temp
+  folder on Windows), so such a program could already delete your files
+  directly. Other users cannot do any of it. `docs/cli.md` has the full
+  statement.
 - `--data-dir PATH` takes a folder that does not exist yet or is empty. The
   demo writes there and leaves everything in place: hl7bridge never deletes
   anything in a folder you name. A folder that is not empty is refused, so

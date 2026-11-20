@@ -30,6 +30,29 @@ recorded identity. Nothing is ever deleted through a link:
   so no other user can.
 
 Anything that fails a check is left in place, and the folder is kept.
+
+Threat model. What is guaranteed:
+
+- Nothing in a folder named with ``--data-dir`` is ever deleted.
+- Deletion happens only inside the folder ``tempfile.mkdtemp`` made in
+  this run, only to names this run created exclusively, only while each
+  name still has its recorded kind and identity, never through a link and
+  never recursively.
+- Other users cannot change anything in that folder: ``mkdtemp`` creates
+  it with mode 0700 on Linux and macOS (a test checks this), and on
+  Windows the default temp folder sits in your profile, whose ACL admits
+  only you, SYSTEM and administrators.
+
+What is not guaranteed: protection against a program that runs as you,
+or as an administrator, and writes into that private folder during the
+run. Such a program could rename another file onto a recorded name
+between the last check and the delete (Linux and macOS), replace a
+folder between its ``mkdir`` and the identity read, or, on a file system
+that reuses file ids (FAT, and some ReFS volumes), make a new file that
+carries a recorded identity. Each of these needs write access to your
+private temp folder, which means it already has your rights and could
+delete your files directly. The race gives it nothing it did not have,
+so the demo does not try to defend against your own account.
 """
 
 from __future__ import annotations
