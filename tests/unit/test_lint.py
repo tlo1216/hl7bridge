@@ -4,16 +4,15 @@ The exact-set precision test over the full generated corpus lives in
 tests/system/test_lint_corpus.py; these are the per-rule contracts.
 """
 
-from pathlib import Path
-
 import pytest
 
 from hl7bridge.config import HospitalRegistry
-from hl7bridge.errors import ConfigError
+from hl7bridge.errors import ConfigError, UsageError
 from hl7bridge.lint import lint_text
 from hl7bridge.lint.runner import lint_directory, render_lint_text
+from hl7bridge.profiles import BUNDLED_PROFILES
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 
 
 @pytest.fixture(scope="module")
@@ -154,8 +153,11 @@ def test_unknown_disabled_rule_rejected_at_lint_time(tmp_path):
 
 
 def test_lint_directory_empty_rejected(tmp_path, registry):
-    with pytest.raises(ConfigError, match=r"no .*hl7 files"):
+    with pytest.raises(UsageError) as excinfo:
         lint_directory(tmp_path, registry)
+    assert f"{excinfo.value} {excinfo.value.hint}" == (
+        f"no *.hl7 files under {tmp_path}. Try: hl7bridge init"
+    )
 
 
 def test_lint_directory_keys_use_forward_slashes(tmp_path, registry):

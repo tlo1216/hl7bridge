@@ -67,6 +67,7 @@ from hl7bridge.logsafety import (
     redact_url_queries,
     safe_url,
 )
+from hl7bridge.profiles import BUNDLED_PROFILES
 from hl7bridge.store import connect
 from hl7bridge.store.repo import OrderRow, StudyRow, insert_study, upsert_order
 from hl7bridge.synth import generate
@@ -79,7 +80,7 @@ from hl7bridge.synth.generator import (
 )
 from hl7bridge.synth.patients import FAMILY_NAMES, GIVEN_NAMES, make_pool
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "hospitals"
+CONFIG_DIR = BUNDLED_PROFILES
 REGISTRY = HospitalRegistry.load_dir(CONFIG_DIR)
 # No leading word boundary: percent-encoded URLs put a hex digit right
 # before the value (%7CMA1001).
@@ -564,7 +565,17 @@ def test_cli_fhir_sync_stderr_has_no_phi(cli_db, capsys, monkeypatch):
     db_path, values = cli_db
     _patch_client(monkeypatch, ok_handler())
     rc = _run_cli(
-        ["fhir-sync", "--db", str(db_path), "--config", str(CONFIG_DIR), "--fhir-base", FHIR_BASE]
+        [
+            "-v",
+            "fhir",
+            "sync",
+            "--db",
+            str(db_path),
+            "--config",
+            str(CONFIG_DIR),
+            "--fhir-base",
+            FHIR_BASE,
+        ]
     )
     captured = capsys.readouterr()
     assert rc == 1, "the planted orphan rows are skipped, so the sync reports failure"
@@ -583,11 +594,23 @@ def test_cli_fhir_sync_failure_stderr_has_no_phi(cli_db, capsys, monkeypatch, mo
     db_path, values = cli_db
     _patch_client(monkeypatch, failing_handler(mode))
     rc = _run_cli(
-        ["fhir-sync", "--db", str(db_path), "--config", str(CONFIG_DIR), "--fhir-base", FHIR_BASE]
+        [
+            "fhir",
+            "sync",
+            "--db",
+            str(db_path),
+            "--config",
+            str(CONFIG_DIR),
+            "--fhir-base",
+            FHIR_BASE,
+        ]
     )
     captured = capsys.readouterr()
-    assert rc == 1
-    assert "FHIR error:" in captured.err
+    # A server that answered with an error is a finding; one that never
+    # answered is a connection error.
+    assert rc == (3 if mode in ("transport", "timeout") else 1)
+    assert "error: FHIR" in captured.err
+    assert "Traceback" not in captured.err
     assert "/fhir/Patient" in captured.err
     assert find_leaks(captured.err, values) == []
     assert find_leaks(captured.out, values) == []
@@ -600,7 +623,7 @@ def test_cli_fhir_probe_failure_has_no_phi(capsys, monkeypatch, status):
         return httpx.Response(status, text=f"denied for {CANARY_MRN} {CANARY_NAME}")
 
     _patch_client(monkeypatch, handler)
-    rc = _run_cli(["fhir-probe", "--fhir-base", FHIR_BASE])
+    rc = _run_cli(["fhir", "probe", "--fhir-base", FHIR_BASE])
     captured = capsys.readouterr()
     assert rc == 1
     assert f"FHIR server returned {status}" in captured.err
@@ -614,9 +637,9 @@ def test_cli_fhir_probe_transport_failure_has_no_phi(capsys, monkeypatch):
         raise httpx.ConnectError(f"refused {request.url} {CANARY_MRN}", request=request)
 
     _patch_client(monkeypatch, handler)
-    rc = _run_cli(["fhir-probe", "--fhir-base", FHIR_BASE])
+    rc = _run_cli(["fhir", "probe", "--fhir-base", FHIR_BASE])
     captured = capsys.readouterr()
-    assert rc == 1
+    assert rc == 3
     assert "transport error (ConnectError)" in captured.err
     assert find_leaks(captured.err) == []
 
@@ -967,7 +990,8 @@ def test_cli_load_outbound_errors_have_no_phi(tmp_path, capsys, overrides):
     path = _outbound_file(tmp_path, **overrides)
     rc = _run_cli(
         [
-            "load-outbound",
+            "load",
+            "outbound",
             "--db",
             str(tmp_path / "o.db"),
             "--config",
@@ -978,7 +1002,7 @@ def test_cli_load_outbound_errors_have_no_phi(tmp_path, capsys, overrides):
     )
     captured = capsys.readouterr()
     assert rc == 1
-    assert "hl7bridge: error:" in captured.err
+    assert "error:" in captured.err
     assert "Traceback" not in captured.err
     assert find_leaks(captured.err) == []
     assert find_leaks(captured.out) == []
@@ -992,7 +1016,8 @@ def test_cli_load_studies_errors_have_no_phi(corpus, tmp_path, capsys, case):
     _write_bad_dicom(out, dicom_root, **BAD_DICOM_VALUES[case])
     rc = _run_cli(
         [
-            "load-studies",
+            "load",
+            "studies",
             "--db",
             str(tmp_path / "s.db"),
             "--config",
@@ -1003,7 +1028,7 @@ def test_cli_load_studies_errors_have_no_phi(corpus, tmp_path, capsys, case):
     )
     captured = capsys.readouterr()
     assert rc == 1
-    assert "hl7bridge: error:" in captured.err
+    assert "error:" in captured.err
     assert "Traceback" not in captured.err
     assert find_leaks(captured.err) == []
     assert "bad.dcm" not in captured.err, "file names can be study UIDs"
@@ -1048,20 +1073,29 @@ def test_cli_ack_report_with_unconfigured_hospital_has_no_phi(tmp_path, capsys):
     ],
     ids=["foreign", "timestamp", "parse"],
 )
-def test_cli_boundary_withholds_messages_that_quote_input(tmp_path, capsys, monkeypatch, error):
-    def boom(_args):
+@pytest.mark.parametrize("debug", [False, True], ids=["plain", "debug"])
+def test_cli_boundary_withholds_messages_that_quote_input(
+    tmp_path, capsys, monkeypatch, error, debug
+):
+    def boom(_conn):
         try:
             raise ValueError(f"inner {CANARY_ACC}")
         except ValueError as inner:
             raise error from inner
 
-    monkeypatch.setattr(cli, "cmd_summary", boom)
-    rc = _run_cli(["summary", "--db", str(tmp_path / "x.db")])
+    monkeypatch.setattr(cli, "message_counts", boom)
+    argv = ["summary", "--db", str(tmp_path / "x.db")]
+    rc = _run_cli(["--debug", *argv] if debug else argv)
     captured = capsys.readouterr()
-    assert rc == (2 if isinstance(error, RuntimeError) else 1)
+    assert rc == (4 if isinstance(error, RuntimeError) else 1)
     assert type(error).__name__ in captured.err
     assert "message withheld" in captured.err
-    assert "boom" in captured.err, "stack frames are still printed"
+    if debug:
+        assert "boom" in captured.err, "--debug prints the stack frames"
+    else:
+        assert "boom" not in captured.err, "no stack frames without --debug"
+        assert "--debug" in captured.err
+    assert "Traceback" not in captured.err
     assert find_leaks(captured.err) == []
 
 
@@ -1075,26 +1109,27 @@ def test_cli_credentials_in_fhir_base_are_never_printed(tmp_path, capsys, monkey
 
     secret_base = "http://demo-user:s3cr3t-token@fhir.test/fhir"
     _patch_client(monkeypatch, denied)
-    rc_probe = _run_cli(["fhir-probe", "--fhir-base", secret_base])
+    rc_probe = _run_cli(["fhir", "probe", "--fhir-base", secret_base])
     _patch_client(monkeypatch, refused)
-    with pytest.raises(SystemExit) as ei:
-        _run_cli(
-            [
-                "fhir-sync",
-                "--db",
-                str(tmp_path / "c.db"),
-                "--config",
-                str(CONFIG_DIR),
-                "--fhir-base",
-                secret_base,
-            ]
-        )
+    rc_sync = _run_cli(
+        [
+            "fhir",
+            "sync",
+            "--db",
+            str(tmp_path / "c.db"),
+            "--config",
+            str(CONFIG_DIR),
+            "--fhir-base",
+            secret_base,
+        ]
+    )
     captured = capsys.readouterr()
     assert rc_probe == 1
-    everything = captured.out + captured.err + str(ei.value.code)
+    assert rc_sync == 3
+    everything = captured.out + captured.err
     assert "server: http://fhir.test/fhir" in captured.out
     assert "FHIR /metadata probe failed for http://fhir.test/fhir" in captured.err
-    assert "fhir.test" in str(ei.value.code)
+    assert "error: no answer from http://fhir.test/fhir/metadata" in captured.err
     assert "s3cr3t" not in everything and "demo-user" not in everything
 
 
@@ -1186,3 +1221,48 @@ def test_issue_codes_are_from_the_value_set_only(issue, expected):
     assert err.issue_codes == expected
     assert find_leaks(str(err)) == []
     assert CANARY_NAME.lower() not in str(err)
+
+
+# -- 18. the 0.3 commands: demo, send, doctor ---------------------------------------
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_cli_demo_logs_and_errors_have_no_phi(tmp_path, capsys, monkeypatch):
+    """The whole demo at DEBUG through main(): every log line on stderr is
+    scanned. Stdout holds the reports and is not checked (D16)."""
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    rc = _run_cli(["--debug", "demo"])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out[-2000:]
+    assert "message rejected" in captured.err, "debug logging is off; test would be vacuous"
+    assert "mllp connection opened" in captured.err
+    assert find_leaks(captured.err) == []
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_cli_send_stderr_names_no_message_values(tmp_path, capsys):
+    """send puts per-file ACK details on stdout; stderr carries only the
+    status lines and the error, never a file name or a field value."""
+    msgs = tmp_path / "msgs"
+    msgs.mkdir()
+    (msgs / f"{CANARY_MRN}.hl7").write_bytes(_adt(f"{CANARY_MRN}-CTL"))
+    with socket_closed_port() as port:
+        rc = _run_cli(["send", str(msgs), "--port", str(port)])
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert "error: cannot connect" in captured.err
+    assert CANARY_MRN not in captured.err.replace(str(msgs), "")
+    assert find_leaks(captured.err.replace(str(msgs), "")) == []
+
+
+@contextmanager
+def socket_closed_port() -> Iterator[int]:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = int(s.getsockname()[1])
+    yield port

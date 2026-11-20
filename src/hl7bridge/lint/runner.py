@@ -21,6 +21,7 @@ from ..ingest.pipeline import (
     VALID_ACK_CODES,
     VALID_REPORT_STATUSES,
 )
+from ..msgfiles import display_key, hl7_files
 from .rules import KNOWN_RULES, LintFinding, make_finding
 
 
@@ -204,17 +205,14 @@ class LintReport:
 def lint_directory(directory: Path, registry: HospitalRegistry) -> LintReport:
     for cfg in registry.by_id.values():
         _validate_profile(cfg)
-    paths = sorted(directory.rglob("*.hl7"))
-    if not paths:
-        raise ConfigError(f"no *.hl7 files under {directory}")
     report = LintReport()
-    for path in paths:
+    for path in hl7_files(directory):
         # Bytes, then decode: text mode would rewrite bare CR segment ends.
         findings = lint_text(path.read_bytes().decode("utf-8"), registry)
         report.files_checked += 1
         if findings:
             # Forward slashes on every OS so reports and keys match everywhere.
-            report.by_file.append((path.relative_to(directory).as_posix(), findings))
+            report.by_file.append((display_key(path, directory), findings))
     return report
 
 

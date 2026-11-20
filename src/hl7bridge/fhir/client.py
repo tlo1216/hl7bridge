@@ -122,7 +122,8 @@ class HapiClient:
         result: dict[str, Any] = response.json()
         return result
 
-    def metadata_ok(self) -> bool:
+    def metadata_status(self) -> int:
+        """HTTP status of GET /metadata, or 0 when the server never answered."""
         try:
             response = self._client.get(f"{self.base_url}/metadata")
         except httpx.TransportError as exc:
@@ -132,8 +133,11 @@ class HapiClient:
                 safe_url(self.base_url),
                 type(exc).__name__,
             )
-            return False
-        return response.status_code == 200
+            return 0
+        return response.status_code
+
+    def metadata_ok(self) -> bool:
+        return self.metadata_status() == 200
 
     def capability_summary(self) -> dict[str, Any]:
         """Read-only probe: software name/version and FHIR version from the

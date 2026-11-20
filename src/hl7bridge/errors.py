@@ -53,19 +53,68 @@ def _url_path(url: str) -> str:
     return path or "/"
 
 
+# Exit codes, documented once in docs/cli.md.
+EXIT_OK = 0
+EXIT_FINDINGS = 1  # findings, rejected messages, a failed check
+EXIT_USAGE = 2  # bad arguments, bad profiles, unusable files or folders
+EXIT_CONNECTION = 3  # a listener or server did not answer
+EXIT_INTERNAL = 4  # a bug in hl7bridge
+EXIT_INTERRUPTED = 130  # Ctrl+C
+
+
 class BridgeError(Exception):
     """Base class for all hl7bridge errors.
 
     ``quotes_input`` is True for the classes whose message can quote a
     sender-written value (a timestamp, a broken segment). The CLI prints the
     message of every other class, and only the class name for these.
+
+    ``hint`` is fixed text that tells the user what to try next. The CLI
+    prints it after the message. ``exit_code`` is the CLI exit status.
     """
 
     quotes_input: bool = False
+    exit_code: int = EXIT_FINDINGS
+
+    def __init__(self, *args: object, hint: str = "") -> None:
+        super().__init__(*args)
+        self.hint = hint
 
 
 class ConfigError(BridgeError):
     """Hospital or application configuration is invalid."""
+
+    exit_code = EXIT_USAGE
+
+
+class UsageError(BridgeError):
+    """A command was given arguments or paths it cannot use."""
+
+    exit_code = EXIT_USAGE
+
+
+class ListenError(BridgeError):
+    """The MLLP listener could not bind its address."""
+
+    exit_code = EXIT_USAGE
+
+
+class NetworkError(BridgeError):
+    """A listener or server did not answer, or the connection broke."""
+
+    exit_code = EXIT_CONNECTION
+
+
+class StoreError(BridgeError):
+    """The database file is not usable: wrong schema version, not SQLite."""
+
+    exit_code = EXIT_USAGE
+
+
+class DemoDirError(BridgeError):
+    """The demo refused to use or delete a folder it cannot prove it owns."""
+
+    exit_code = EXIT_USAGE
 
 
 class HL7ParseError(BridgeError):
@@ -134,6 +183,11 @@ class FhirPostError(BridgeError):
         if reason:
             text += f": {reason}"
         super().__init__(text)
+
+    @property
+    def exit_code(self) -> int:  # type: ignore[override]
+        """3 when the server never answered, 1 when it answered with an error."""
+        return EXIT_CONNECTION if self.status_code == 0 else EXIT_FINDINGS
 
     @property
     def issue_codes(self) -> list[str]:
