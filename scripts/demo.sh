@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Weekend demo: synthetic day for three hospitals, end to end.
+# End-to-end demo: a synthetic day for three hospitals.
 #
 # Prereqs: uv sync; docker (for HAPI FHIR). Run from the repo root:
 #   ./scripts/demo.sh
@@ -8,23 +8,35 @@
 # day, load DICOM metadata and the outbound log, then print the
 # reconciliation report, the ACK report, the quarantine summary, and sync
 # to FHIR. REPORT_NOW comes from the manifest so reports are deterministic.
+#
+# Safety: DATA_DIR is a disposable folder this script owns. It is deleted
+# and recreated on each run only if it holds the marker file the script
+# wrote (see scripts/demo_guard.sh). HAPI is published on 127.0.0.1 only.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+# shellcheck source=scripts/demo_guard.sh
+. "$SCRIPT_DIR/demo_guard.sh"
 
 DATA_DIR="${DATA_DIR:-data/demo}"
 DB="$DATA_DIR/bridge.db"
 SEED="${SEED:-42}"
 MLLP_PORT="${MLLP_PORT:-2575}"
-FHIR_BASE="${FHIR_BASE:-http://localhost:8080/fhir}"
+FHIR_BASE="${FHIR_BASE:-http://127.0.0.1:8080/fhir}"
 HAPI_IMAGE="hapiproject/hapi:v8.12.0-2"
 
 run() { uv run hl7bridge "$@"; }
+
+# Before anything starts: claim (or safely reset) the owned data folder.
+prepare_data_dir "$DATA_DIR" "$REPO_ROOT"
 
 echo "== 0. HAPI FHIR =="
 if curl -fsS "$FHIR_BASE/metadata" >/dev/null 2>&1; then
     echo "FHIR server already answering at $FHIR_BASE"
 else
     docker rm -f hl7bridge-hapi >/dev/null 2>&1 || true  # stale container from a previous run
-    docker run -d --name hl7bridge-hapi -p 8080:8080 "$HAPI_IMAGE"
+    docker run -d --name hl7bridge-hapi -p 127.0.0.1:8080:8080 "$HAPI_IMAGE"
     echo -n "waiting for HAPI to boot"
     for _ in $(seq 1 90); do
         if curl -fsS "$FHIR_BASE/metadata" >/dev/null 2>&1; then break; fi
@@ -36,8 +48,6 @@ else
 fi
 
 echo "== 1. Generate synthetic day (seed=$SEED) =="
-rm -rf "$DATA_DIR"
-mkdir -p "$DATA_DIR"
 run synth --out "$DATA_DIR/synth" --config config/hospitals --seed "$SEED"
 REPORT_NOW="$(MANIFEST="$DATA_DIR/synth/manifest.json" uv run python -c 'import json,os;print(json.load(open(os.environ["MANIFEST"]))["report_now_utc"])')"
 
