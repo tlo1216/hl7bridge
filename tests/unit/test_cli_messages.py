@@ -14,7 +14,7 @@ import pytest
 
 from hl7bridge import cli
 from hl7bridge.config import HospitalRegistry
-from hl7bridge.errors import EXIT_CONNECTION, EXIT_FINDINGS, EXIT_OK, EXIT_USAGE
+from hl7bridge.errors import EXIT_CONNECTION, EXIT_FINDINGS, EXIT_OK, EXIT_USAGE, ConnectError
 from hl7bridge.explain import explain_message, render_text, split_messages
 from hl7bridge.fhir.client import HapiClient
 from hl7bridge.ingest import IngestPipeline
@@ -240,7 +240,7 @@ def test_send_refuses_input_that_does_not_start_with_msh(tmp_path, capsys):
 
 def test_send_warns_when_the_host_is_not_loopback(monkeypatch, capsys):
     async def refuse(*_a, **_k):
-        raise ConnectionRefusedError
+        raise ConnectError(ConnectionRefusedError())
 
     monkeypatch.setattr(cli, "send_messages", refuse)
     rc = cli.main(["send", str(A04), "--host", "192.0.2.10"])

@@ -37,6 +37,14 @@ Log records from hl7bridge itself carry store row ids, hospital ids,
 message types from configuration, counts and reason codes. They never
 carry sender-written field values. ``tests/unit/test_phi_logging.py``
 enforces this with canary values on every path.
+
+The one exception is the accepted TLS client certificate line of the
+listener: the subject, subject alternative names, serial and issuer come
+from a certificate the sender presented, so each value goes through
+``printable()`` (control characters become ``?``, length capped) and is
+logged with ``%r``, so a crafted name cannot forge a ``key=value`` pair or
+move the cursor. The line is written at ``NOTICE`` level, which ``--quiet``
+does not hide.
 """
 
 from __future__ import annotations
@@ -48,6 +56,12 @@ import sys
 import unicodedata
 from typing import TextIO
 from urllib.parse import urlsplit
+
+# Between WARNING and ERROR. A security event (an accepted client
+# certificate, a failed TLS handshake) is logged at this level so that
+# ``--quiet`` (which hides WARNING and below) still shows it.
+NOTICE = 35
+logging.addLevelName(NOTICE, "NOTICE")
 
 THIRD_PARTY_HTTP_LOGGERS = ("httpx", "httpcore")
 # The loggers httpcore 1.x creates at import. Listing them means the filter

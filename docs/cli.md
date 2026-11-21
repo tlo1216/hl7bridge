@@ -54,16 +54,22 @@ unencrypted; an encrypted key is refused with a message, never a prompt.
 A listener with TLS but no `--tls-ca` on a non-loopback `--host` prints
 `warning: ... TLS encrypts the traffic but does not authenticate senders`:
 anyone who can reach the port can still send. Use `--tls-ca` (mutual TLS).
-The listener logs each failed handshake (peer address and reason), counts
-them (reported when it stops), and logs the subject of each accepted client
-certificate. Failures:
+The listener logs a failed handshake with the peer address and the reason
+(including the certificate check text), at most once a minute for each peer
+address, followed by a summary count; it counts all of them and logs the
+total when it stops for any reason (Ctrl+C, SIGTERM or an error). For each
+accepted client certificate it logs the subject, subject alternative names,
+serial and issuer, each value made printable and quoted. These lines are
+written at a level that `--quiet` does not hide. `--timeout` must be a finite
+number above 0. Failures:
 
 | Case | Message |
 | --- | --- |
 | Certificate refused | `error: the TLS certificate from 127.0.0.1:2575 was refused: <reason>. Nothing was sent.` (exit 3) |
+| Never connected (refused, no route, unknown host, timed out) | `error: cannot connect to 127.0.0.1:2575: connection refused. Never connected, nothing was sent.` (exit 3), the same with or without TLS |
 | Handshake failed | `error: the TLS handshake with 127.0.0.1:2575 failed: <reason>. Nothing was sent.` (exit 3) |
 | Handshake stalled | `error: no TLS handshake with 127.0.0.1:2575 within 10 s. Nothing was sent.` (exit 3) |
-| Broke after the handshake | `error: the connection to 127.0.0.1:2575 broke (SSLError) after 1 of 2 ACKs. The message after the last ACK may or may not have been processed.` (exit 3); each message without an ACK is listed |
+| Broke after the handshake | `error: the connection to 127.0.0.1:2575 broke (SSLError) after 1 of 2 ACKs. The message after the last ACK may or may not have been processed.` (exit 3); the first message without an ACK is listed as `no ACK (it may or may not have been processed)`, the rest as `not sent` |
 | Encrypted key | `error: the TLS server private key x.key is encrypted. Give an unencrypted key ...` (exit 2) |
 | Empty flag value | `error: --tls-ca is empty.` (exit 2) |
 | Missing or bad file | `error: cannot read the TLS CA file x.pem.` (exit 2) |
@@ -285,7 +291,7 @@ could do that print only their class name.
 | LF line ends in a file | A note on stdout, not an error: `note: a.hl7 uses LF line ends; converted to CR for sending.` |
 | ACK is AE or AR | On stdout: the code in words, MSA-3 and ERR if present (control characters replaced by `?`, length capped), the quarantine reason when MSA-3 starts with one of hl7bridge's own reason codes, and `next: hl7bridge lint <file>` |
 | No ACK in time | `error: no ACK from 127.0.0.1:2575 within 10 s. The message may or may not have been processed.` (exit 3) |
-| Listener not running | `error: cannot connect to 127.0.0.1:2575: connection refused. Is the listener running? Try: hl7bridge listen` |
+| Listener not running | `error: cannot connect to 127.0.0.1:2575: connection refused. Never connected, nothing was sent. Is the listener running? Try: hl7bridge listen` |
 | Old database schema | `error: database hl7bridge.db has schema version 1; this hl7bridge needs version 3. There is no migration. Demo databases can be deleted and made again.` |
 | Not a database | `error: notes.txt is not an hl7bridge database (DatabaseError). Pass --db with another path, or delete the file if it is a demo database.` |
 | Demo folder not empty | `error: refusing to use data: it is not empty. The demo writes only into a new or empty folder, and never deletes anything in a folder you name. Pass --data-dir with a new folder, or leave it out to use a temporary folder.` |

@@ -115,6 +115,24 @@ class NetworkError(BridgeError):
     exit_code = EXIT_CONNECTION
 
 
+class ConnectError(NetworkError):
+    """The sender never connected to the listener: nothing was written.
+    ``cause`` is the OS error (refused, no route, unknown host, timed out)."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+class TlsHandshakeError(NetworkError):
+    """The TCP connection was made but the TLS handshake failed before any
+    frame was written. ``cause`` is the ssl or timeout error."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 class StoreError(BridgeError):
     """The database file is not usable: wrong schema version, not SQLite."""
 

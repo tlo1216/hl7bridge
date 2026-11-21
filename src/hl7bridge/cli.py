@@ -12,12 +12,15 @@ import argparse
 import asyncio
 import errno
 import logging
+import math
 import os
 import re
+import signal
 import socket
 import sqlite3
 import ssl
 import sys
+import threading
 import traceback
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
@@ -43,11 +46,13 @@ from .errors import (
     EXIT_USAGE,
     BridgeError,
     ConfigError,
+    ConnectError,
     FhirPostError,
     HL7ParseError,
     ListenError,
     MappingError,
     NetworkError,
+    TlsHandshakeError,
     UsageError,
 )
 from .explain import as_json, explain_message, render_text, split_messages
@@ -61,15 +66,15 @@ from .ingest.ack import ALL_REASONS
 from .ingest.direct import DirectHandler, DirectLog, check_profiles_for_direct
 from .ingest.loaders import load_outbound, load_studies
 from .ingest.mllp import (
-    TlsHandshakeError,
     client_ssl_context,
     handshake_failures,
+    log_handshake_total,
     server_ssl_context,
 )
 from .ingest.parser import get_field, parse_hl7
 from .jsonout import dumps, to_jsonable
 from .lint import lint_directory, render_lint_text
-from .logsafety import configure_logging, printable, safe_url
+from .logsafety import NOTICE, configure_logging, printable, safe_url
 from .msgfiles import display_key, hl7_files
 from .profiles import Resolved, resolve_db, resolve_profiles
 from .reconcile import reconcile, render_reconcile_text
@@ -672,6 +677,22 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
                 ssl_context=tls,
             )
         )
+    except ConnectError as exc:
+        cause = exc.cause
+        if isinstance(cause, ConnectionRefusedError):
+            reason = "connection refused"
+        elif isinstance(cause, socket.gaierror):
+            reason = "unknown host"
+        elif isinstance(cause, TimeoutError):
+            reason = "timed out"
+        else:
+            reason = (
+                "no connection (" + (getattr(cause, "strerror", None) or type(cause).__name__) + ")"
+            )
+        raise NetworkError(
+            f"cannot connect to {where}: {printable(reason)}. Never connected, nothing was sent.",
+            hint="Is the listener running? Try: hl7bridge listen",
+        ) from None
     except TlsHandshakeError as exc:
         cause = exc.cause
         if isinstance(cause, ssl.SSLCertVerificationError):
@@ -696,12 +717,6 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
         raise NetworkError(
             f"no ACK from {where} within {args.timeout:g} s."
             " The message may or may not have been processed."
-        ) from None
-    except (ConnectionRefusedError, socket.gaierror) as exc:
-        reason = "connection refused" if isinstance(exc, ConnectionRefusedError) else "unknown host"
-        raise NetworkError(
-            f"cannot connect to {where}: {reason}. Is the listener running?",
-            hint="Try: hl7bridge listen",
         ) from None
     except (ConnectionError, OSError) as exc:  # includes ssl.SSLError after the handshake
         _print_send_results(outgoing, acks, source, args.expect)
@@ -779,8 +794,13 @@ def _print_send_results(
         if reason in ALL_REASONS:  # only hl7bridge's own reason codes
             print(f"  quarantine reason: {reason}")
         print(f"  next: {item.next_step}")
-    for item in outgoing[len(acks) :]:
-        print(f"{item.label}: no ACK (it may or may not have been processed)")
+    # Messages go one at a time, each after the last ACK: only the first
+    # without an ACK was on the wire.
+    for n, item in enumerate(outgoing[len(acks) :]):
+        if n == 0:
+            print(f"{item.label}: no ACK (it may or may not have been processed)")
+        else:
+            print(f"{item.label}: not sent")
     print(f"sent {len(outgoing)} message(s) from {source}, got {len(acks)} ACK(s)")
     for code in sorted(counts):
         print(f"  {code}: {counts[code]}")
@@ -1021,6 +1041,10 @@ def _listen_direct(args: argparse.Namespace, tls: ssl.SSLContext | None) -> int:
         direct_log.close()
 
 
+def _in_main_thread() -> bool:
+    return threading.current_thread() is threading.main_thread()
+
+
 def _serve_forever(
     args: argparse.Namespace,
     handle_frame: Callable[[bytes], Awaitable[bytes]],
@@ -1063,11 +1087,19 @@ def _serve_forever(
                 f" {exc.strerror or type(exc).__name__}."
             ) from None
 
+    def stop(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt  # SIGTERM stops the listener like Ctrl+C
+
+    previous = signal.signal(signal.SIGTERM, stop) if _in_main_thread() else None
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
         failed = handshake_failures()
         print("listener stopped" + (f"; {failed} TLS handshake(s) failed" if failed else ""))
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+        log_handshake_total()  # any shutdown, not only Ctrl+C
     return EXIT_OK
 
 
@@ -1687,7 +1719,7 @@ def _common_options() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="only errors on stderr; no 'using ...' lines",
+        help="only errors (and TLS security notices) on stderr; no 'using ...' lines",
     )
     common.add_argument(
         "--debug",
@@ -1769,6 +1801,17 @@ def _rate(value: str) -> float:
     return rate
 
 
+def _seconds(value: str) -> float:
+    """A wait in seconds: a finite number above 0 (nan, inf, 0 and negatives are refused)."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError(f"{value} is not a finite number above 0")
+    return seconds
+
+
 ACK_CODES = ("AA", "AE", "AR", "CA", "CE", "CR")
 
 
@@ -1792,7 +1835,7 @@ def _add_sender(p: argparse.ArgumentParser) -> None:
     p.add_argument("--port", type=_port, default=2575, help="listener port (default: 2575)")
     p.add_argument(
         "--timeout",
-        type=float,
+        type=_seconds,
         default=10.0,
         metavar="SECONDS",
         help="wait this long for each ACK (default: 10)",
@@ -1946,7 +1989,7 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         _add_run_id(p)
         p.add_argument(
             "--fhir-timeout",
-            type=float,
+            type=_seconds,
             default=10.0,
             metavar="SECONDS",
             help="with --target fhir, give up on a FHIR request after this long, then AE"
@@ -2151,7 +2194,7 @@ def _log_level(args: argparse.Namespace) -> int:
     if getattr(args, "debug", False):
         return logging.DEBUG
     if getattr(args, "quiet", False):
-        return logging.ERROR
+        return NOTICE  # hides WARNING and below, keeps TLS security notices and errors
     verbose = getattr(args, "verbose", 0) or 0
     if verbose >= 2:
         return logging.DEBUG

@@ -722,7 +722,7 @@ def test_send_connection_refused_message(capsys):
     assert rc == EXIT_CONNECTION
     assert (
         f"error: cannot connect to 127.0.0.1:{port}: connection refused."
-        " Is the listener running? Try: hl7bridge listen\n"
+        " Never connected, nothing was sent. Is the listener running? Try: hl7bridge listen\n"
     ) in capsys.readouterr().err
 
 

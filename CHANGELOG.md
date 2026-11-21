@@ -17,6 +17,20 @@ profile format may still change between minor versions.
   certificate subject, and warns when TLS has no `--tls-ca` on a non-loopback
   bind. Encrypted keys are refused with a message. `send` reports "broke
   after N of M ACKs" instead of "Nothing was sent" once a frame was written.
+  A failed connect (refused, no route, unknown host, timed out), with or
+  without TLS, is one "Never connected, nothing was sent" error; after a
+  break only the first message without an ACK is "may or may not have been
+  processed", the rest are "not sent". The accepted client certificate line
+  (subject, alternative names, serial, issuer) is always written, sanitized,
+  at a level `--quiet` keeps. Failed-handshake warnings are limited to one a
+  minute per peer with a summary, include the check text, and the total is
+  logged at any shutdown (SIGTERM stops the listener like Ctrl+C). `--timeout`
+  must be a finite number above 0. Bytes of a half-read frame are quarantined
+  when a connection breaks. `TlsHandshakeError` moved from
+  `hl7bridge.ingest.mllp` to `hl7bridge.errors` and is now a `BridgeError`
+  (a `NetworkError`); the new `ConnectError` is its sibling for a connect that
+  failed. `send_messages` raises `ConnectError` instead of the raw `OSError`
+  when it cannot connect.
 
 - `to-fhir` and `fhir sync` map ADT^A40 (patient merge). The surviving
   Patient (PID) is merged as for any ADT; the merged-away Patient (MRG-1) is

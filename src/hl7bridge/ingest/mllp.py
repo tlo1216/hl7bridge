@@ -12,13 +12,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import socket
 import ssl
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..errors import TlsConfigError
+from ..errors import ConnectError, TlsConfigError, TlsHandshakeError
+from ..logsafety import NOTICE, printable
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +54,14 @@ async def decode_frames(reader: asyncio.StreamReader) -> AsyncIterator[Frame | J
     """
     buffer = b""
     while True:
-        chunk = await reader.read(65536)
+        try:
+            chunk = await reader.read(65536)
+        except (ConnectionError, ssl.SSLError, TimeoutError):
+            # The connection broke mid-frame: the bytes read so far are not
+            # lost silently, the caller quarantines them as junk.
+            if buffer:
+                yield JunkBytes(buffer)
+            raise
         if not chunk:
             if buffer:
                 yield JunkBytes(buffer)
@@ -80,14 +88,6 @@ async def decode_frames(reader: asyncio.StreamReader) -> AsyncIterator[Frame | J
 
 
 HANDSHAKE_TIMEOUT_S = 10.0
-
-
-class TlsHandshakeError(Exception):
-    """The TLS connection failed before any frame was written."""
-
-    def __init__(self, cause: BaseException) -> None:
-        super().__init__(str(cause))
-        self.cause = cause
 
 
 class _EncryptedKey(Exception):
@@ -171,39 +171,122 @@ Handler = Callable[[bytes], Awaitable[bytes]]
 
 _handshake_failures = 0
 
+# Failed handshakes are logged once per peer address per window; the rest of
+# the window is counted and reported in one summary line, so a scanner cannot
+# fill the log. The total is reported at shutdown (see ``log_handshake_total``).
+HANDSHAKE_LOG_WINDOW_S = 60.0
+_clock = time.monotonic
+_windows: dict[str, tuple[float, int]] = {}  # peer host -> (window start, suppressed)
+
 
 def handshake_failures() -> int:
     """Failed TLS handshakes seen by listeners in this process."""
     return _handshake_failures
 
 
-def _subject(cert: object) -> str:
-    """A client certificate subject as ``commonName=x, organizationName=y``."""
-    if not isinstance(cert, dict):
+def reset_handshake_state() -> None:
+    """Forget the count and the per-peer windows (for tests)."""
+    global _handshake_failures
+    _handshake_failures = 0
+    _windows.clear()
+
+
+def _peer_host(peer: object) -> str:
+    return str(peer[0]) if isinstance(peer, tuple) and peer else str(peer)
+
+
+def _handshake_reason(exc: BaseException) -> str:
+    reason = getattr(exc, "reason", None) or type(exc).__name__
+    detail = getattr(exc, "verify_message", None)
+    text = f"{reason}: {detail}" if detail else str(reason)
+    return printable(text)
+
+
+def _note_handshake_failure(peer: object, exc: BaseException) -> None:
+    global _handshake_failures
+    _handshake_failures += 1
+    host = _peer_host(peer)
+    now = _clock()
+    start, suppressed = _windows.get(host, (None, 0))
+    if start is not None and now - start < HANDSHAKE_LOG_WINDOW_S:
+        _windows[host] = (start, suppressed + 1)
+        return
+    if suppressed:
+        log.log(
+            NOTICE,
+            "mllp tls handshake failed %d more time(s) peer=%r in the last %d s",
+            suppressed,
+            printable(host),
+            int(HANDSHAKE_LOG_WINDOW_S),
+        )
+    _windows[host] = (now, 0)
+    log.log(
+        NOTICE,
+        "mllp tls handshake failed peer=%r reason=%r total=%d",
+        printable(peer),
+        _handshake_reason(exc),
+        _handshake_failures,
+    )
+
+
+def log_handshake_total() -> None:
+    """Report suppressed repeats and the total. Call at any listener shutdown."""
+    for host, (_start, suppressed) in list(_windows.items()):
+        if suppressed:
+            log.log(
+                NOTICE,
+                "mllp tls handshake failed %d more time(s) peer=%r",
+                suppressed,
+                printable(host),
+            )
+            _windows[host] = (_clock(), 0)
+    if _handshake_failures:
+        log.log(NOTICE, "mllp tls handshakes failed in total: %d", _handshake_failures)
+
+
+def _rdns(value: object) -> str:
+    """``commonName=x, organizationName=y`` from a getpeercert name."""
+    if not isinstance(value, tuple):
         return ""
-    return ", ".join(f"{k}={v}" for rdn in cert.get("subject", ()) for k, v in rdn)
+    return ", ".join(f"{k}={v}" for rdn in value for k, v in rdn)
+
+
+def _identity(cert: object) -> dict[str, str]:
+    """The identity of a verified client certificate, each value made safe
+    for a log line: subject, subject alternative names, serial, issuer."""
+    if not isinstance(cert, dict):
+        return {}
+
+    sans = ", ".join(f"{k}:{v}" for k, v in cert.get("subjectAltName", ()))
+    return {
+        "subject": printable(_rdns(cert.get("subject"))),
+        "san": printable(sans),
+        "serial": printable(cert.get("serialNumber", "")),
+        "issuer": printable(_rdns(cert.get("issuer"))),
+    }
 
 
 async def _start_tls(writer: asyncio.StreamWriter, ctx: ssl.SSLContext) -> bool:
     """Upgrade an accepted connection to TLS. False (closed) when it fails."""
-    global _handshake_failures
     peer = writer.get_extra_info("peername")
     try:
         await writer.start_tls(ctx, ssl_handshake_timeout=HANDSHAKE_TIMEOUT_S)
     except (ssl.SSLError, OSError, TimeoutError) as exc:
-        _handshake_failures += 1
-        reason = getattr(exc, "reason", None) or type(exc).__name__
-        log.warning(
-            "mllp tls handshake failed peer=%s reason=%s total=%d",
-            peer,
-            reason,
-            _handshake_failures,
-        )
+        _note_handshake_failure(peer, exc)
         writer.close()
         return False
-    subject = _subject(writer.get_extra_info("peercert"))
-    if subject:
-        log.info("mllp client certificate peer=%s subject=%s", peer, subject)
+    ident = _identity(writer.get_extra_info("peercert"))
+    if ident:
+        # A verified client always gets this line, whatever its subject.
+        log.log(
+            NOTICE,
+            "mllp client certificate peer=%r subject=%r san=%r serial=%r issuer=%r",
+            printable(peer),
+            ident["subject"],
+            ident["san"],
+            ident["serial"],
+            ident["issuer"],
+        )
     return True
 
 
@@ -278,20 +361,22 @@ async def send_messages(
     server's certificate must be valid for ``host``.
     """
     try:
-        reader, writer = await asyncio.open_connection(
-            host,
-            port,
-            ssl=ssl_context,
-            ssl_handshake_timeout=max(ack_timeout_s, 1.0) if ssl_context else None,
-            ssl_shutdown_timeout=min(ack_timeout_s, 5.0) if ssl_context else None,
-        )
-    except (ConnectionRefusedError, socket.gaierror):
-        raise
-    except (ssl.SSLError, ConnectionError, TimeoutError) as exc:
-        if ssl_context is None:
-            raise
-        # Nothing has been written yet: the connection never got going.
-        raise TlsHandshakeError(exc) from exc
+        reader, writer = await asyncio.open_connection(host, port)
+    except OSError as exc:  # refused, no route, unknown host, timed out, several of those
+        raise ConnectError(exc) from exc
+    if ssl_context is not None:
+        # The TCP connection is made; from here a failure is a TLS failure.
+        try:
+            await writer.start_tls(
+                ssl_context,
+                server_hostname=host,
+                ssl_handshake_timeout=max(ack_timeout_s, 1.0),
+                ssl_shutdown_timeout=min(ack_timeout_s, 5.0),
+            )
+        except (ssl.SSLError, ConnectionError, TimeoutError) as exc:
+            writer.close()
+            # Nothing has been written yet: the connection never got going.
+            raise TlsHandshakeError(exc) from exc
     if acks is None:
         acks = []
     try:
