@@ -32,6 +32,13 @@ profile format may still change between minor versions.
   US Core. `listen --target fhir` still answers A40 with AR
   `patient_read_only`.
 
+### Fixed
+
+- `--post` and `fhir sync` of an ADT^A40 write the resolved `Patient/<id>` in
+  the `replaced-by` link when both Patients exist, not a `urn:uuid`.
+- The key reported for a merged Patient is its MRN, not the server's first
+  identifier.
+
 ### Changed
 
 - `fhir sync` no longer leaves a merged-away patient out. Its messages and
