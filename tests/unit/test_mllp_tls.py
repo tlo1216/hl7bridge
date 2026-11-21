@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
@@ -37,6 +38,7 @@ from hl7bridge.errors import (
     EXIT_CONNECTION,
     EXIT_OK,
     EXIT_USAGE,
+    AckProtocolError,
     BridgeError,
     ConnectError,
     TlsConfigError,
@@ -108,7 +110,17 @@ CN = x
 """
 
 MSG = (SAMPLES_DIR / "01_hospa_adt_a04.hl7").read_bytes().replace(b"\n", b"\r")
-ACK = b"MSH|^~\\&|R|F|S|F|20261007||ACK|1|T|2.5\rMSA|AA|1\r"
+
+
+def _ack_for(payload: bytes, code: str = "AA") -> bytes:
+    """The ACK a correct listener sends: MSA-2 is the MSH-10 it was sent."""
+    control_id = payload.split(b"\r")[0].split(b"|")[9]
+    return (
+        b"MSH|^~\\&|R|F|S|F|20261007||ACK|1|T|2.5\rMSA|" + code.encode() + b"|" + control_id + b"\r"
+    )
+
+
+ACK = _ack_for(MSG)
 EC = ("-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes")
 
 
@@ -147,11 +159,60 @@ class Pki:
         self._dirs[name] = d
         return d / "ca.pem"
 
+    def intermediate(self, parent: str, name: str) -> Path:
+        """An issuing CA signed by ``parent``; ``leaf(name, ...)`` signs with it."""
+        d = self.root / name
+        d.mkdir()
+        (d / "openssl.cnf").write_text(CA_CNF)
+        (d / "index.txt").write_text("")
+        (d / "serial").write_text("01\n")
+        _run(
+            d,
+            "req",
+            "-new",
+            *EC,
+            "-keyout",
+            "ca.key",
+            "-out",
+            "ca.csr",
+            "-subj",
+            f"/CN=test {name}",
+            "-config",
+            "openssl.cnf",
+        )
+        ext = d / "ca.ext"
+        ext.write_text("basicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\n")
+        parent_dir = self._dirs[parent]
+        _run(
+            parent_dir,
+            "ca",
+            "-batch",
+            "-config",
+            "openssl.cnf",
+            "-in",
+            str(d / "ca.csr"),
+            "-out",
+            str(d / "ca.pem"),
+            "-notext",
+            "-extfile",
+            str(ext),
+            "-startdate",
+            "20200101000000Z",
+            "-enddate",
+            "20991231000000Z",
+            "-keyfile",
+            "ca.key",
+            "-cert",
+            "ca.pem",
+        )
+        self._dirs[name] = d
+        return d / "ca.pem"
+
     def leaf(
         self,
         ca: str,
         name: str,
-        san: str,
+        san: str | None,
         *,
         usage: str = "serverAuth",
         start: str = "20200101000000Z",
@@ -159,9 +220,10 @@ class Pki:
     ) -> tuple[str, str]:
         d = self._dirs[ca]
         ext = d / f"{name}.ext"
-        ext.write_text(
-            f"subjectAltName={san}\nextendedKeyUsage={usage}\nbasicConstraints=CA:FALSE\n"
-        )
+        lines = [f"extendedKeyUsage={usage}", "basicConstraints=CA:FALSE"]
+        if san is not None:
+            lines.insert(0, f"subjectAltName={san}")
+        ext.write_text("\n".join(lines) + "\n")
         _run(
             d,
             "req",
@@ -215,6 +277,13 @@ def certs(tmp_path_factory) -> dict[str, str]:
     wrong_name = pki.leaf("good", "wrongname", "DNS:other.example")
     stranger = pki.leaf("other", "stranger", "DNS:client.test", usage="clientAuth")
     server_only = pki.leaf("good", "serveronly", "DNS:client.test", usage="serverAuth")
+    dns_only = pki.leaf("good", "dnsonly", "DNS:localhost")
+    ip_only = pki.leaf("good", "iponly", "IP:127.0.0.1")
+    cn_only = pki.leaf("good", "localhost", None)  # a CN of localhost and no SAN at all
+    other_server = pki.leaf("other", "otherserver", "IP:127.0.0.1,DNS:localhost")
+    issuing = pki.intermediate("good", "issuing")
+    issued = pki.leaf("issuing", "issued", "IP:127.0.0.1,DNS:localhost")
+    issued_client = pki.leaf("issuing", "issuedclient", "DNS:client.test", usage="clientAuth")
     return {
         "ca": str(ca),
         "other_ca": str(other),
@@ -230,6 +299,19 @@ def certs(tmp_path_factory) -> dict[str, str]:
         "stranger_key": stranger[1],
         "serveronly_cert": server_only[0],
         "serveronly_key": server_only[1],
+        "dns_only_cert": dns_only[0],
+        "dns_only_key": dns_only[1],
+        "ip_only_cert": ip_only[0],
+        "ip_only_key": ip_only[1],
+        "cn_only_cert": cn_only[0],
+        "cn_only_key": cn_only[1],
+        "other_server_cert": other_server[0],
+        "other_server_key": other_server[1],
+        "issuing_ca": str(issuing),
+        "issued_cert": issued[0],
+        "issued_key": issued[1],
+        "issued_client_cert": issued_client[0],
+        "issued_client_key": issued_client[1],
     }
 
 
@@ -243,7 +325,11 @@ class TlsServer:
         *,
         error: type[BaseException] = ConnectionResetError,
         delay_s: float = 0.0,
+        reply: Callable[[bytes], bytes] | None = None,
+        **serve_kw: object,
     ) -> None:
+        self.reply = reply
+        self.serve_kw = serve_kw
         self.ctx = ctx
         self.drop_at = drop_at
         self.error = error
@@ -264,13 +350,15 @@ class TlsServer:
                 raise self.error  # the connection ends with no ACK
             if self.delay_s:
                 await asyncio.sleep(self.delay_s)
-            return ACK
+            return self.reply(payload) if self.reply else _ack_for(payload)
 
         async def junk(data: bytes) -> None:
             self.junk.append(data)
 
         async def start() -> None:
-            self.server = await serve("127.0.0.1", 0, handle, junk, ssl_context=self.ctx)
+            self.server = await serve(
+                "127.0.0.1", 0, handle, junk, ssl_context=self.ctx, **self.serve_kw
+            )
             self.port = self.server.sockets[0].getsockname()[1]
             self.ready.set()
 
@@ -400,8 +488,9 @@ def test_host_name_mismatch_is_refused(certs):
 
 
 def test_context_errors_name_the_file_and_not_the_key(certs, tmp_path):
-    with pytest.raises(TlsConfigError, match="cannot read the TLS server certificate"):
+    with pytest.raises(TlsConfigError, match="given with --tls-cert") as missing:
         server_ssl_context(str(tmp_path / "none.pem"), certs["server_key"])
+    assert "none.pem" not in str(missing.value)
     # A certificate paired with the wrong key.
     with pytest.raises(TlsConfigError) as exc:
         server_ssl_context(certs["server_cert"], certs["client_key"])
@@ -409,8 +498,9 @@ def test_context_errors_name_the_file_and_not_the_key(certs, tmp_path):
     assert "BEGIN" not in text and "PRIVATE" not in text
     junk = tmp_path / "junk.pem"
     junk.write_text("not a certificate")
-    with pytest.raises(TlsConfigError, match="no usable PEM"):
+    with pytest.raises(TlsConfigError, match="no usable PEM") as bad_ca:
         client_ssl_context(str(junk))
+    assert "junk.pem" not in str(bad_ca.value)
     with pytest.raises(TlsConfigError, match="needs both"):
         client_ssl_context(certs["ca"], certs["client_cert"], None)
 
@@ -588,8 +678,17 @@ def test_tls_1_1_is_refused_by_the_listener(certs, caplog):
     # to start: the listener has to see and log a failed handshake.
     server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
     old = _old_tls_client()
+
+    async def old_handshake(port: int) -> None:
+        # Not send_messages: it refuses a context that does not verify.
+        _r, writer = await asyncio.open_connection(
+            "127.0.0.1", port, ssl=old, ssl_handshake_timeout=3
+        )
+        writer.close()
+
     with caplog.at_level(NOTICE, logger="hl7bridge.ingest.mllp"), TlsServer(server_ctx) as srv:
-        _refused(srv.port, old)
+        with pytest.raises(REFUSED):
+            asyncio.run(old_handshake(srv.port))
         assert _wait_for(lambda: handshake_failures() >= 1)
     assert srv.received == []
     assert "PROTOCOL" in caplog.text.upper() or "VERSION" in caplog.text.upper()
@@ -624,13 +723,16 @@ def test_the_accepted_client_certificate_subject_is_logged(certs, caplog):
         TlsServer(server_ctx) as srv,
     ):
         assert _send(srv.port, client_ctx) == [ACK]
-    records = [r for r in caplog.records if "client certificate" in r.getMessage()]
+    records = [r for r in caplog.records if "certificate peer=" in r.getMessage()]
     assert len(records) == 1
     # NOTICE sits above WARNING, so --quiet does not hide it.
     assert records[0].levelno == NOTICE > logging.WARNING
     text = records[0].getMessage()
-    assert "commonName=client" in text and "DNS:client.test" in text
-    assert "serial=" in text and "issuer=" in text and "test good" in text
+    assert "sha256=" in text and "serial=" in text and "issuer=" in text
+    assert "test%20good" in text
+    details = [r.getMessage() for r in caplog.records if "certificate details" in r.getMessage()]
+    assert len(details) == 1 and details[0].startswith("mllp client certificate details")
+    assert "commonName%3Dclient" in details[0] and "DNS%3Aclient.test" in details[0]
 
 
 def test_encrypted_and_unreadable_keys_get_their_own_messages(certs, tmp_path, monkeypatch):
@@ -671,7 +773,11 @@ def test_listener_error_during_a_connection_is_one_warning_not_a_traceback(certs
 def _spawn_listener(certs, db: Path, host: str, *extra: str) -> tuple[subprocess.Popen, int]:
     src = str(Path(hl7bridge.__file__).resolve().parent.parent)
     env = {**os.environ, "PYTHONPATH": src}
-    code = "import sys; from hl7bridge.cli import main; sys.exit(main())"
+    # A background job can start with SIGINT ignored; Ctrl+C must work in the child.
+    code = (
+        "import signal, sys; signal.signal(signal.SIGINT, signal.default_int_handler);"
+        " from hl7bridge.cli import main; sys.exit(main())"
+    )
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -698,7 +804,7 @@ def _spawn_listener(certs, db: Path, host: str, *extra: str) -> tuple[subprocess
     try:
         assert proc.stdout is not None
         line = proc.stdout.readline()  # printed once the socket is bound
-        assert "MLLP over TLS listener on" in line, line
+        assert "MLLP over TLS" in line and " listener on " in line, line
         port = int(line.split(" listener on ")[1].split(" ")[0].rsplit(":", 1)[1].rstrip(","))
     except BaseException:
         proc.kill()  # never leave the listener running when the start failed
@@ -849,27 +955,39 @@ def test_send_messages_wraps_a_connect_failure_and_a_handshake_failure_apart(cer
     assert TlsHandshakeError.exit_code == EXIT_CONNECTION == ConnectError.exit_code
 
 
+class _FakeSsl:
+    def __init__(self, der: bytes) -> None:
+        self.der = der
+
+    def getpeercert(self, binary_form: bool = False):
+        return self.der if binary_form else None
+
+
 class _FakeWriter:
-    def __init__(self, cert) -> None:
+    def __init__(self, cert, der: bytes = b"der-bytes") -> None:
         self.cert = cert
+        self.der = der
 
     async def start_tls(self, *_a, **_k) -> None:
         return None
 
     def get_extra_info(self, name):
-        return {"peername": ("10.1.1.1", 4000), "peercert": self.cert}.get(name)
+        return {
+            "peername": ("10.1.1.1", 4000),
+            "peercert": self.cert,
+            "ssl_object": _FakeSsl(self.der),
+        }.get(name)
 
 
-def test_the_client_certificate_line_is_sanitized_and_always_written(caplog):
+def test_the_client_certificate_line_is_structured_and_carries_a_fingerprint(caplog):
+    import hashlib
+
     forged = {
-        "subject": ((("commonName", 'evil"\nserial=0x1 \x1b]0;pwn\x07'),),),
+        "subject": ((("commonName", 'evil"\nx serial=0x1 \x1b]0;pwn\x07'),),),
         "issuer": ((("commonName", "ca\r\nWARNING forged"),),),
         "serialNumber": "0A\x00B",
         "subjectAltName": (("DNS", "a.test\nb"), ("IP Address", "10.0.0.1")),
     }
-    ident = mllp._identity(forged)
-    assert all("\n" not in v and "\x1b" not in v and "\x00" not in v for v in ident.values())
-    # A SAN-only certificate has no subject, and is still logged.
     san_only = {
         "subject": (),
         "issuer": ((("commonName", "ca"),),),
@@ -877,17 +995,34 @@ def test_the_client_certificate_line_is_sanitized_and_always_written(caplog):
         "subjectAltName": (("DNS", "only.test"),),
     }
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    with caplog.at_level(NOTICE, logger="hl7bridge.ingest.mllp"):
+    with caplog.at_level(logging.INFO, logger="hl7bridge.ingest.mllp"):
         assert asyncio.run(mllp._start_tls(_FakeWriter(forged), ctx))  # type: ignore[arg-type]
-        assert asyncio.run(mllp._start_tls(_FakeWriter(san_only), ctx))  # type: ignore[arg-type]
+        assert asyncio.run(mllp._start_tls(_FakeWriter(san_only, b"other"), ctx))  # type: ignore[arg-type]
         # A client without a certificate (no --tls-ca) logs no identity line.
         assert asyncio.run(mllp._start_tls(_FakeWriter(None), ctx))  # type: ignore[arg-type]
-    lines = [r.getMessage() for r in caplog.records if "client certificate" in r.getMessage()]
-    assert len(lines) == 2
-    assert all("\n" not in line and "\x1b" not in line for line in lines)
-    assert "subject=''" in lines[1] and "DNS:only.test" in lines[1] and "serial='01'" in lines[1]
-    # The forged text stays inside one quoted value; it cannot add a field.
-    assert lines[0].count(" serial=") == 1
+    notices = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == NOTICE and "client certificate" in r.getMessage()
+    ]
+    details = [r.getMessage() for r in caplog.records if "certificate details" in r.getMessage()]
+    assert len(notices) == 2 and len(details) == 2
+    fingerprint = hashlib.sha256(b"der-bytes").hexdigest()
+    assert f"sha256={fingerprint}" in notices[0] and "peer=10.1.1.1:4000" in notices[0]
+    assert f"sha256={hashlib.sha256(b'other').hexdigest()}" in notices[1]
+    for line in (*notices, *details):
+        assert "\n" not in line and "\x1b" not in line and "\x00" not in line
+        # Every token is name=value with one equals sign and no space inside a
+        # value, so a whitespace-based collector cannot read a forged field.
+        tokens = [
+            t for t in line.split(" ") if t not in ("mllp", "client", "certificate", "details")
+        ]
+        assert all(t.count("=") == 1 for t in tokens), tokens
+    assert " serial=0x1" not in details[0] and details[0].count(" serial=") == 0
+    assert notices[0].count(" serial=") == 1
+    # The always-shown line holds no subject or alternative name.
+    assert "subject=" not in notices[0] and "san=" not in notices[0]
+    assert "only.test" in details[1].replace("%3A", ":")
 
 
 def test_quiet_still_shows_the_security_notices():
@@ -945,10 +1080,10 @@ class _FakeServer:
     def __init__(self, error: BaseException) -> None:
         self.error = error
 
-    async def __aenter__(self):
-        return self
+    def close(self) -> None:
+        return None
 
-    async def __aexit__(self, *exc):
+    async def wait_closed(self) -> None:
         return None
 
     async def serve_forever(self):
@@ -1108,3 +1243,665 @@ def test_a_peer_that_ignores_close_notify_does_not_hold_the_sender(certs):
         listener.close()
     assert acks == [ACK]
     assert elapsed < 5.0
+
+
+# -- Findings from the third Nov 21 review -----
+
+
+def _frame_of(buffer: bytes) -> bytes:
+    return buffer[1:-2]
+
+
+@contextlib.contextmanager
+def _scripted_listener(*replies):
+    """A plain MLLP listener on a thread. One reply per frame it receives: bytes
+    sent as they are, or a function of the frame. It closes after the last."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    seen: list[bytes] = []
+
+    def run() -> None:
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        with conn:
+            buffer = b""
+            for reply in replies:
+                while not buffer.endswith(b"\x1c\r"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    buffer += chunk
+                payload = _frame_of(buffer)
+                seen.append(payload)
+                buffer = b""
+                conn.sendall(reply(payload) if callable(reply) else reply)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        yield port, seen
+    finally:
+        srv.close()
+        thread.join(10)
+
+
+def _good(payload: bytes) -> bytes:
+    return mllp.encode_mllp(_ack_for(payload))
+
+
+async def _raw_send(script, payloads, **kw):
+    """send_messages against a plain listener written as ``script(reader, writer)``.
+    Returns (acks kept, the error or None)."""
+
+    async def handle(reader, writer):
+        try:
+            await script(reader, writer)
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    acks: list[bytes] = []
+    error: BaseException | None = None
+    try:
+        await send_messages("127.0.0.1", port, payloads, acks=acks, **kw)
+    except BaseException as exc:  # noqa: BLE001  the test inspects it
+        error = exc
+    finally:
+        server.close()
+        await server.wait_closed()
+    return acks, error
+
+
+async def _read_frame(reader) -> bytes:
+    return _frame_of(await reader.readuntil(b"\x1c\r"))
+
+
+# High 1 and the empty host (send, replay, listen)
+
+
+@pytest.mark.parametrize("host", ["", "  "])
+@pytest.mark.parametrize("command", ["send", "replay", "listen"])
+def test_an_empty_host_is_refused_before_any_network_call(
+    command, host, tmp_path, capsys, monkeypatch
+):
+    async def never(*_a, **_k):
+        raise AssertionError("the network was touched")
+
+    monkeypatch.setattr(mllp.asyncio, "open_connection", never)
+    monkeypatch.setattr(mllp.asyncio, "start_server", never)
+    db = tmp_path / "never.db"
+    argv = {
+        "send": ["send", str(SAMPLES_DIR / "01_hospa_adt_a04.hl7")],
+        "replay": ["replay", "--from", "store", "--db", str(db)],
+        "listen": ["listen", "--port", "0", "--db", str(db)],
+    }[command]
+    rc = cli.main([*argv, "--host", host, *(["--tls"] if command != "listen" else [])])
+    assert rc == EXIT_USAGE
+    assert "--host is empty" in capsys.readouterr().err
+    assert not db.exists()
+
+
+def test_send_messages_and_serve_refuse_an_empty_host(certs, monkeypatch):
+    async def never(*_a, **_k):
+        raise AssertionError("the network was touched")
+
+    monkeypatch.setattr(mllp.asyncio, "open_connection", never)
+    monkeypatch.setattr(mllp.asyncio, "start_server", never)
+    for host in ("", "   "):
+        with pytest.raises(ValueError, match="host"):
+            asyncio.run(send_messages(host, 1, [MSG], ssl_context=client_ssl_context(certs["ca"])))
+        with pytest.raises(ValueError, match="host"):
+            asyncio.run(serve(host, 0, lambda p: p, lambda d: d))  # type: ignore[arg-type,return-value]
+
+
+# Medium 2: a key value is never echoed
+
+
+PEM = "-----BEGIN PRIVATE KEY-----\nMIIsecretsecret\n-----END PRIVATE KEY-----\n"  # guardrails: allow (fake key text)
+
+
+@pytest.mark.parametrize("value", [PEM, "bad\x00name", "a\nb"], ids=["pem", "nul", "newline"])
+@pytest.mark.parametrize("flag", ["--tls-key", "--tls-cert", "--tls-ca"])
+@pytest.mark.parametrize("command", ["send", "listen"])
+def test_a_tls_argument_value_is_never_echoed(command, flag, value, certs, tmp_path, capsys):
+    paired = {"--tls-key": ["--tls-cert", certs["server_cert"]], "--tls-cert": [], "--tls-ca": []}
+    if flag == "--tls-cert":
+        paired[flag] = ["--tls-key", certs["server_key"]]
+    if flag == "--tls-ca" and command == "listen":
+        paired[flag] = ["--tls-cert", certs["server_cert"], "--tls-key", certs["server_key"]]
+    argv = (
+        _send_args(1, *paired[flag], flag, value)
+        if command == "send"
+        else ["listen", "--port", "0", "--db", str(tmp_path / "n.db"), *paired[flag], flag, value]
+    )
+    rc = cli.main(argv)
+    err = capsys.readouterr().err
+    assert rc == EXIT_USAGE
+    assert flag in err
+    assert "BEGIN" not in err and "secret" not in err and "bad" not in err and "a\nb" not in err
+    assert err.count("\n") == 1, "one error line, however many line breaks the value had"
+
+
+# Medium 3: the ACK must answer the message
+
+
+def test_the_happy_path_ack_answers_the_message_it_was_sent():
+    assert b"MSA|AA|SMPA0001" in ACK  # the sample's own MSH-10, not a made-up number
+
+
+def test_a_stale_aa_for_another_message_is_a_protocol_failure():
+    stale = mllp.encode_mllp(b"MSH|^~\\&|R|F|S|F|20261007||ACK|1|T|2.5\rMSA|AA|1\r")
+
+    async def script(reader, writer):
+        await _read_frame(reader)
+        writer.write(stale)
+        await writer.drain()
+
+    acks, error = asyncio.run(_raw_send(script, [MSG]))
+    assert isinstance(error, AckProtocolError)
+    assert acks == []
+    assert "SMPA0001" not in str(error)  # fixed text only
+
+
+def test_cli_send_stops_on_a_wrong_ack_and_keeps_the_confirmed_ones(tmp_path, capsys):
+    stale = mllp.encode_mllp(b"MSH|^~\\&|R|F|S|F|20261007||ACK|1|T|2.5\rMSA|AA|NOT-OURS\r")
+    with _scripted_listener(_good, stale) as (port, _seen):
+        rc = cli.main(["send", str(_many(tmp_path, 3)), "--port", str(port)])
+    captured = capsys.readouterr()
+    assert rc == EXIT_CONNECTION
+    assert "not a valid ACK" in captured.err and "after 1 of 3 ACKs" in captured.err
+    assert "NOT-OURS" not in captured.err + captured.out
+    assert "sent 2 message(s)" in captured.out and "got 1 ACK(s)" in captured.out
+    assert captured.out.count("not sent") == 1
+    assert "internal error" not in captured.err
+
+
+def test_the_bridges_own_acks_for_odd_control_ids_are_accepted():
+    # An empty MSH-10 is answered MSA-2 UNKNOWN; separators in it come back escaped.
+    for sent, back in (
+        (b"", b"UNKNOWN"),
+        (b"A\\F\\B", b"A\\F\\B"),
+        (b"A&B", b"A\\T\\B"),
+        (b"A1", b"A1"),
+    ):
+        payload = b"MSH|^~\\&|S|F|R|F|20261007||ADT^A04|" + sent + b"|P|2.5\rPID|1\r"
+        ack = b"MSH|^~\\&|R|F|S|F|20261007||ACK|1|P|2.5\rMSA|AA|" + back + b"\r"
+
+        async def script(reader, writer, ack=ack):
+            await _read_frame(reader)
+            writer.write(mllp.encode_mllp(ack))
+            await writer.drain()
+
+        acks, error = asyncio.run(_raw_send(script, [payload]))
+        assert error is None and acks == [ack]
+
+
+# Medium 4: no peer free text on stdout by default
+
+
+def _text_ack(payload: bytes) -> bytes:
+    control_id = payload.split(b"\r")[0].split(b"|")[9]
+    return mllp.encode_mllp(
+        b"MSH|^~\\&|R|F|S|F|20261007||ACK|1|P|2.5\rMSA|AE|"
+        + control_id
+        + b"|rejected MRN 12345678 Doe\rERR|||MRN 12345678 unknown\r"
+    )
+
+
+def test_a_negative_ack_prints_no_free_text_unless_asked(tmp_path, capsys):
+    msg = tmp_path / "a.hl7"
+    msg.write_bytes(MSG)
+    with _scripted_listener(_text_ack) as (port, _seen):
+        rc = cli.main(["send", str(msg), "--port", str(port)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "AE (application error" in out
+    assert "12345678" not in out and "MSA-3" not in out and "ERR:" not in out
+    with _scripted_listener(_text_ack) as (port, _seen):
+        rc = cli.main(["send", str(msg), "--port", str(port), "--show-ack-text"])
+    out = capsys.readouterr().out
+    assert "MSA-3: rejected MRN 12345678 Doe" in out
+    assert "ERR: MRN 12345678 unknown" in out
+
+
+# Medium 5: the handshake tables are bounded
+
+
+def test_the_failed_handshake_peer_table_is_a_fixed_size_lru(monkeypatch, caplog):
+    monkeypatch.setattr(mllp, "HANDSHAKE_PEER_TABLE_MAX", 3)
+    err = ssl.SSLError("x")
+    with caplog.at_level(NOTICE, logger="hl7bridge.ingest.mllp"):
+        mllp._note_handshake_failure(("10.0.0.1", 1), err)
+        mllp._note_handshake_failure(("10.0.0.1", 2), err)  # suppressed in 10.0.0.1's window
+        for n in range(2, 12):
+            mllp._note_handshake_failure((f"10.0.0.{n}", 1), err)
+    assert len(mllp._windows) == 3
+    assert list(mllp._windows) == ["10.0.0.9", "10.0.0.10", "10.0.0.11"]
+    # The suppressed repeat of the first peer was reported when it was forgotten.
+    assert any(
+        "1 more time(s)" in r.getMessage() and "10.0.0.1'" in r.getMessage() for r in caplog.records
+    )
+    assert handshake_failures() == 12
+
+
+def test_pending_handshakes_are_capped_with_a_log_line(certs, caplog):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    socks = []
+    with (
+        caplog.at_level(NOTICE, logger="hl7bridge.ingest.mllp"),
+        TlsServer(server_ctx, max_pending_handshakes=2) as srv,
+    ):
+        if True:
+            for _ in range(6):  # connect and say nothing: the handshake never starts
+                socks.append(socket.create_connection(("127.0.0.1", srv.port), timeout=5))
+            time.sleep(0.5)
+            closed = 0
+            for sock in socks:
+                sock.settimeout(0.5)
+                try:
+                    if sock.recv(1) == b"":
+                        closed += 1
+                except OSError as exc:
+                    if not isinstance(exc, TimeoutError):
+                        closed += 1
+            for sock in socks:
+                sock.close()
+    assert closed >= 4, closed  # all but the two allowed to wait
+    text = caplog.text
+    assert "too many pending TLS handshakes" in text and "limit 2" in text
+
+
+# Medium 6: shutdown does not wait for idle clients
+
+
+def _tls_handler_server(certs, handler=None, **kw):
+    async def default(payload: bytes) -> bytes:
+        return _ack_for(payload)
+
+    async def junk(_data: bytes) -> None:
+        return None
+
+    ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    return serve("127.0.0.1", 0, handler or default, junk, ssl_context=ctx, **kw)
+
+
+def test_shutdown_closes_an_idle_client_at_once(certs):
+    async def run() -> float:
+        server = await _tls_handler_server(certs)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", port, ssl=client_ssl_context(certs["ca"]), server_hostname="127.0.0.1"
+        )
+        await asyncio.sleep(0.3)  # the server has finished the handshake and waits for a frame
+        start = time.monotonic()
+        await mllp.shutdown_server(server, grace_s=30.0)
+        elapsed = time.monotonic() - start
+        with contextlib.suppress(ConnectionError, ssl.SSLError):
+            assert await asyncio.wait_for(reader.read(10), 3) == b""
+        writer.close()
+        return elapsed
+
+    assert asyncio.run(run()) < 3.0  # not the 30 s grace: nobody was busy
+
+
+def test_shutdown_gives_a_busy_client_the_grace_and_then_cuts_it(certs):
+    async def run() -> tuple[float, bool]:
+        started = asyncio.Event()
+        finished: list[str] = []
+
+        async def slow(payload: bytes) -> bytes:
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                finished.append("cancelled")
+                raise
+            return _ack_for(payload)
+
+        server = await _tls_handler_server(certs, slow)
+        port = server.sockets[0].getsockname()[1]
+        _reader, writer = await asyncio.open_connection(
+            "127.0.0.1", port, ssl=client_ssl_context(certs["ca"]), server_hostname="127.0.0.1"
+        )
+        writer.write(mllp.encode_mllp(MSG))
+        await writer.drain()
+        await asyncio.wait_for(started.wait(), 5)
+        start = time.monotonic()
+        await mllp.shutdown_server(server, grace_s=0.4)
+        elapsed = time.monotonic() - start
+        writer.close()
+        return elapsed, bool(finished)
+
+    elapsed, cancelled = asyncio.run(run())
+    assert 0.3 <= elapsed < 5.0
+    assert cancelled
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot deliver SIGINT to a process")
+def test_ctrl_c_stops_a_listener_that_still_has_an_idle_tls_client(certs, tmp_path):
+    proc, port = _spawn_listener(certs, tmp_path / "i.db", "127.0.0.1")
+    try:
+        ctx = client_ssl_context(certs["ca"])
+        with (
+            socket.create_connection(("127.0.0.1", port), timeout=5) as raw,
+            ctx.wrap_socket(raw, server_hostname="127.0.0.1"),
+        ):
+            time.sleep(0.3)
+            proc.send_signal(signal.SIGINT)
+            out, err = proc.communicate(timeout=20)
+    except BaseException:
+        proc.kill()
+        proc.communicate(timeout=10)
+        raise
+    assert proc.returncode == 0, err
+    assert "listener stopped" in out
+
+
+# Medium 7: a truncated ACK is a protocol failure, and confirmed results stay
+
+
+def test_a_truncated_ack_is_a_protocol_failure_not_a_value_error():
+    async def script(reader, writer):
+        await _read_frame(reader)
+        writer.write(_good(MSG))
+        await _read_frame(reader)
+        writer.write(b"\x0bMSH|^~\\&|R|F|S|F|2026")  # cut short, then the connection ends
+        await writer.drain()
+
+    acks, error = asyncio.run(_raw_send(script, [MSG, MSG, MSG]))
+    assert isinstance(error, AckProtocolError)
+    assert acks == [_ack_for(MSG)]
+
+
+def test_cli_keeps_the_first_ack_when_the_second_is_truncated(tmp_path, capsys):
+    with _scripted_listener(_good, b"\x0bMSH|^~\\&|R|F|S|F|2026") as (port, _seen):
+        rc = cli.main(["send", str(_many(tmp_path, 2)), "--port", str(port)])
+    captured = capsys.readouterr()
+    assert rc == EXIT_CONNECTION
+    assert "internal error" not in captured.err
+    assert "not a valid ACK" in captured.err and "after 1 of 2 ACKs" in captured.err
+    assert "got 1 ACK(s)" in captured.out and "  AA: 1" in captured.out
+
+
+# Medium 8: the public sender enforces verification
+
+
+@pytest.mark.parametrize("weaken", ["no_hostname", "none"])
+def test_send_messages_refuses_a_context_that_does_not_verify(weaken, certs, monkeypatch):
+    ctx = client_ssl_context(certs["ca"])
+    ctx.check_hostname = False
+    if weaken == "none":
+        ctx.verify_mode = ssl.CERT_NONE
+    elif weaken == "no_hostname":
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+    async def never(*_a, **_k):
+        raise AssertionError("the network was touched")
+
+    monkeypatch.setattr(mllp.asyncio, "open_connection", never)
+    with pytest.raises(TlsConfigError, match="verif"):
+        asyncio.run(send_messages("127.0.0.1", 1, [MSG], ssl_context=ctx))
+
+
+def test_send_messages_refuses_a_context_that_does_not_require_a_certificate(certs, monkeypatch):
+    ctx = client_ssl_context(certs["ca"])
+    ctx.verify_mode = ssl.CERT_OPTIONAL
+
+    async def never(*_a, **_k):
+        raise AssertionError("the network was touched")
+
+    monkeypatch.setattr(mllp.asyncio, "open_connection", never)
+    with pytest.raises(TlsConfigError, match="CERT_REQUIRED"):
+        asyncio.run(send_messages("127.0.0.1", 1, [MSG], ssl_context=ctx))
+
+
+# Lower severity
+
+
+def test_common_name_is_not_used_for_host_names(certs):
+    assert client_ssl_context(certs["ca"]).hostname_checks_common_name is False
+    assert client_ssl_context().hostname_checks_common_name is False
+    server_ctx = server_ssl_context(certs["cn_only_cert"], certs["cn_only_key"])
+    with TlsServer(server_ctx) as srv, pytest.raises(TlsHandshakeError, match="localhost"):
+        _send(srv.port, client_ssl_context(certs["ca"]), host="localhost")
+    assert srv.received == []
+
+
+def test_partial_chain_is_on_only_with_an_explicit_ca(certs):
+    flag = ssl.VERIFY_X509_PARTIAL_CHAIN
+    assert client_ssl_context(certs["ca"]).verify_flags & flag
+    assert not client_ssl_context().verify_flags & flag
+    assert (
+        server_ssl_context(certs["server_cert"], certs["server_key"], certs["ca"]).verify_flags
+        & flag
+    )
+    assert not server_ssl_context(certs["server_cert"], certs["server_key"]).verify_flags & flag
+
+
+def test_an_issuing_ca_alone_is_a_trust_anchor(certs):
+    server_ctx = server_ssl_context(certs["issued_cert"], certs["issued_key"])
+    with TlsServer(server_ctx) as srv:
+        assert _send(srv.port, client_ssl_context(certs["issuing_ca"])) == [ACK]
+    # The root of another hierarchy still does not vouch for it.
+    with TlsServer(server_ctx) as srv, pytest.raises(TlsHandshakeError):
+        _send(srv.port, client_ssl_context(certs["other_ca"]))
+    # Mutual TLS with only the issuing CA given.
+    mtls = server_ssl_context(certs["server_cert"], certs["server_key"], certs["issuing_ca"])
+    client = client_ssl_context(
+        certs["ca"], certs["issued_client_cert"], certs["issued_client_key"]
+    )
+    with TlsServer(mtls) as srv:
+        assert _send(srv.port, client) == [ACK]
+
+
+def test_the_sent_total_counts_the_frames_written(certs, tmp_path, capsys):
+    folder = _many(tmp_path, 3)
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    with TlsServer(server_ctx, delay_s=3.0) as srv:
+        cli.main(
+            [
+                "send",
+                str(folder),
+                "--port",
+                str(srv.port),
+                "--tls-ca",
+                certs["ca"],
+                "--timeout",
+                "1",
+            ]
+        )
+    out = capsys.readouterr().out
+    assert "sent 1 message(s)" in out and "got 0 ACK(s)" in out
+    assert out.count(": not sent") == 2
+
+
+def test_one_deadline_covers_the_connect(monkeypatch, capsys):
+    async def blackhole(*_a, **_k):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(mllp.asyncio, "open_connection", blackhole)
+    start = time.monotonic()
+    rc = cli.main(_send_args(1, "--timeout", "0.5"))
+    assert time.monotonic() - start < 3.0
+    err = capsys.readouterr().err
+    assert rc == EXIT_CONNECTION
+    assert "timed out" in err and "Never connected" in err
+
+
+def test_a_subsecond_timeout_is_not_stretched_by_the_handshake(certs, capsys):
+    with TlsServer(None) as srv:  # a plain listener never answers a ClientHello
+        start = time.monotonic()
+        rc = cli.main(_send_args(srv.port, "--tls-ca", certs["ca"], "--timeout", "0.3"))
+        elapsed = time.monotonic() - start
+    err = capsys.readouterr().err
+    assert rc == EXIT_CONNECTION
+    assert elapsed < 0.9, elapsed  # it used to wait a full second
+    assert "no TLS handshake" in err and "within 0.3 s" in err
+
+
+def test_the_deadline_covers_a_write_the_peer_never_drains():
+    async def script(reader, writer):
+        await asyncio.sleep(2)  # accepts and never reads
+
+    big = b"MSH|^~\\&|S|F|R|F|20261007||ORU^R01|BIG1|P|2.5\r" + b"OBX|" + b"x" * 40_000_000 + b"\r"
+    start = time.monotonic()
+    acks, error = asyncio.run(_raw_send(script, [big], ack_timeout_s=0.7))
+    assert isinstance(error, TimeoutError)
+    assert time.monotonic() - start < 6.0
+    assert acks == []
+
+
+def _feed(*chunks: bytes) -> list[object]:
+    async def run() -> list[object]:
+        reader = asyncio.StreamReader()
+        for chunk in chunks:
+            reader.feed_data(chunk)
+        reader.feed_eof()
+        return [item async for item in decode_frames(reader)]
+
+    return asyncio.run(run())
+
+
+def test_the_frame_cap_is_exact_for_terminated_and_unterminated_frames():
+    cap = mllp.MAX_FRAME_BYTES
+    at_cap = _feed(b"\x0b" + b"a" * cap + b"\x1c\r")
+    assert at_cap == [Frame(b"a" * cap)]
+    over = _feed(b"\x0b" + b"a" * (cap + 1) + b"\x1c\r")
+    assert [type(i) for i in over] == [JunkBytes]  # same read as its terminator
+    # Unterminated: exactly the cap waits for more bytes, one more is quarantined.
+    waiting = _feed(b"\x0b" + b"a" * cap)
+    assert [type(i) for i in waiting] == [JunkBytes]  # at EOF it is junk, never a frame
+    spill = _feed(b"\x0b" + b"a" * (cap + 1))
+    assert sum(len(i.data) for i in spill if isinstance(i, JunkBytes)) == cap + 2
+
+
+def test_an_oversized_frame_never_reaches_the_handler(certs):
+    seen: list[bytes] = []
+
+    async def handler(payload: bytes) -> bytes:
+        seen.append(payload)
+        return _ack_for(payload)
+
+    async def run() -> list[bytes]:
+        junk: list[bytes] = []
+
+        async def on_junk(data: bytes) -> None:
+            junk.append(data)
+
+        server = await serve("127.0.0.1", 0, handler, on_junk)
+        port = server.sockets[0].getsockname()[1]
+        _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"\x0b" + b"a" * (mllp.MAX_FRAME_BYTES + 5) + b"\x1c\r")
+        await writer.drain()
+        await asyncio.sleep(0.5)
+        writer.close()
+        await mllp.shutdown_server(server, grace_s=1.0)
+        return junk
+
+    junk = asyncio.run(run())
+    assert seen == [] and junk
+
+
+def test_replay_checks_tls_before_it_looks_at_the_store(certs, tmp_path, capsys):
+    from hl7bridge.store import connect
+
+    db = tmp_path / "r.db"
+    connect(db).close()  # an empty store: nothing to replay
+    missing = str(tmp_path / "no-ca.pem")
+    for extra in ([], ["--dry-run"]):
+        rc = cli.main(["replay", "--from", "store", "--db", str(db), "--tls-ca", missing, *extra])
+        err = capsys.readouterr().err
+        assert rc == EXIT_USAGE and "--tls-ca" in err, extra
+        assert "nothing to replay" not in err
+
+
+def test_direct_listener_warns_for_any_remote_plain_http_fhir_url(capsys):
+    cli._warn_plain_http("http://fhir.test/fhir", {}, patient_data=True)
+    assert "over plain http" in capsys.readouterr().err
+    for base in ("https://fhir.test/fhir", "http://127.0.0.1:8080/fhir", "http://localhost/f"):
+        cli._warn_plain_http(base, {}, patient_data=True)
+        assert capsys.readouterr().err == "", base
+    # Other commands keep the credentials-only warning.
+    cli._warn_plain_http("http://fhir.test/fhir", {})
+    assert capsys.readouterr().err == ""
+
+
+def test_the_docs_state_the_windows_limits():
+    root = Path(hl7bridge.__file__).resolve().parents[2]
+    cli_doc = (root / "docs" / "cli.md").read_text(encoding="utf-8")
+    assert "Disallowed" in cli_doc
+    assert "TerminateProcess" in cli_doc or "terminate" in cli_doc.lower()
+
+
+# Test gaps: CLI mTLS wiring, the actual host name, trust-store selection
+
+
+def test_the_cli_listener_really_requires_a_client_certificate(certs, tmp_path):
+    proc, port = _spawn_listener(certs, tmp_path / "m.db", "127.0.0.1", "--tls-ca", certs["ca"])
+    try:
+        _refused(port, client_ssl_context(certs["ca"]))  # no client certificate
+        stranger = client_ssl_context(certs["ca"], certs["stranger_cert"], certs["stranger_key"])
+        _refused(port, stranger)  # a certificate from another CA
+        good = client_ssl_context(certs["ca"], certs["client_cert"], certs["client_key"])
+        assert len(_send(port, good)) == 1  # the real listener's own ACK
+    finally:
+        proc.kill()
+        proc.communicate(timeout=10)
+
+
+@pytest.mark.parametrize(
+    ("cert", "host", "ok"),
+    [
+        ("dns_only", "localhost", True),
+        ("dns_only", "127.0.0.1", False),
+        ("ip_only", "127.0.0.1", True),
+        ("ip_only", "localhost", False),
+    ],
+)
+def test_the_name_checked_is_the_name_given(cert, host, ok, certs):
+    server_ctx = server_ssl_context(certs[f"{cert}_cert"], certs[f"{cert}_key"])
+    with TlsServer(server_ctx) as srv:
+        if ok:
+            assert _send(srv.port, client_ssl_context(certs["ca"]), host=host) == [ACK]
+        else:
+            with pytest.raises(TlsHandshakeError) as exc:
+                _send(srv.port, client_ssl_context(certs["ca"]), host=host)
+            assert isinstance(exc.value.cause, ssl.SSLCertVerificationError)
+    assert bool(srv.received) is ok
+
+
+def _default_roots(monkeypatch, cafile: str) -> None:
+    def load(self, purpose=ssl.Purpose.SERVER_AUTH):
+        self.load_verify_locations(cafile=cafile)
+
+    monkeypatch.setattr(ssl.SSLContext, "load_default_certs", load)
+
+
+def test_the_default_trust_store_is_used_when_no_ca_is_given(certs, monkeypatch):
+    _default_roots(monkeypatch, certs["ca"])
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    with TlsServer(server_ctx) as srv:
+        assert _send(srv.port, client_ssl_context()) == [ACK]
+    _default_roots(monkeypatch, certs["other_ca"])
+    with TlsServer(server_ctx) as srv, pytest.raises(TlsHandshakeError):
+        _send(srv.port, client_ssl_context())
+
+
+def test_an_explicit_ca_replaces_the_default_store_in_both_directions(certs, monkeypatch):
+    # The system store trusts the other CA; the explicit CA is the good one.
+    _default_roots(monkeypatch, certs["other_ca"])
+    good = server_ssl_context(certs["server_cert"], certs["server_key"])
+    other = server_ssl_context(certs["other_server_cert"], certs["other_server_key"])
+    with TlsServer(good) as srv:
+        assert _send(srv.port, client_ssl_context(certs["ca"])) == [ACK]  # the explicit CA works
+    with TlsServer(other) as srv, pytest.raises(TlsHandshakeError):
+        _send(srv.port, client_ssl_context(certs["ca"]))  # and the default is not added to it
+    # And the other way round: the default trusts the good CA, the explicit one does not.
+    _default_roots(monkeypatch, certs["ca"])
+    with TlsServer(good) as srv, pytest.raises(TlsHandshakeError):
+        _send(srv.port, client_ssl_context(certs["other_ca"]))

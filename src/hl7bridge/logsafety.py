@@ -38,13 +38,15 @@ message types from configuration, counts and reason codes. They never
 carry sender-written field values. ``tests/unit/test_phi_logging.py``
 enforces this with canary values on every path.
 
-The one exception is the accepted TLS client certificate line of the
+The one exception is the accepted TLS client certificate lines of the
 listener: the subject, subject alternative names, serial and issuer come
 from a certificate the sender presented, so each value goes through
 ``printable()`` (control characters become ``?``, length capped) and is
-logged with ``%r``, so a crafted name cannot forge a ``key=value`` pair or
-move the cursor. The line is written at ``NOTICE`` level, which ``--quiet``
-does not hide.
+percent-encoded, so it holds no space, quote or ``=`` and cannot forge a
+``key=value`` pair or move the cursor. The line with the peer, SHA-256
+fingerprint, serial and issuer is written at ``NOTICE`` level, which
+``--quiet`` does not hide; the subject and alternative names, which can hold
+a person's name, are on a separate INFO line.
 """
 
 from __future__ import annotations

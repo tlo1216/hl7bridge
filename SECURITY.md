@@ -27,7 +27,10 @@ fixes.
   `127.0.0.1` by default. Do not expose it on a network. TLS is optional
   (`--tls-cert`, `--tls-key`); it encrypts, and it authenticates senders only
   with `--tls-ca` (mutual TLS). See `docs/threat-model.md` for what TLS does
-  and does not cover. A real deployment would still add a VPN.
+  and does not cover (including the Windows Disallowed-store gap and that
+  process termination on Windows skips the clean shutdown). A real deployment
+  would still add a VPN. The direct-to-FHIR listener warns about any
+  non-loopback `http://` FHIR URL, with or without credentials.
 - **The FHIR client sends what it is given.** `fhir sync` writes to the
   server you name. Use a test server.
 - **Secrets come from the environment**, never from the command line, so

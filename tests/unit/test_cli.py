@@ -545,11 +545,11 @@ class _FakeServer:
         self.error = error
         self.sockets = [type("S", (), {"getsockname": lambda self: ("127.0.0.1", 2575)})()]
 
-    async def __aenter__(self):
-        return self
+    def close(self) -> None:
+        return None
 
-    async def __aexit__(self, *exc):
-        return False
+    async def wait_closed(self) -> None:
+        return None
 
     async def serve_forever(self):
         raise self.error
@@ -661,8 +661,7 @@ def test_send_shows_ae_details_and_exits_1(tmp_path, capsys):
     assert rc == EXIT_FINDINGS
     assert (
         "11_broken_missing_accession.hl7: AE (application error, the sender should fix"
-        " and resend)\n  MSA-3: missing_accession: ORC-3\n  quarantine reason:"
-        " missing_accession\n"
+        " and resend)\n  quarantine reason: missing_accession\n"
     ) in out
     assert f"  next: hl7bridge lint {SAMPLES_DIR / '11_broken_missing_accession.hl7'}" in out
     assert "12_broken_bad_timestamp.hl7: AE" in out
@@ -1194,8 +1193,8 @@ class _AckingListener:
                     break
                 buffer += chunk
                 while b"\x1c\r" in buffer:
-                    _frame, buffer = buffer.split(b"\x1c\r", 1)
-                    writer.write(encode_mllp(self.ack))
+                    frame, buffer = buffer.split(b"\x1c\r", 1)
+                    writer.write(encode_mllp(_answering(self.ack, frame)))
                     await writer.drain()
             writer.close()
 
@@ -1218,6 +1217,18 @@ class _AckingListener:
         self.thread.join(10)
 
 
+def _answering(ack: bytes, frame: bytes) -> bytes:
+    """The fixed ACK with MSA-2 set to the MSH-10 of the frame it answers."""
+    control_id = frame.lstrip(b"\x0b").split(b"\r")[0].split(b"|")[9]
+    lines = ack.split(b"\r")
+    for n, line in enumerate(lines):
+        if line.startswith(b"MSA|"):
+            parts = line.split(b"|")
+            parts[2] = control_id
+            lines[n] = b"|".join(parts)
+    return b"\r".join(lines)
+
+
 def _ack(code: str, msa3: str, err: str = "") -> bytes:
     segments = [
         "MSH|^~\\&|RCV|R|SND|S|20261007100000||ACK|A1|P|2.5",
@@ -1238,7 +1249,7 @@ def test_send_strips_control_characters_from_the_receivers_ack(tmp_path, capsys)
     hostile = "\x1b]0;owned\x07\x1b[2Jlooks fine‮"
     msg = _one_message(tmp_path)
     with _AckingListener(_ack("AE", hostile, err=hostile)) as listener:
-        rc = cli.main(["send", str(msg), "--port", str(listener.port)])
+        rc = cli.main(["send", str(msg), "--port", str(listener.port), "--show-ack-text"])
     out = capsys.readouterr().out
     assert rc == EXIT_FINDINGS
     for ch in ("\x1b", "\x07", "‮"):
@@ -1251,7 +1262,7 @@ def test_send_strips_control_characters_from_the_receivers_ack(tmp_path, capsys)
 def test_send_shows_a_quarantine_reason_only_for_known_codes(tmp_path, capsys):
     msg = _one_message(tmp_path)
     with _AckingListener(_ack("AE", "not a patient here: PID-3")) as listener:
-        cli.main(["send", str(msg), "--port", str(listener.port)])
+        cli.main(["send", str(msg), "--port", str(listener.port), "--show-ack-text"])
     out = capsys.readouterr().out
     assert "  MSA-3: not a patient here: PID-3" in out
     assert "quarantine reason" not in out

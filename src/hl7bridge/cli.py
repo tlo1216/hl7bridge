@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import yaml
@@ -44,6 +45,7 @@ from .errors import (
     EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_USAGE,
+    AckProtocolError,
     BridgeError,
     ConfigError,
     ConnectError,
@@ -66,10 +68,12 @@ from .ingest.ack import ALL_REASONS
 from .ingest.direct import DirectHandler, DirectLog, check_profiles_for_direct
 from .ingest.loaders import load_outbound, load_studies
 from .ingest.mllp import (
+    SendProgress,
     client_ssl_context,
     handshake_failures,
     log_handshake_total,
     server_ssl_context,
+    shutdown_server,
 )
 from .ingest.parser import get_field, parse_hl7
 from .jsonout import dumps, to_jsonable
@@ -221,14 +225,24 @@ def _fhir_base(args: argparse.Namespace) -> tuple[str, bool]:
     return DEFAULT_FHIR_BASE, False
 
 
-def _warn_plain_http(base: str, headers: dict[str, str]) -> None:
-    """Credentials over plain http to another machine can be read on the way."""
+def _warn_plain_http(base: str, headers: dict[str, str], *, patient_data: bool = False) -> None:
+    """Credentials over plain http to another machine can be read on the way.
+    ``patient_data`` (the direct listener) warns without credentials too: the
+    clinical data itself is the thing that crosses the network."""
     parts = urlsplit(base)
+    if parts.scheme != "http" or parts.hostname in LOOPBACK_HOSTS:
+        return
     has_credentials = bool(headers) or parts.username is not None
-    if has_credentials and parts.scheme == "http" and parts.hostname not in LOOPBACK_HOSTS:
+    if has_credentials:
         print(
             f"warning: sending credentials to {safe_url(base)} over plain http;"
             " anyone on the network path can read them. Use https.",
+            file=sys.stderr,
+        )
+    elif patient_data:
+        print(
+            f"warning: sending patient data to {safe_url(base)} over plain http;"
+            " anyone on the network path can read it. Use https.",
             file=sys.stderr,
         )
 
@@ -622,6 +636,18 @@ def _no_empty_tls_values(args: argparse.Namespace) -> None:
             )
 
 
+def _check_host(args: argparse.Namespace) -> None:
+    """An empty host (an unset shell variable) is a mistake: a sender would
+    connect to this machine and skip the host name check, a listener would
+    bind every interface."""
+    host = getattr(args, "host", None)
+    if host is not None and not host.strip():
+        raise UsageError(
+            "--host is empty.",
+            hint="Give a host name or address. An unset shell variable gives an empty value.",
+        )
+
+
 def _sender_tls(args: argparse.Namespace) -> ssl.SSLContext | None:
     """The TLS context for ``send`` and ``replay``, or None for plain MLLP."""
     _no_empty_tls_values(args)
@@ -655,13 +681,15 @@ def _warn_not_loopback(host: str, tls: bool = False) -> None:
         )
 
 
-def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) -> int:
+def _transmit(
+    args: argparse.Namespace, outgoing: list[_Outgoing], source: str, tls: ssl.SSLContext | None
+) -> int:
     """Send in order, one ACK at a time, then print the results. Shared by
     ``send`` and ``replay``. Exit 1 when any ACK differs from ``--expect``
     or one is missing; 3 when the listener does not answer in time."""
-    tls = _sender_tls(args)
     _warn_not_loopback(args.host, tls is not None)
     acks: list[bytes] = []
+    progress = SendProgress()
     where = f"{args.host}:{args.port}"
     interval = 1.0 / args.rate if args.rate else 0.0
     payloads = [o.payload for o in outgoing]
@@ -675,6 +703,7 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
                 acks=acks,
                 interval_s=interval,
                 ssl_context=tls,
+                progress=progress,
             )
         )
     except ConnectError as exc:
@@ -712,14 +741,22 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
             hint="The listener may need a client certificate (--tls-cert, --tls-key),"
             " or may not use TLS.",
         ) from None
+    except AckProtocolError as exc:
+        _print_send_results(outgoing, acks, source, args, progress.written)
+        raise NetworkError(
+            f"the reply from {where} was not a valid ACK for the message sent ({exc.reason})"
+            f" after {len(acks)} of {len(payloads)} ACKs."
+            " The message after the last ACK may or may not have been processed.",
+            hint="Only an ACK that answers the message sent counts; this one was not kept.",
+        ) from None
     except TimeoutError:
-        _print_send_results(outgoing, acks, source, args.expect)
+        _print_send_results(outgoing, acks, source, args, progress.written)
         raise NetworkError(
             f"no ACK from {where} within {args.timeout:g} s."
             " The message may or may not have been processed."
         ) from None
     except (ConnectionError, OSError) as exc:  # includes ssl.SSLError after the handshake
-        _print_send_results(outgoing, acks, source, args.expect)
+        _print_send_results(outgoing, acks, source, args, progress.written)
         raise NetworkError(
             f"the connection to {where} broke ({type(exc).__name__})"
             f" after {len(acks)} of {len(payloads)} ACKs."
@@ -729,7 +766,7 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
             if tls is not None
             else "",
         ) from None
-    return _print_send_results(outgoing, acks, source, args.expect)
+    return _print_send_results(outgoing, acks, source, args, progress.written)
 
 
 def _split_frames(payload: bytes) -> list[bytes]:
@@ -749,6 +786,8 @@ def _split_frames(payload: bytes) -> list[bytes]:
 
 
 def cmd_send(args: argparse.Namespace) -> int:
+    _check_host(args)
+    tls = _sender_tls(args)  # a bad TLS option fails before any message is read
     outgoing: list[_Outgoing] = []
     for item in _inputs(args):
         payload, converted = _to_cr(item.data)
@@ -772,12 +811,20 @@ def cmd_send(args: argparse.Namespace) -> int:
     source = STDIN_NAME if _reads_stdin(args) else str(_message_path(args))
     # --repeat sends the same bytes again, never restamped: a listener that
     # keys on the control id answers AA and stores nothing new.
-    return _transmit(args, outgoing * args.repeat, source)
+    return _transmit(args, outgoing * args.repeat, source, tls)
 
 
 def _print_send_results(
-    outgoing: list[_Outgoing], acks: list[bytes], source: str, expect: str
+    outgoing: list[_Outgoing],
+    acks: list[bytes],
+    source: str,
+    args: argparse.Namespace,
+    written: int,
 ) -> int:
+    """``written`` is how many frames reached the connection: a message past
+    that was never put on the wire."""
+    expect = args.expect
+    show_text = bool(getattr(args, "show_ack_text", False))
     counts: Counter[str] = Counter()
     for item, raw in zip(outgoing, acks, strict=False):
         view = _read_ack(raw)
@@ -786,22 +833,23 @@ def _print_send_results(
             continue
         words = ACK_CODE_WORDS.get(view.code, "not a known ACK code")
         print(f"{item.label}: {view.code} ({words})")
-        if view.text:
+        # The receiver's free text can quote a patient identifier: shown only on request.
+        if show_text and view.text:
             print(f"  MSA-3: {view.text}")
-        if view.err:
+        if show_text and view.err:
             print(f"  ERR: {view.err}")
         reason = view.text.split(":", 1)[0].strip()
         if reason in ALL_REASONS:  # only hl7bridge's own reason codes
             print(f"  quarantine reason: {reason}")
         print(f"  next: {item.next_step}")
-    # Messages go one at a time, each after the last ACK: only the first
-    # without an ACK was on the wire.
-    for n, item in enumerate(outgoing[len(acks) :]):
-        if n == 0:
+    # Messages go one at a time, each after the last ACK: only the one written
+    # last, if any, is without an ACK and on the wire.
+    for n, item in enumerate(outgoing[len(acks) :], start=len(acks)):
+        if n < written:
             print(f"{item.label}: no ACK (it may or may not have been processed)")
         else:
             print(f"{item.label}: not sent")
-    print(f"sent {len(outgoing)} message(s) from {source}, got {len(acks)} ACK(s)")
+    print(f"sent {written} message(s) from {source}, got {len(acks)} ACK(s)")
     for code in sorted(counts):
         print(f"  {code}: {counts[code]}")
     if expect != "AA":
@@ -883,6 +931,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
             )
     if args.since:
         _now_arg(args.since, "--since")  # a bad time is a usage error before anything opens
+    _check_host(args)
+    # The TLS options are checked before the store is read, so an empty
+    # selection or a dry run cannot pass a configuration that would fail later.
+    tls = _sender_tls(args)
     conn = _readonly_db(args)
     try:
         rows = _replay_rows(args, conn)
@@ -925,7 +977,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         )
         for row in rows
     ]
-    return _transmit(args, outgoing, f"the {args.source}")
+    return _transmit(args, outgoing, f"the {args.source}", tls)
 
 
 def cmd_synth(args: argparse.Namespace) -> int:
@@ -1026,7 +1078,7 @@ def _listen_direct(args: argparse.Namespace, tls: ssl.SSLContext | None) -> int:
     _note(args, f"using direct-mode log: {db_path}")
     scope = RunScope(run_id, _lab_tag(registry))
     headers = _fhir_headers()
-    _warn_plain_http(base, headers)
+    _warn_plain_http(base, headers, patient_data=True)
     direct_log = DirectLog(db_path)
     try:
         with HapiClient(base, timeout=args.fhir_timeout, extra_headers=headers) as client:
@@ -1055,7 +1107,7 @@ def _serve_forever(
 
     async def run() -> None:
         try:
-            extra = {"ssl_context": tls} if tls else {}
+            extra: dict[str, Any] = {"ssl_context": tls} if tls else {}
             server = await serve(args.host, args.port, handle_frame, handle_junk, **extra)
         except OSError as exc:
             raise _listen_error(args.host, args.port, exc) from None
@@ -1079,8 +1131,16 @@ def _serve_forever(
                 file=sys.stderr,
             )
         try:
-            async with server:
-                await server.serve_forever()
+            # serve_forever waits for every client when it is cancelled (Python
+            # 3.12), so it runs as its own task: the clients are closed first.
+            serving = asyncio.ensure_future(server.serve_forever())
+            try:
+                await asyncio.shield(serving)
+            finally:
+                # Idle clients are closed at once, a busy one gets a grace period.
+                await shutdown_server(server)
+                serving.cancel()
+                await asyncio.gather(serving, return_exceptions=True)
         except OSError as exc:
             raise NetworkError(
                 f"the listener on {args.host}:{bound} stopped:"
@@ -1104,6 +1164,7 @@ def _serve_forever(
 
 
 def cmd_listen(args: argparse.Namespace) -> int:
+    _check_host(args)  # an empty host would bind every interface
     tls = _listener_tls(args)  # before any store is opened or server contacted
     if args.target == "fhir":
         return _listen_direct(args, tls)
@@ -1833,6 +1894,12 @@ def _add_sender(p: argparse.ArgumentParser) -> None:
     p.add_argument("--tls-key", metavar="FILE", help="PEM private key for --tls-cert")
     p.add_argument("--host", default="127.0.0.1", help="listener host (default: 127.0.0.1)")
     p.add_argument("--port", type=_port, default=2575, help="listener port (default: 2575)")
+    p.add_argument(
+        "--show-ack-text",
+        action="store_true",
+        help="print the free text of a negative ACK (MSA-3, ERR); it is the receiver's own"
+        " words and can quote patient data, so it is off by default",
+    )
     p.add_argument(
         "--timeout",
         type=_seconds,

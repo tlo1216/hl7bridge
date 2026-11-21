@@ -9,6 +9,28 @@ profile format may still change between minor versions.
 
 ### Fixed
 
+- Third review of MLLP over TLS. An empty `--host` is a usage error for `send`,
+  `replay` and `listen` (and `send_messages` and `serve` raise `ValueError`):
+  it could skip the host name check or bind every interface. A TLS flag value
+  is never echoed, only the flag name. An ACK counts only when its MSA-2 equals
+  the MSH-10 sent; a truncated, non-ACK or stale reply is `AckProtocolError`
+  (exit 3), keeping the ACKs already confirmed. `send` no longer prints the
+  receiver's MSA-3 or ERR text unless `--show-ack-text` is given. The failed
+  handshake table is a fixed-size LRU (1024 peers) and at most 64 handshakes
+  may be pending. Shutdown (`shutdown_server`) closes idle clients at once and
+  cuts a busy one after 5 seconds. `send_messages` refuses a TLS context that
+  does not check the host name or require a certificate. Host names match
+  subject alternative names only; partial-chain verification is on only with
+  `--tls-ca`. The client certificate audit line carries the SHA-256
+  fingerprint and percent-encoded fields; subject and alternative names moved
+  to an INFO line. The `sent` total counts frames written. `--timeout` is one
+  deadline for connecting (lookup, TCP, handshake) and one for each write plus
+  ACK, and the reported value is the real one. The 1,000,000 byte frame cap
+  is exact. `replay` checks TLS options before reading the store, also for a
+  dry run or an empty selection. The direct listener warns for any non-loopback
+  `http://` FHIR URL. Docs state the Windows Disallowed-store gap and that
+  Windows process termination skips the clean shutdown.
+
 - Review fixes for the repeating PID fields. Two identifiers with no system
   and the same value, from different assigning authorities, are both kept
   (in the mapping and in the merge with the server's copy). An explicit HL7

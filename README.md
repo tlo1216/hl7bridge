@@ -274,9 +274,14 @@ hl7bridge send a.hl7 --host lis.example.org --tls-ca server-ca.pem --tls-cert cl
 
 `send` and `replay` check that `--host` matches a name in the server
 certificate, so use the name, not an IP address, unless the certificate has
-an IP address entry. `--tls` alone uses the system CA store. Errors name the
-file or the reason and never print a key or any message content. The
-listener does not check revocation. See the
+an IP address entry (the common name is never used). `--tls` alone uses the
+system CA store; on Windows that excludes the Disallowed store, so use
+`--tls-ca` there. Errors name the flag or the reason and never print a key, a
+flag value or any message content, and `send` never prints a receiver's
+negative-ACK text unless `--show-ack-text` is given. An ACK counts only when its
+MSA-2 equals the MSH-10 sent. An empty `--host` is refused. The listener does
+not check revocation, and on Windows only Ctrl+C stops it cleanly (see
+[docs/cli.md](docs/cli.md)). See the
 [threat model](docs/threat-model.md) for what TLS does and does not cover.
 
 ## Direct to FHIR for a teaching lab

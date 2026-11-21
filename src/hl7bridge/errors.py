@@ -133,6 +133,16 @@ class TlsHandshakeError(NetworkError):
         self.cause = cause
 
 
+class AckProtocolError(NetworkError):
+    """The peer's answer to a frame was not a valid ACK for it: the ACK was
+    cut short, was not an ACK, or answered another message (MSA-2 is not the
+    MSH-10 sent). ``reason`` is fixed text; nothing the peer wrote is kept."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class StoreError(BridgeError):
     """The database file is not usable: wrong schema version, not SQLite."""
 
