@@ -292,7 +292,7 @@ def test_merge_keeps_elements_the_mapper_does_not_own():
         "name": [{"family": "NEW"}],
     }
     merged = merge_resource(current, new)
-    assert merged["name"] == [{"family": "NEW"}]
+    assert merged["name"] == [{"family": "OLD"}, {"family": "NEW"}]  # added to, not replaced
     assert merged["address"] == [{"city": "KEEP"}]
     assert merged["extension"] == current["extension"]
     assert merged["meta"]["tag"] == [{"code": "keep"}]
@@ -666,7 +666,7 @@ def test_a40_marks_the_merged_patient_inactive_and_keeps_its_demographics(regist
     assert gone["link"] == [
         {"other": {"reference": f"Patient/{survivor['id']}"}, "type": "replaced-by"}
     ]
-    assert survivor["name"][0]["family"] == "ZZZSAMPLE"
+    assert [n["family"] for n in survivor["name"]] == ["KEEPER", "ZZZSAMPLE"]  # added to
     assert "link" not in survivor
 
 
@@ -869,7 +869,8 @@ def test_a_merged_patient_created_by_another_writer_is_a_retryable_conflict(regi
         _post(server, registry, _a40())
     assert caught.value.exit_code == 1
     # The transaction committed: the survivor changed, the link is missing.
-    assert server.by_key("Patient", f"{_HOSPC_MRN}|SC1001")["name"][0]["family"] == "ZZZSAMPLE"
+    names = server.by_key("Patient", f"{_HOSPC_MRN}|SC1001")["name"]
+    assert [n["family"] for n in names] == ["KEEPER", "ZZZSAMPLE"]
     assert "link" not in server.by_key("Patient", _GONE)
     # The resend completes the merge.
     _post(server, registry, _a40())
@@ -935,7 +936,7 @@ def test_sync_and_to_fhir_agree_when_the_merged_patient_has_other_messages(tmp_p
     _post(posted, registry, *texts)
     assert _normalized(posted) == _normalized(synced)
     gone = synced.by_key("Patient", _GONE)
-    assert gone["name"][0]["family"] == "LATE" and gone["active"] is False
+    assert [n["family"] for n in gone["name"]] == ["OLDNAME", "LATE"] and gone["active"] is False
     assert gone["link"][0]["type"] == "replaced-by"
 
 

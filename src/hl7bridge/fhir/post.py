@@ -19,7 +19,8 @@ is sent, two things are read from the server and folded into it:
    with a "send again" reason, so a concurrent create is never overwritten
    unmerged. More than one: refused, never "first match wins".
    ADT^A40 adds rules, all checked before anything is sent (``MergeRefusedError``):
-   Patient.link keeps what the server has; a merged-away Patient already
+   Patient.link, name, address and telecom keep what the server has and gain the
+   message's new repeats once; a merged-away Patient already
    replaced by another Patient, a survivor that is inactive or merged away
    itself (a reversed merge), and two entries that resolve to one server
    resource are refused. A resend of a merge already there passes. If another
@@ -68,9 +69,16 @@ OWNED: dict[str, tuple[str, ...]] = {
     "Encounter": ("status", "class", "subject", "period"),
     "ServiceRequest": ("status", "intent", "code", "authoredOn", "subject"),
 }
-# Elements kept whole and added to: Patient.link entries on the server
-# stay, and the message's are added when not already there.
-ADDITIVE = {("Patient", "link")}
+# Elements kept whole and added to: the entries on the server stay, and the
+# message's are added when not already there. A name, address or telephone
+# number the message repeats is added once; a value the server holds and
+# the message no longer carries stays.
+ADDITIVE = {
+    ("Patient", "link"),
+    ("Patient", "name"),
+    ("Patient", "address"),
+    ("Patient", "telecom"),
+}
 # Elements merged one level down: an A08 with PV1-45 and no PV1-44 keeps
 # the admit time.
 NESTED = {("Encounter", "period")}
@@ -181,14 +189,32 @@ def _link_key(link: dict[str, Any], resolved: dict[str, str]) -> tuple[Any, Any]
     return link.get("type"), _patient_ref(resolved.get(ref, ref)) or ref
 
 
+def _has(items: list[dict[str, Any]], new: dict[str, Any]) -> bool:
+    """Whether an entry of ``items`` already carries everything ``new``
+    says (the server may hold more on it, such as a period or an id)."""
+    return any(all(item.get(k) == v for k, v in new.items()) for item in items)
+
+
+def _identifier_key(ident: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """An identifier's system and value; with no system, its type code too,
+    so two untyped-by-system numbers of different types stay apart."""
+    system = ident.get("system")
+    code = None
+    if not system:
+        codings = ident.get("type", {}).get("coding") or [{}]
+        code = codings[0].get("code")
+    return system, ident.get("value"), code
+
+
 def merge_resource(
     current: dict[str, Any], new: dict[str, Any], resolved: dict[str, str] | None = None
 ) -> dict[str, Any]:
     """``new`` laid over ``current``: owned elements the message has replace
     the current ones, absent ones are kept, identifiers are added to, and
-    additive elements (Patient.link) keep the current entries and gain the
-    message's that are not there yet. ``resolved`` maps a ``urn:uuid`` full
-    URL of this transaction to its ``Patient/<id>``, for comparing links."""
+    additive elements (Patient.link, name, address, telecom) keep the
+    current entries and gain the message's that are not there yet. ``resolved``
+    maps a ``urn:uuid`` full URL of this transaction to its ``Patient/<id>``,
+    for comparing links."""
     kind = new["resourceType"]
     merged = copy.deepcopy(current)
     ids = resolved or {}
@@ -196,17 +222,23 @@ def merge_resource(
         if element not in new:
             continue
         if (kind, element) in ADDITIVE:
-            have_links = {_link_key(x, ids) for x in merged.get(element, [])}
-            for item in new[element]:
-                if _link_key(item, ids) not in have_links:
-                    merged.setdefault(element, []).append(copy.deepcopy(item))
+            if element == "link":
+                have_links = {_link_key(x, ids) for x in merged.get(element, [])}
+                for item in new[element]:
+                    if _link_key(item, ids) not in have_links:
+                        merged.setdefault(element, []).append(copy.deepcopy(item))
+            else:
+                for item in new[element]:
+                    if not _has(merged.get(element, []), item):
+                        merged.setdefault(element, []).append(copy.deepcopy(item))
         elif (kind, element) in NESTED and isinstance(merged.get(element), dict):
             merged[element] = {**merged[element], **new[element]}
         else:
             merged[element] = copy.deepcopy(new[element])
-    have = {(i.get("system"), i.get("value")) for i in merged.get("identifier", [])}
+    have = {_identifier_key(i) for i in merged.get("identifier", [])}
     for ident in new.get("identifier", []):
-        if (ident.get("system"), ident.get("value")) not in have:
+        if _identifier_key(ident) not in have:
+            have.add(_identifier_key(ident))
             merged.setdefault("identifier", []).append(copy.deepcopy(ident))
     if kind == "Encounter" and merged.get("period", {}).get("end"):
         # The IG sets finished when PV1-45 is valued; a discharge already

@@ -53,6 +53,7 @@ def get_field(
     repetition: int = 1,
     component: int = 1,
     segment_num: int = 1,
+    subcomponent: int | None = None,
 ) -> str:
     """Return the (unescaped) component value, or '' when absent.
 
@@ -67,6 +68,7 @@ def get_field(
             field_num=field_num,
             repeat_num=repetition,
             component_num=component,
+            subcomponent_num=subcomponent,
         )
     except (KeyError, IndexError):
         return ""

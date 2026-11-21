@@ -107,20 +107,26 @@ ROWS: tuple[SpecRow, ...] = (
     SpecRow(
         "pid_to_patient",
         "PID-3",
-        "Patient.identifier (MR)",
+        "Patient.identifier",
         PID,
-        "Component 1 of the MRN repetition, with the profile's mrn system: the first"
-        " repetition when none has a type code (PID-3.5), else the first one typed MR;"
-        " a typed list with no MR is refused. The key; only ADT writes the Patient, and"
-        " ORM and ORU create it when missing. The IG maps every repetition and takes the"
-        " system from the assigning authority; hl7bridge reads one system per hospital.",
+        "Every repetition (CX). The MRN repetition is written first, as before: component 1"
+        " with the profile's mrn system and type MR; the first repetition when none has a type"
+        " code (PID-3.5), else the first one typed MR; a typed list with no MR is refused. It"
+        " is the key (conditional updates, Committed.key); only ADT writes the Patient, and ORM"
+        " and ORU create it when missing. The other repetitions follow in message order, with"
+        " the type from component 5 (v2-0203) and the assigning authority from component 4: an"
+        " ISO OID, UUID or URI universal id becomes the system, anything else the namespace as"
+        " assigner.display. Check digit and effective dates are not read. The IG takes every"
+        " system from the authority; hl7bridge reads one MRN system per hospital.",
     ),
     SpecRow(
         "pid_to_patient",
         "PID-5",
         "Patient.name",
         PID,
-        "First repetition: component 1 family, components 2 and 3 given.",
+        "Every repetition (XPN): component 1 family, 2 and 3 given, 4 and 6 suffix, 5 prefix,"
+        " 7 use through table 0200 (a code the IG leaves unmapped gives no use). Validity range"
+        " and effective dates are not read.",
     ),
     SpecRow(
         "pid_to_patient",
@@ -135,15 +141,27 @@ ROWS: tuple[SpecRow, ...] = (
         "PID-11",
         "Patient.address",
         PID,
-        "First repetition, components 1 to 6 (lines, city, state, postal code, country).",
+        "Every repetition (XAD): components 1 and 2 (lines), 3 city, 4 state, 5 postal code,"
+        " 6 country, 7 type as use through table 0190 (M and SH type, HV and the rest are not"
+        " written), 9 county as district. Validity range and addressee are not read.",
     ),
     SpecRow(
         "pid_to_patient",
         "PID-13",
         "Patient.telecom",
         PID,
-        "First repetition. Component 4 as email when component 3 is Internet, else"
-        " component 1 as phone. Use is home, as the IG says for PID-13.",
+        "Every repetition (XTN). System from component 3 (table 0202: Internet and X.400 email,"
+        " FX fax, BP pager, else phone); value component 4 for an email, else component 1 or the"
+        " unformatted number (12). Use from component 2 through table 0201 (PRN, WPN, PRS);"
+        " otherwise home, as the IG says for PID-13. Country, area, local, extension and rank"
+        " are not written.",
+    ),
+    SpecRow(
+        "pid_to_patient",
+        "PID-14",
+        "Patient.telecom",
+        PID,
+        "As PID-13, every repetition; the use defaults to work, as the IG says for PID-14.",
     ),
     # MRG to the merged-away Patient (ADT^A40)
     SpecRow(

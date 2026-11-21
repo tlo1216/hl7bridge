@@ -9,6 +9,17 @@ profile format may still change between minor versions.
 
 ### Added
 
+- `to-fhir` and `fhir sync` keep every repeat of PID-3 (identifiers, each with
+  its type from PID-3.5 and its assigning authority from PID-3.4), PID-5
+  (names, with prefix, suffix and use), PID-11 (addresses, with use and
+  district) and PID-13 and PID-14 (telephone numbers and email addresses),
+  following the IG 1.0.0 CX, XPN, XAD and XTN maps, where only the first was
+  written before. The MRN repetition is still written first and is still the
+  key: conditional URLs, full URLs and `Committed.key` are unchanged. In
+  `docs/conformance.md` the PID-3, PID-5, PID-11 and PID-13 repeat assertions
+  move from gap to match (the PID-3.4 system assertion stays a gap: the MRN
+  system comes from the profile).
+
 - Reproducible IG 1.0.0 conformance evidence in `docs/conformance.md`, with
   synthetic ADT A01/A04/A08/A40, ORM O01 and ORU R01 fixtures, a separate
   structured-number rejection probe, a CLI comparison tool and regression tests.
@@ -37,6 +48,12 @@ profile format may still change between minor versions.
   `patient_read_only`.
 
 ### Changed
+
+- A post now adds a Patient's names, addresses and telephone numbers to the
+  ones the server holds, once each, instead of replacing them: a value the
+  server has and the message lacks stays, and a corrected address is added
+  beside the old one. `merge_resource` also keeps identifiers apart by type
+  when they have no system.
 
 - `fhir sync` no longer leaves a merged-away patient out. Its messages and
   its ImagingStudy rows are posted like any other patient's, so the sync
