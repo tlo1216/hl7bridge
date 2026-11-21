@@ -15,7 +15,7 @@
 | Messages | `send [PATH]` | Send a file, a folder or stdin (`-`) over MLLP, one frame per message, and show the ACKs; `--repeat N`, `--rate PER_SECOND`, `--expect CODE` |
 | Messages | `replay` | Resend quarantined (default) or stored (`--from store`) messages, oldest first, byte for byte and each distinct one once; reads a version 2 or 3 store; `--only-reason`, `--since`, `--hospital`, `--limit`, `--dry-run` |
 | Messages | `synth --out DIR` | Generate a synthetic day with a defect manifest |
-| Listener | `listen` | Run the MLLP listener into the store; `--target fhir` writes each message to a FHIR server as one transaction and ACKs after the commit (see below) |
+| Listener | `listen` | Run the MLLP listener into the store (`--tls-cert`, `--tls-key`, `--tls-ca` for TLS); `--target fhir` writes each message to a FHIR server as one transaction and ACKs after the commit (see below) |
 | Reports | `reconcile` | Orders versus imaging studies |
 | Reports | `ack-report` | Delivery status of outbound reports |
 | Reports | `tat --month YYYY-MM` | Turnaround-time statistics |
@@ -32,6 +32,29 @@
 
 Every report command, and `lint`, `doctor` and the `profile` commands,
 take `--json`. JSON goes to stdout; status lines go to stderr.
+
+## MLLP over TLS
+
+Off by default; a listener started without these flags speaks plain MLLP.
+
+| Command | Flag | Meaning |
+| --- | --- | --- |
+| `listen` | `--tls-cert FILE`, `--tls-key FILE` | Serve TLS 1.2 or newer. Both are needed together |
+| `listen` | `--tls-ca FILE` | Also require a client certificate that chains to this CA |
+| `send`, `replay` | `--tls` | Use TLS with the system CA store |
+| `send`, `replay` | `--tls-ca FILE` | Trust only this CA for the listener's certificate (implies `--tls`) |
+| `send`, `replay` | `--tls-cert FILE`, `--tls-key FILE` | Present a client certificate (implies `--tls`; both together) |
+
+Senders always verify the certificate chain, its dates and that `--host`
+matches the certificate; there is no flag to turn that off. With TLS the
+not-loopback warning is not shown. Failures:
+
+| Case | Message |
+| --- | --- |
+| Certificate refused | `error: the TLS certificate from 127.0.0.1:2575 was refused: <reason>. Nothing was sent.` (exit 3) |
+| Handshake failed | `error: the TLS handshake with 127.0.0.1:2575 failed: <reason>. Nothing was sent.` (exit 3) |
+| Missing or bad file | `error: cannot read the TLS CA file x.pem.` (exit 2) |
+| One of a pair given | `error: TLS needs both --tls-cert and --tls-key.` or `error: --tls-cert and --tls-key go together.` (exit 2) |
 
 ## Direct to FHIR: `listen --target fhir`
 

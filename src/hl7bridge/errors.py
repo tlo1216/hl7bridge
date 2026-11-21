@@ -103,6 +103,12 @@ class ListenError(BridgeError):
     exit_code = EXIT_USAGE
 
 
+class TlsConfigError(BridgeError):
+    """A TLS certificate, key or CA file is missing or unusable."""
+
+    exit_code = EXIT_USAGE
+
+
 class NetworkError(BridgeError):
     """A listener or server did not answer, or the connection broke."""
 

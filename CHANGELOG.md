@@ -9,6 +9,11 @@ profile format may still change between minor versions.
 
 ### Added
 
+- Optional MLLP over TLS: `listen --tls-cert --tls-key [--tls-ca]` (client
+  certificates with `--tls-ca`), and `send` and `replay` `--tls`, `--tls-ca`,
+  `--tls-cert`, `--tls-key`. TLS 1.2 minimum, certificate and host name always
+  verified. New `docs/threat-model.md`.
+
 - `to-fhir` and `fhir sync` map ADT^A40 (patient merge). The surviving
   Patient (PID) is merged as for any ADT; the merged-away Patient (MRG-1) is
   set inactive with a `replaced-by` link to the survivor, keeping what the

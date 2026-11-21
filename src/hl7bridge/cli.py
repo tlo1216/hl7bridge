@@ -16,6 +16,7 @@ import os
 import re
 import socket
 import sqlite3
+import ssl
 import sys
 import traceback
 from collections import Counter
@@ -59,6 +60,7 @@ from .ingest import IngestPipeline, send_messages, serve
 from .ingest.ack import ALL_REASONS
 from .ingest.direct import DirectHandler, DirectLog, check_profiles_for_direct
 from .ingest.loaders import load_outbound, load_studies
+from .ingest.mllp import client_ssl_context, server_ssl_context
 from .ingest.parser import get_field, parse_hl7
 from .jsonout import dumps, to_jsonable
 from .lint import lint_directory, render_lint_text
@@ -599,7 +601,29 @@ class _Outgoing:
     next_step: str
 
 
-def _warn_not_loopback(host: str) -> None:
+def _sender_tls(args: argparse.Namespace) -> ssl.SSLContext | None:
+    """The TLS context for ``send`` and ``replay``, or None for plain MLLP."""
+    ca, cert, key = args.tls_ca, args.tls_cert, args.tls_key
+    if not (args.tls or ca or cert or key):
+        return None
+    if bool(cert) != bool(key):
+        raise UsageError("--tls-cert and --tls-key go together.")
+    return client_ssl_context(ca, cert, key)
+
+
+def _listener_tls(args: argparse.Namespace) -> ssl.SSLContext | None:
+    """The TLS context for ``listen``, or None for plain MLLP."""
+    cert, key, ca = (getattr(args, n, None) for n in ("tls_cert", "tls_key", "tls_ca"))
+    if not (cert or key or ca):
+        return None
+    if not (cert and key):
+        raise UsageError("TLS needs both --tls-cert and --tls-key.")
+    return server_ssl_context(cert, key, ca)
+
+
+def _warn_not_loopback(host: str, tls: bool = False) -> None:
+    if tls:
+        return
     if host not in LOOPBACK_HOSTS:
         print(
             f"warning: sending to {host}, which is not loopback. MLLP has no encryption;"
@@ -612,7 +636,8 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
     """Send in order, one ACK at a time, then print the results. Shared by
     ``send`` and ``replay``. Exit 1 when any ACK differs from ``--expect``
     or one is missing; 3 when the listener does not answer in time."""
-    _warn_not_loopback(args.host)
+    tls = _sender_tls(args)
+    _warn_not_loopback(args.host, tls is not None)
     acks: list[bytes] = []
     where = f"{args.host}:{args.port}"
     interval = 1.0 / args.rate if args.rate else 0.0
@@ -626,13 +651,32 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
                 ack_timeout_s=args.timeout,
                 acks=acks,
                 interval_s=interval,
+                ssl_context=tls,
             )
         )
     except TimeoutError:
         _print_send_results(outgoing, acks, source, args.expect)
+        if tls is not None and not acks:
+            raise NetworkError(
+                f"no TLS handshake or ACK from {where} within {args.timeout:g} s."
+                " Is the listener running with --tls-cert? Nothing was sent.",
+            ) from None
         raise NetworkError(
             f"no ACK from {where} within {args.timeout:g} s."
             " The message may or may not have been processed."
+        ) from None
+    except ssl.SSLCertVerificationError as exc:
+        raise NetworkError(
+            f"the TLS certificate from {where} was refused: {exc.verify_message}."
+            " Nothing was sent.",
+            hint="Check --tls-ca and that --host matches a name in the certificate.",
+        ) from None
+    except ssl.SSLError as exc:
+        raise NetworkError(
+            f"the TLS handshake with {where} failed: {exc.reason or type(exc).__name__}."
+            " Nothing was sent.",
+            hint="The listener may need a client certificate (--tls-cert, --tls-key),"
+            " or may not use TLS.",
         ) from None
     except (ConnectionRefusedError, socket.gaierror) as exc:
         reason = "connection refused" if isinstance(exc, ConnectionRefusedError) else "unknown host"
@@ -644,7 +688,11 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
         _print_send_results(outgoing, acks, source, args.expect)
         raise NetworkError(
             f"the connection to {where} broke ({type(exc).__name__})"
-            f" after {len(acks)} of {len(payloads)} ACKs."
+            f" after {len(acks)} of {len(payloads)} ACKs.",
+            hint="With TLS, a listener that does not use TLS, or that wants a client"
+            " certificate, ends the connection like this."
+            if tls is not None
+            else "",
         ) from None
     return _print_send_results(outgoing, acks, source, args.expect)
 
@@ -957,15 +1005,21 @@ def _serve_forever(
     handle_junk: Callable[[bytes], Awaitable[None]],
     where: str,
 ) -> int:
+    tls = _listener_tls(args)
+
     async def run() -> None:
         try:
-            server = await serve(args.host, args.port, handle_frame, handle_junk)
+            extra = {"ssl_context": tls} if tls else {}
+            server = await serve(args.host, args.port, handle_frame, handle_junk, **extra)
         except OSError as exc:
             raise _listen_error(args.host, args.port, exc) from None
         bound = server.sockets[0].getsockname()[1] if server.sockets else args.port
         # Printed only once the socket is bound, so it is never a false claim.
-        print(f"MLLP listener on {args.host}:{bound}, {where} (Ctrl+C to stop)", flush=True)
-        if args.host not in LOOPBACK_HOSTS:
+        mode = "MLLP over TLS" if tls else "MLLP"
+        if tls and getattr(args, "tls_ca", None):
+            mode += " (client certificates required)"
+        print(f"{mode} listener on {args.host}:{bound}, {where} (Ctrl+C to stop)", flush=True)
+        if args.host not in LOOPBACK_HOSTS and not tls:
             print(
                 f"warning: {args.host} is not loopback. MLLP has no encryption or"
                 " authentication; other machines can now send to this listener.",
@@ -1686,6 +1740,21 @@ ACK_CODES = ("AA", "AE", "AR", "CA", "CE", "CR")
 
 
 def _add_sender(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--tls",
+        action="store_true",
+        help="use MLLP over TLS (TLS 1.2 or newer; the certificate and host name are checked;"
+        " implied by the other --tls options)",
+    )
+    p.add_argument(
+        "--tls-ca",
+        metavar="FILE",
+        help="PEM file of the CA that signed the listener's certificate (default: system CAs)",
+    )
+    p.add_argument(
+        "--tls-cert", metavar="FILE", help="PEM client certificate to present (needs --tls-key)"
+    )
+    p.add_argument("--tls-key", metavar="FILE", help="PEM private key for --tls-cert")
     p.add_argument("--host", default="127.0.0.1", help="listener host (default: 127.0.0.1)")
     p.add_argument("--port", type=_port, default=2575, help="listener port (default: 2575)")
     p.add_argument(
@@ -1820,6 +1889,17 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         _add_config(p)
         p.add_argument("--host", default="127.0.0.1", help="address to bind (default: 127.0.0.1)")
         p.add_argument("--port", type=_port, default=2575, help="port to bind (default: 2575)")
+        p.add_argument(
+            "--tls-cert",
+            metavar="FILE",
+            help="PEM certificate: serve MLLP over TLS 1.2 or newer (needs --tls-key)",
+        )
+        p.add_argument("--tls-key", metavar="FILE", help="PEM private key for --tls-cert")
+        p.add_argument(
+            "--tls-ca",
+            metavar="FILE",
+            help="PEM CA file: require and verify a client certificate from every sender",
+        )
         p.add_argument(
             "--target",
             choices=("store", "fhir"),
