@@ -106,12 +106,19 @@
       },
       {
         "input": "PID-13 repetitions",
-        "path": "Patient.0.telecom.*.value",
+        "path": "Patient.0.telecom.*",
         "expected": [
-          "zzztest@example.invalid",
-          "5550100"
+          {
+            "system": "email",
+            "value": "zzztest@example.invalid"
+          },
+          {
+            "system": "phone",
+            "value": "5550100",
+            "use": "home"
+          }
         ],
-        "description": "Email and telephone",
+        "description": "Email and telephone with system and use (NET is unmapped by the IG, so no use)",
         "source": "pid",
         "unordered": true
       }
@@ -550,9 +557,10 @@
           "input": "OBR-3",
           "path": "DiagnosticReport.0.identifier.*.type.coding.*.code",
           "expected": [
-            "FILL"
+            "FILL",
+            "PLAC"
           ],
-          "description": "Filler identifier type",
+          "description": "Filler and placer identifier types (OBR-3 and OBR-2; ORC-2/3 empty)",
           "source": "obr_report",
           "unordered": true
         },

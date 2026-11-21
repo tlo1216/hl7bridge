@@ -116,8 +116,10 @@ ROWS: tuple[SpecRow, ...] = (
         " and ORU create it when missing. The other repetitions follow in message order, with"
         " the type from component 5 (v2-0203) and the assigning authority from component 4: an"
         " ISO OID, UUID or URI universal id becomes the system, anything else the namespace as"
-        " assigner.display. Check digit and effective dates are not read. The IG takes every"
-        " system from the authority; hl7bridge reads one MRN system per hospital.",
+        " assigner.display. Two other repetitions with the same value and no system differ by"
+        " type or assigning authority and are both kept. Check digit and effective dates are not"
+        " read. The IG takes every system from the authority; hl7bridge reads one MRN system"
+        " per hospital.",
     ),
     SpecRow(
         "pid_to_patient",
@@ -126,7 +128,9 @@ ROWS: tuple[SpecRow, ...] = (
         PID,
         "Every repetition (XPN): component 1 family, 2 and 3 given, 4 and 6 suffix, 5 prefix,"
         " 7 use through table 0200 (a code the IG leaves unmapped gives no use). Validity range"
-        " and effective dates are not read. A post replaces the server's names with these.",
+        " and effective dates are not read. A post replaces the server's names with these; a"
+        " field left out keeps them, an explicit HL7 null (two double quotes) clears them"
+        " (v2.8.2 section 2.10.5).",
     ),
     SpecRow(
         "pid_to_patient",
@@ -144,7 +148,8 @@ ROWS: tuple[SpecRow, ...] = (
         "Every repetition (XAD): components 1 and 2 (lines), 3 city, 4 state, 5 postal code,"
         " 6 country, 7 type as use through table 0190 (M and SH type, HV and the rest are not"
         " written), 9 county as district. Validity range and addressee are not read. A post"
-        " replaces the server's addresses with these; a message with no PID-11 leaves them.",
+        " replaces the server's addresses with these; a message with no PID-11 leaves them, an"
+        " explicit HL7 null (two double quotes) clears them.",
     ),
     SpecRow(
         "pid_to_patient",
@@ -152,11 +157,15 @@ ROWS: tuple[SpecRow, ...] = (
         "Patient.telecom",
         PID,
         "Every repetition (XTN). System from component 3 (table 0202: Internet and X.400 email,"
-        " FX fax, BP pager, else phone); value component 4 for an email, else component 1 or the"
-        " unformatted number (12). Use from component 2 through table 0201 (PRN, WPN, PRS);"
-        " otherwise home, as the IG says for PID-13. Country, area, local, extension and rank"
+        " FX fax, BP pager, else phone). Value, as the IG says: component 4 for an email, else the"
+        " unformatted number (12), else component 1 (only when 12 is absent), else a number"
+        " built from country (5, as +), area (6) and local number (7) joined by spaces; a"
+        " repetition with any of these is written. Use from component 2 through table 0201 (PRN,"
+        " WPN, PRS); a code the IG leaves unmapped (EMR, NET) gives no use, and the field's"
+        " default (home for PID-13) applies only when component 2 is empty. Extension and rank"
         " are not written. A post replaces the server's telecom list with PID-13 and PID-14"
-        " together; a message with neither leaves it.",
+        " together; a message with neither leaves it, an explicit HL7 null (two double quotes)"
+        " in either, with no number mapped from either, clears it.",
     ),
     SpecRow(
         "pid_to_patient",

@@ -169,7 +169,7 @@ def test_every_telecom_repetition_and_pid14_is_work(registry):
     )
     telecom = _patient(text, registry)["telecom"]
     assert telecom == [
-        {"system": "email", "value": "zzz@example.invalid", "use": "home"},
+        {"system": "email", "value": "zzz@example.invalid"},
         {"system": "phone", "value": "5550100", "use": "home"},
         {"system": "phone", "value": "5550101", "use": "mobile"},
         {"system": "fax", "value": "5550102", "use": "home"},
@@ -357,3 +357,151 @@ def test_a_thin_message_with_no_address_keeps_the_servers(registry):
     patient = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")
     assert [a["city"] for a in patient["address"]] == ["CITY"]
     assert patient["telecom"][0]["value"] == "5550100"
+
+
+# -- review fixes: key order, authorities, nulls, XTN values, telecom use ----------
+
+
+def _seed_a01(server: FakeFhir, registry, **fields: str) -> None:
+    text = _adt("SC9001^^^HOSPC^MR", event="A01", **fields)
+    with HapiClient(BASE, transport=server.transport()) as client:
+        post_mapped(client, message_to_bundle(text, registry))
+
+
+def _post_text(server: FakeFhir, registry, text: str):
+    with HapiClient(BASE, transport=server.transport()) as client:
+        return post_mapped(client, message_to_bundle(text, registry))
+
+
+@pytest.mark.parametrize(
+    "first",
+    [{"value": "S-NO-SYSTEM"}, {"system": "urn:other:ssn", "value": "000-00-0000"}],
+)
+def test_committed_key_is_the_mrn_whatever_order_the_server_lists_identifiers(first, registry):
+    server = FakeFhir()
+    _seed_a01(server, registry, f5="ZZZ^A")
+    held = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")
+    held["identifier"] = [first, *held["identifier"]]
+    server._write("Patient", held["id"], held)
+    done = _post_text(server, registry, _adt("SC9001^^^HOSPC^MR", f5="NEWNAME^A"))
+    assert [c.key for c in done if c.kind == "Patient"] == [f"{MRN_SYSTEM}|SC9001"]
+    assert server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")["name"][0]["family"] == "NEWNAME"
+
+
+def test_a_retired_result_key_ignores_a_systemless_identifier_listed_first(registry):
+    from hl7bridge.fhir.post import _retired_key
+
+    ours = {"system": "urn:obs", "value": "ACC/CODE/sub/1"}
+    entry = {"resource": {"identifier": [{"value": "X"}, ours]}}
+    assert _retired_key(entry["resource"], "urn:obs") == "urn:obs|ACC/CODE/sub/1"
+
+
+def test_systemless_identifiers_from_different_authorities_are_both_kept(registry):
+    text = _adt("M1^^^HOSPC^MR~123^^^SITE_A^PI~123^^^SITE_B^PI")
+    ids = _patient(text, registry)["identifier"]
+    assert [(i["value"], i["assigner"]["display"]) for i in ids[1:]] == [
+        ("123", "SITE_A"),
+        ("123", "SITE_B"),
+    ]
+
+
+def test_a_post_keeps_a_second_systemless_identifier_from_another_authority(registry):
+    server = FakeFhir()
+    _post_text(server, registry, _adt("M1^^^HOSPC^MR~123^^^SITE_A^PI", event="A01"))
+    _post_text(server, registry, _adt("M1^^^HOSPC^MR~123^^^SITE_A^PI~123^^^SITE_B^PI"))
+    ids = server.by_key("Patient", f"{MRN_SYSTEM}|M1")["identifier"]
+    assert [i["assigner"]["display"] for i in ids[1:]] == ["SITE_A", "SITE_B"]
+
+
+def test_merge_resource_keeps_identifiers_that_differ_only_by_authority():
+    a = {"value": "123", "assigner": {"display": "A"}}
+    b = {"value": "123", "assigner": {"display": "B"}}
+    merged = merge_resource(
+        {"resourceType": "Patient", "identifier": [a]},
+        {"resourceType": "Patient", "identifier": [a, b]},
+    )
+    assert merged["identifier"] == [a, b]
+
+
+@pytest.mark.parametrize(
+    ("field", "element"), [("f5", "name"), ("f11", "address"), ("f13", "telecom")]
+)
+def test_an_explicit_hl7_null_clears_the_field_on_the_server(field, element, registry):
+    server = FakeFhir()
+    _seed_a01(server, registry, f5="ZZZ^A", f11="1 RD^^CITY", f13="5550100")
+    _post_text(server, registry, _adt("SC9001^^^HOSPC^MR", **{field: '""'}))
+    patient = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")
+    assert element not in patient or patient[element] == []
+    for other in {"name", "address", "telecom"} - {element}:
+        assert patient[other]  # the fields the message left absent are kept
+
+
+def test_an_explicit_null_in_pid14_alone_clears_the_telephone_list(registry):
+    server = FakeFhir()
+    _seed_a01(server, registry, f13="5550100")
+    _post_text(server, registry, _adt("SC9001^^^HOSPC^MR", f14='""'))
+    assert not server.by_key("Patient", f"{MRN_SYSTEM}|SC9001").get("telecom")
+
+
+def test_a_null_beside_a_value_does_not_clear(registry):
+    server = FakeFhir()
+    _seed_a01(server, registry, f13="5550100")
+    _post_text(server, registry, _adt("SC9001^^^HOSPC^MR", f13='5550111~""'))
+    telecom = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")["telecom"]
+    assert [t["value"] for t in telecom] == ["5550111"]
+
+
+def test_an_absent_field_still_keeps_the_server_value(registry):
+    server = FakeFhir()
+    _seed_a01(server, registry, f5="ZZZ^A", f11="1 RD^^CITY", f13="5550100")
+    _post_text(server, registry, _adt("SC9001^^^HOSPC^MR"))
+    patient = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")
+    assert patient["name"] and patient["address"] and patient["telecom"]
+
+
+def test_the_null_is_not_in_the_bundle_resource(registry):
+    patient = _patient(_adt("SC9001^^^HOSPC^MR", f5='""'), registry)
+    assert "name" not in patient
+
+
+@pytest.mark.parametrize(
+    ("xtn", "expected"),
+    [
+        ("^PRN^PH^^1^312^5550199", {"system": "phone", "value": "+1 312 5550199", "use": "home"}),
+        ("^PRN^PH^^^312^5550199", {"system": "phone", "value": "312 5550199", "use": "home"}),
+        ("^PRN^PH^^^^5550199", {"system": "phone", "value": "5550199", "use": "home"}),
+        ("111^PRN^PH^^1^312^5550199", {"system": "phone", "value": "111", "use": "home"}),
+        (
+            "111^PRN^PH^^1^312^5550199^^^^^(312) 555-0199",
+            {"system": "phone", "value": "(312) 555-0199", "use": "home"},
+        ),
+        (
+            "^PRN^PH^^^^^^^^^(312) 555-0199",
+            {"system": "phone", "value": "(312) 555-0199", "use": "home"},
+        ),
+    ],
+)
+def test_xtn_value_rules(xtn, expected, registry):
+    assert _patient(_adt("SC9001", f13=xtn), registry)["telecom"] == [expected]
+
+
+def test_a_built_number_telecom_is_not_dropped_beside_an_email(registry):
+    text = _adt("SC9001", f13="^PRN^PH^^1^312^5550199~^NET^Internet^a@example.invalid")
+    values = [t["value"] for t in _patient(text, registry)["telecom"]]
+    assert values == ["+1 312 5550199", "a@example.invalid"]
+
+
+@pytest.mark.parametrize(
+    ("field", "xtn", "use"),
+    [
+        ("f14", "5550199^EMR^PH", None),
+        ("f13", "5550199^EMR^PH", None),
+        ("f14", "5550199^^PH", "work"),
+        ("f13", "5550199^^PH", "home"),
+        ("f14", "5550199^WPN^PH", "work"),
+        ("f13", "5550199^PRS^CP", "mobile"),
+    ],
+)
+def test_the_field_default_use_applies_only_when_xtn2_is_empty(field, xtn, use, registry):
+    contact = _patient(_adt("SC9001", **{field: xtn}), registry)["telecom"][0]
+    assert contact.get("use") == use

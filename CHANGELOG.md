@@ -7,6 +7,23 @@ profile format may still change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- Review fixes for the repeating PID fields. Two identifiers with no system
+  and the same value, from different assigning authorities, are both kept
+  (in the mapping and in the merge with the server's copy). An explicit HL7
+  null (two double quotes, v2.8.2 section 2.10.5) in PID-5, PID-11, PID-13 or
+  PID-14 now clears the name, address or telephone list on the server; a field
+  left out still keeps it. A telephone repetition is mapped by the IG's XTN
+  rules (XTN.12, else XTN.1, else a number built from XTN.5 to XTN.7) and a
+  repetition with a value is never dropped. The PID-13 and PID-14 default use
+  applies only when XTN.2 is empty; a code the IG leaves unmapped (EMR, NET)
+  gives no use. The `Committed.key` of a retired Observation reads the
+  report's own identifier, not the first one the server lists. In
+  `docs/conformance.md` the telecom assertion now compares system, value and
+  use, and the DiagnosticReport identifier assertion expects both FILL and
+  PLAC; the counts are unchanged (GAP 37, GAP rejected 3, LOCAL 5, MATCH 81).
+
 ### Added
 
 - `to-fhir` and `fhir sync` keep every repeat of PID-3 (identifiers, each with

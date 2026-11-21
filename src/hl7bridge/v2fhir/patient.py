@@ -139,7 +139,9 @@ def _identifiers(ctx: MapContext) -> list[Identifier]:
     reps = r.repetitions("PID-3")
     chosen = pick_mrn_repetition([r.get("PID-3", rep=n, comp=5) for n in range(1, reps + 1)])
     out = [typed_identifier("MR", ctx.hospital.systems.mrn, mrn_value(ctx))]
-    seen = {(out[0].system, out[0].value, "MR")}
+    seen: set[tuple[str | None, str | None, str, str | None]] = {
+        (out[0].system, out[0].value, "MR", None)
+    }
     for n in range(1, reps + 1):
         if n == chosen:
             continue
@@ -148,7 +150,8 @@ def _identifiers(ctx: MapContext) -> list[Identifier]:
             continue
         code = _value(ctx, "PID-3", n, 5)
         system, assigner = _authority(ctx, n)
-        fingerprint = (system, value, code)
+        # With no system, the assigning authority tells two numbers apart.
+        fingerprint = (system, value, code, None if system else assigner)
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
@@ -241,26 +244,71 @@ def _addresses(ctx: MapContext) -> list[Address]:
     return _distinct(out)
 
 
+def _xtn_value(ctx: MapContext, ref: str, rep: int, system: str) -> str:
+    """The ContactPoint value of one XTN repetition, by the IG's rules: the
+    email address (XTN.4) for an email, else the unformatted number (XTN.12),
+    else XTN.1 (only when XTN.12 is absent), else a number built from the
+    country code (XTN.5), area code (XTN.6) and local number (XTN.7)."""
+    if system == "email":
+        email = _value(ctx, ref, rep, 4)
+        if email:
+            return email
+    unformatted = _value(ctx, ref, rep, 12)
+    if unformatted:
+        return unformatted
+    legacy = _value(ctx, ref, rep, 1)
+    if legacy:
+        return legacy
+    country, area, local = (_value(ctx, ref, rep, k) for k in (5, 6, 7))
+    if not local and not area:
+        return ""  # a country code alone is not a number
+    parts = ([f"+{country}"] if country else []) + [p for p in (area, local) if p]
+    return " ".join(parts)
+
+
 def _telecoms(ctx: MapContext, ref: str, default_use: str) -> list[ContactPoint]:
-    """One telecom field, every repetition (XTN). Component 4 (an email
-    address) when component 3 is Internet or X.400, else component 1 (or the
-    unformatted number, component 12) as the number. The use is component 2
-    through table 0201 when that maps it, else the IG's default for the
-    field: home for PID-13, work for PID-14. The system is component 3
-    through table 0202, phone when that is empty."""
+    """One telecom field, every repetition (XTN). The value follows the IG
+    (``_xtn_value``); a repetition with a value is never dropped. The use is
+    component 2 through table 0201; a code the IG leaves unmapped (EMR, NET)
+    gives no use, and the field's default (home for PID-13, work for PID-14)
+    applies only when component 2 is empty. The system is component 3 through
+    table 0202, phone when that is empty."""
     out = []
     for n in range(1, ctx.reader.repetitions(ref) + 1):
-        equipment = _value(ctx, ref, n, 3)
-        system = TELECOM_SYSTEM.get(equipment, "phone")
-        if system == "email":
-            value = _value(ctx, ref, n, 4)
-        else:
-            value = _value(ctx, ref, n, 1) or _value(ctx, ref, n, 12)
+        system = TELECOM_SYSTEM.get(_value(ctx, ref, n, 3), "phone")
+        value = _xtn_value(ctx, ref, n, system)
         if not value:
             continue
-        use = TELECOM_USE.get(_value(ctx, ref, n, 2), default_use)
+        code = _value(ctx, ref, n, 2)
+        use = TELECOM_USE.get(code) if code else default_use
         out.append(ContactPoint(system=system, value=value, use=use))
     return out
+
+
+def _is_null(ctx: MapContext, ref: str) -> bool:
+    """True when a repetition of the field is the HL7 null (two double
+    quotes in its first component)."""
+    return any(
+        ctx.reader.get(ref, rep=n, comp=1) == '""'
+        for n in range(1, ctx.reader.repetitions(ref) + 1)
+    )
+
+
+def cleared_elements(ctx: MapContext, patient: Patient) -> frozenset[str]:
+    """The Patient elements the message explicitly nulls (HL7 v2.8.2
+    section 2.10.5: the null in a repeating field deletes it). A field left
+    out keeps the server's value; an explicit null with nothing else mapped
+    from it clears the element. Telecom is one list built from PID-13 and
+    PID-14, so a null in either with no number mapped from either clears it."""
+    out = set()
+    for element, refs in (
+        ("name", ("PID-5",)),
+        ("address", ("PID-11",)),
+        ("telecom", ("PID-13", "PID-14")),
+    ):
+        if not getattr(patient, element, None) and any(_is_null(ctx, ref) for ref in refs):
+            out.add(element)
+    return frozenset(out)
 
 
 def merged_patient(
