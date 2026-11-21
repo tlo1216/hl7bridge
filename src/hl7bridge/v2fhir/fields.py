@@ -57,10 +57,20 @@ class FieldReader:
             raise MappingError(ref, "holds a malformed escape sequence", segment=seg)
         self._checked.add((ref, seg))
 
-    def get(self, ref: str, *, rep: int = 1, comp: int = 1, seg: int = 1) -> str:
-        """The unescaped value of one component, or '' when absent."""
+    def get(
+        self, ref: str, *, rep: int = 1, comp: int = 1, seg: int = 1, sub: int | None = None
+    ) -> str:
+        """The unescaped value of one component, or '' when absent. ``sub``
+        picks one subcomponent of it (1-based)."""
         self._touch(ref, seg)
-        return get_field(self._message, ref, repetition=rep, component=comp, segment_num=seg)
+        return get_field(
+            self._message,
+            ref,
+            repetition=rep,
+            component=comp,
+            segment_num=seg,
+            subcomponent=sub,
+        )
 
     def text(self, ref: str, *, rep: int = 1, seg: int = 1) -> str:
         """One whole repetition as text, unescaped, or '' when absent.
