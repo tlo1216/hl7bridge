@@ -114,11 +114,15 @@ The suite's live FHIR tests skip when no HAPI server is configured.
 
 ## Verification recorded on 2026-11-21
 
-Windows, Python 3.12.10: `python -m pytest -q` gave **1212 passed, 48 skipped**.
-Linux (Ubuntu on WSL, ext4, Python 3.12): **1217 passed, 43 skipped**. Both
-include all nine conformance tests. Skips cover an unconfigured HAPI server,
+Windows, Python 3.12.10: `python -m pytest -q` gave **1232 passed, 48 skipped**.
+Linux (Ubuntu on WSL, ext4, Python 3.12): **1237 passed, 43 skipped**; with a
+local HAPI server, the whole `tests/system` suite on Linux gave **87 passed**.
+Both include all nine conformance tests. Skips cover an unconfigured HAPI server,
 optional local reference samples and platform-specific filesystem checks.
 `ruff check`, `ruff format --check` and strict `mypy` (69 source files) pass.
+After the keep-all-repeats change the PID-3, PID-5, PID-11 and PID-13
+repeat assertions match in all six cases; the PID-3.4 system assertion stays a
+gap because the MRN system comes from the profile.
 
 <!-- generated conformance evidence -->
 
