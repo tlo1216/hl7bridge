@@ -126,7 +126,7 @@ ROWS: tuple[SpecRow, ...] = (
         PID,
         "Every repetition (XPN): component 1 family, 2 and 3 given, 4 and 6 suffix, 5 prefix,"
         " 7 use through table 0200 (a code the IG leaves unmapped gives no use). Validity range"
-        " and effective dates are not read.",
+        " and effective dates are not read. A post replaces the server's names with these.",
     ),
     SpecRow(
         "pid_to_patient",
@@ -143,7 +143,8 @@ ROWS: tuple[SpecRow, ...] = (
         PID,
         "Every repetition (XAD): components 1 and 2 (lines), 3 city, 4 state, 5 postal code,"
         " 6 country, 7 type as use through table 0190 (M and SH type, HV and the rest are not"
-        " written), 9 county as district. Validity range and addressee are not read.",
+        " written), 9 county as district. Validity range and addressee are not read. A post"
+        " replaces the server's addresses with these; a message with no PID-11 leaves them.",
     ),
     SpecRow(
         "pid_to_patient",
@@ -154,7 +155,8 @@ ROWS: tuple[SpecRow, ...] = (
         " FX fax, BP pager, else phone); value component 4 for an email, else component 1 or the"
         " unformatted number (12). Use from component 2 through table 0201 (PRN, WPN, PRS);"
         " otherwise home, as the IG says for PID-13. Country, area, local, extension and rank"
-        " are not written.",
+        " are not written. A post replaces the server's telecom list with PID-13 and PID-14"
+        " together; a message with neither leaves it.",
     ),
     SpecRow(
         "pid_to_patient",
@@ -452,7 +454,8 @@ def render_markdown() -> str:
         "Bundle. Observation and DiagnosticReport are conditional updates. Patient",
         "from ADT, Encounter and ServiceRequest are conditional updates that a post",
         "first merges into the current resource, because an empty v2 field means",
-        "no change. Patient from ORM and ORU is a conditional create: only ADT",
+        "no change: an element the message has replaces the current one whole, one it",
+        "lacks is kept. Patient from ORM and ORU is a conditional create: only ADT",
         "writes the Patient. Anything not listed is refused.",
     ]
     for mapper in MAPPERS:

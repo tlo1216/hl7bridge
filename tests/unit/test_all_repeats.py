@@ -1,6 +1,7 @@
 """Every repeat of PID-3, PID-5, PID-11, PID-13 and PID-14 is mapped, the
-MRN repetition stays the key, and a post adds new repeats without
-duplicates (IG 1.0.0 datatype maps for CX, XPN, XAD and XTN)."""
+MRN repetition stays the key, and a post replaces names, addresses and
+telephone numbers whole with the message's repeats (IG 1.0.0 datatype maps
+for CX, XPN, XAD and XTN)."""
 
 from __future__ import annotations
 
@@ -238,16 +239,16 @@ def test_committed_key_is_the_mrn_whatever_the_repeats(registry):
 # -- merge ------------------------------------------------------------------------
 
 
-def test_merge_keeps_server_values_and_adds_new_repeats_once():
+def test_merge_replaces_owned_lists_whole_and_keeps_server_identifiers():
     current = {
         "resourceType": "Patient",
         "identifier": [
             {"system": "urn:m", "value": "1"},
             {"system": "urn:server", "value": "S1"},
         ],
-        "name": [{"family": "SERVER", "period": {"start": "2020-01-01"}}],
-        "address": [{"city": "KEEP", "extension": [{"url": "urn:x", "valueString": "e"}]}],
-        "telecom": [{"system": "phone", "value": "1", "use": "home", "rank": 1}],
+        "name": [{"family": "OLD"}, {"family": "STALE"}],
+        "address": [{"city": "OLD"}],
+        "telecom": [{"system": "phone", "value": "1"}],
     }
     new = {
         "resourceType": "Patient",
@@ -257,32 +258,25 @@ def test_merge_keeps_server_values_and_adds_new_repeats_once():
             {"value": "B", "type": {"coding": [{"code": "PI"}]}},
             {"value": "B", "type": {"coding": [{"code": "SS"}]}},
         ],
-        "name": [{"family": "SERVER"}, {"family": "MAIDEN", "use": "maiden"}],
-        "address": [{"city": "KEEP"}, {"city": "NEW"}],
-        "telecom": [
-            {"system": "phone", "value": "1", "use": "home"},
-            {"system": "email", "value": "a@example.invalid", "use": "home"},
-        ],
+        "name": [{"family": "NEW"}, {"family": "MAIDEN", "use": "maiden"}],
+        "address": [{"city": "NEW1"}, {"city": "NEW2"}],
+        "telecom": [{"system": "email", "value": "a@example.invalid"}],
     }
     before = copy.deepcopy(current)
     merged = merge_resource(current, new)
     assert current == before
     assert [i["value"] for i in merged["identifier"]] == ["1", "S1", "A", "B", "B"]
-    assert [n["family"] for n in merged["name"]] == ["SERVER", "MAIDEN"]
-    assert merged["name"][0]["period"] == {"start": "2020-01-01"}
-    assert [a["city"] for a in merged["address"]] == ["KEEP", "NEW"]
-    assert merged["address"][0]["extension"]
-    assert [t["value"] for t in merged["telecom"]] == ["1", "a@example.invalid"]
-    assert merged["telecom"][0]["rank"] == 1
-    again = merge_resource(merged, new)
-    assert again == merged  # a second pass adds nothing
+    assert [n["family"] for n in merged["name"]] == ["NEW", "MAIDEN"]
+    assert [a["city"] for a in merged["address"]] == ["NEW1", "NEW2"]
+    assert [t["value"] for t in merged["telecom"]] == ["a@example.invalid"]
+    assert merge_resource(merged, new) == merged  # a second pass changes nothing
 
 
-def test_merge_keeps_a_server_value_the_message_no_longer_has():
+def test_merge_keeps_what_the_message_leaves_out():
     current = {"resourceType": "Patient", "address": [{"city": "OLD"}], "name": [{"family": "A"}]}
-    merged = merge_resource(current, {"resourceType": "Patient", "address": [{"city": "NEW"}]})
-    assert [a["city"] for a in merged["address"]] == ["OLD", "NEW"]
-    assert merged["name"] == [{"family": "A"}]
+    merged = merge_resource(current, {"resourceType": "Patient", "name": [{"family": "B"}]})
+    assert merged["address"] == [{"city": "OLD"}]
+    assert merged["name"] == [{"family": "B"}]
 
 
 def test_posting_the_same_message_twice_adds_no_duplicates(registry):
@@ -305,15 +299,61 @@ def test_posting_the_same_message_twice_adds_no_duplicates(registry):
     assert len(second["identifier"]) == 2 and len(second["name"]) == 2
 
 
-def test_an_a08_adds_a_new_repeat_and_keeps_what_an_a01_wrote(registry):
+def test_an_a08_with_a_new_address_replaces_the_old_one(registry):
     server = FakeFhir()
-    a01 = _adt("SC9001^^^HOSPC^MR", event="A01", f5="ZZZ^A", f11="1 RD^^CITY")
-    a08 = _adt("SC9001^^^HOSPC^MR~ALT1^^^ALT&1.2.3.5&ISO^PI", f5="ZZZ^A~OLD^A^^^^^M", f13="5550100")
+    a01 = _adt("SC9001^^^HOSPC^MR", event="A01", f5="ZZZ^A~OLD^A^^^^^M", f11="1 RD^^CITY")
+    a08 = _adt("SC9001^^^HOSPC^MR", f5="ZZZ^A", f11="2 ST^^TOWN", f13="5550100")
     with HapiClient(BASE, transport=server.transport()) as client:
         post_mapped(client, message_to_bundle(a01, registry))
         post_mapped(client, message_to_bundle(a08, registry))
     patient = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")
+    assert [a["city"] for a in patient["address"]] == ["TOWN"]
+    assert [n["family"] for n in patient["name"]] == ["ZZZ"]  # the dropped name is gone
+    assert patient["telecom"][0]["value"] == "5550100"
+
+
+def test_every_repeat_in_the_message_is_written(registry):
+    server = FakeFhir()
+    text = _adt(
+        "SC9001^^^HOSPC^MR",
+        event="A01",
+        f5="ZZZ^A~OLD^A^^^^^M",
+        f11="1 RD^^CITY~2 RD^^TOWN",
+        f13="5550100~5550101",
+        f14="5550102",
+    )
+    with HapiClient(BASE, transport=server.transport()) as client:
+        post_mapped(client, message_to_bundle(text, registry))
+    patient = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")
     assert [n["family"] for n in patient["name"]] == ["ZZZ", "OLD"]
-    assert patient["address"][0]["city"] == "CITY"
-    assert [i["value"] for i in patient["identifier"]] == ["SC9001", "ALT1"]
+    assert [a["city"] for a in patient["address"]] == ["CITY", "TOWN"]
+    assert [t["value"] for t in patient["telecom"]] == ["5550100", "5550101", "5550102"]
+
+
+def test_identifiers_the_server_holds_are_kept_by_a_post(registry):
+    server = FakeFhir()
+    a01 = _adt("SC9001^^^HOSPC^MR", event="A01", f5="ZZZ^A")
+    a08 = _adt("SC9001^^^HOSPC^MR~ALT1^^^ALT&1.2.3.5&ISO^PI", f5="ZZZ^A")
+    with HapiClient(BASE, transport=server.transport()) as client:
+        post_mapped(client, message_to_bundle(a01, registry))
+        stored = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")
+        server._write(
+            "Patient",
+            stored["id"],
+            {**stored, "identifier": [*stored["identifier"], {"system": "urn:s", "value": "S1"}]},
+        )
+        post_mapped(client, message_to_bundle(a08, registry))
+    values = [i["value"] for i in server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")["identifier"]]
+    assert values == ["SC9001", "S1", "ALT1"]
+
+
+def test_a_thin_message_with_no_address_keeps_the_servers(registry):
+    server = FakeFhir()
+    a01 = _adt("SC9001^^^HOSPC^MR", event="A01", f5="ZZZ^A", f11="1 RD^^CITY", f13="5550100")
+    thin = _adt("SC9001^^^HOSPC^MR", f5="ZZZ^A")  # no PID-11, no PID-13
+    with HapiClient(BASE, transport=server.transport()) as client:
+        post_mapped(client, message_to_bundle(a01, registry))
+        post_mapped(client, message_to_bundle(thin, registry))
+    patient = server.by_key("Patient", f"{MRN_SYSTEM}|SC9001")
+    assert [a["city"] for a in patient["address"]] == ["CITY"]
     assert patient["telecom"][0]["value"] == "5550100"

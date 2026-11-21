@@ -49,11 +49,11 @@ profile format may still change between minor versions.
 
 ### Changed
 
-- A post now adds a Patient's names, addresses and telephone numbers to the
-  ones the server holds, once each, instead of replacing them: a value the
-  server has and the message lacks stays, and a corrected address is added
-  beside the old one. `merge_resource` also keeps identifiers apart by type
-  when they have no system.
+- `merge_resource` keeps identifiers apart by type when they have no system.
+  A post still replaces a Patient's names, addresses and telephone numbers
+  whole with the message's repeats (each ADT carries the sender's complete
+  current list, so a corrected address does not sit beside the old one) and
+  still adds to the identifiers and links the server holds.
 
 - `fhir sync` no longer leaves a merged-away patient out. Its messages and
   its ImagingStudy rows are posted like any other patient's, so the sync
