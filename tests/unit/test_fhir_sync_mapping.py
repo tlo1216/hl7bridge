@@ -985,3 +985,32 @@ def test_the_live_test_hook_prints_the_operation_outcome_issues():
     assert "returned" not in text and "HAPI answered 400 for /fhir" in text
     assert "error processing: HAPI-0000: two writes to one id" in text
     assert "not JSON" in operation_outcome_text(FhirPostError(500, "http://h/fhir", "<html>"))
+
+
+# -- Gemini A40 follow-ups ------------------------------------------------------------
+
+
+def test_a40_sends_the_resolved_patient_reference_when_both_patients_exist(registry):
+    server = FakeFhir()
+    _post(server, registry, _a08("SC1002", "OLDNAME"), _a08("SC1001", "KEEPER"))
+    survivor_ref = _ref(server, "SC1001")
+    _post(server, registry, _a40())
+    refs = [
+        link["other"]["reference"]
+        for entry in server.transactions[-1]["entry"]
+        for link in entry["resource"].get("link", [])
+    ]
+    assert refs == [survivor_ref]  # no urn:uuid is left for the server to resolve
+
+
+def test_committed_key_is_the_mrn_when_the_server_lists_another_identifier_first(registry):
+    server = FakeFhir()
+    _post(server, registry, _a08("SC1002", "OLDNAME"))
+    held = server.by_key("Patient", _GONE)
+    other = {"system": "urn:other:ssn", "value": "000-00-0000"}
+    held["identifier"] = [other, *held["identifier"]]
+    server._write("Patient", held["id"], held)
+    with _client(server) as client:
+        done = post_mapped(client, message_to_bundle(_a08("SC1002", "NEWNAME"), registry))
+    patient = next(c for c in done if c.kind == "Patient")
+    assert patient.key == _GONE

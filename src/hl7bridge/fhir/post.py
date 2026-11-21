@@ -212,7 +212,12 @@ def merge_resource(
             have_links = {_link_key(x, ids) for x in merged.get(element, [])}
             for item in new[element]:
                 if _link_key(item, ids) not in have_links:
-                    merged.setdefault(element, []).append(copy.deepcopy(item))
+                    added = copy.deepcopy(item)
+                    ref = str(added.get("other", {}).get("reference", ""))
+                    if ref in ids:
+                        # Written as the server's id, not left for it to resolve.
+                        added["other"]["reference"] = ids[ref]
+                    merged.setdefault(element, []).append(added)
         elif (kind, element) in NESTED and isinstance(merged.get(element), dict):
             merged[element] = {**merged[element], **new[element]}
         else:
@@ -474,8 +479,17 @@ def post_mapped(client: HapiClient, mapped: MappedMessage) -> list[Committed]:
     results: list[EntryResult] = client.commit(body)
     check_created(body, results, creates, merge_event=mapped.message_type == MERGE_EVENT)
     mapped_count = len(mapped.bundle.entry or [])
+    # A merged resource keeps the server's identifier order, so a key is read
+    # from the mapped message (its first identifier is the key), not the merge.
+    keys = [_key(e["resource"]) for e in bundle_json(mapped)["entry"]]
     return [
-        Committed(r.kind, _key(entry["resource"]), r.code, r.server_id, retired=n >= mapped_count)
+        Committed(
+            r.kind,
+            keys[n] if n < mapped_count else _key(entry["resource"]),
+            r.code,
+            r.server_id,
+            retired=n >= mapped_count,
+        )
         for n, (r, entry) in enumerate(zip(results, body["entry"], strict=True))
     ]
 

@@ -104,13 +104,18 @@ merge into it rewrites nothing.
   an MRG-1 equal to PID-3, a merged-away Patient already replaced by another
   Patient, a survivor that is inactive or merged away itself (a reversed merge),
   and two entries that resolve to one resource on the server. A resend of a
-  merge already on the server passes.
+  merge already on the server passes, even when its survivor has since been
+  merged away itself (A to B, B to C, then A to B again): the resend writes B's
+  demographics onto B, as any later message to a merged-away Patient does.
 - Chains are posted edge by edge (A to B, then B to C); they are not flattened.
 - Not done: orders, reports and encounters of the merged-away Patient are not
   moved onto the survivor, and nothing reactivates a merged-away Patient, so
   later messages can still write onto it.
 - The offline Bundle makes the merged-away Patient a conditional create, never
-  a PUT, so a file posted as is cannot replace a Patient with a bare body.
+  a PUT, so a file posted as is cannot replace a Patient with a bare body. Its
+  survivor entry is still a conditional PUT of the message's own Patient, so
+  posting the file replaces the survivor with that content (a PID without an
+  address erases the server's); only `--post` merges.
 - `fhir sync` posts every stored message in order, the merged-away patient's
   own messages too, so it and `to-fhir --post` write the same content.
 - The merged-away entry is a conditional create when the server has none. If
