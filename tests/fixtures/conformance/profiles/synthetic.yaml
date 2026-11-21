@@ -1,0 +1,17 @@
+# Only for the synthetic IG comparison corpus, never a production site.
+hospital_id: CONF
+display_name: Conformance examples (synthetic)
+facility_codes: [CONF]
+accession_field: OBR-3
+timezone: UTC
+hl7_version: "2.5.1"
+timestamps_include_offset: true
+expected_message_types: [ADT^A01, ADT^A04, ADT^A08, ADT^A40, ORM^O01, ORU^R01]
+procedure_code_system: LN
+fhir:
+  identifier_systems:
+    mrn: urn:hl7bridge:conf:mrn
+    accession: urn:hl7bridge:conf:accession
+    placer: urn:hl7bridge:conf:placer
+    visit: urn:hl7bridge:conf:visit
+    observation: urn:hl7bridge:conf:observation

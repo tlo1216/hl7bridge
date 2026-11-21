@@ -69,7 +69,9 @@ OWNED: dict[str, tuple[str, ...]] = {
     "ServiceRequest": ("status", "intent", "code", "authoredOn", "subject"),
 }
 # Elements kept whole and added to: Patient.link entries on the server
-# stay, and the message's are added when not already there.
+# stay, and the message's are added when not already there. Names, addresses
+# and telephone numbers are not here: the message carries the sender's whole
+# current list, so they are owned and replaced whole.
 ADDITIVE = {("Patient", "link")}
 # Elements merged one level down: an A08 with PV1-45 and no PV1-44 keeps
 # the admit time.
@@ -172,8 +174,20 @@ class Committed:
 
 
 def _key(resource: dict[str, Any]) -> str:
+    """``system|value`` of the first identifier of a resource the mapper
+    built (the key is always first there). Never used on a Patient read
+    from the server, which lists identifiers in any order."""
     ident = resource["identifier"][0]
-    return f"{ident['system']}|{ident['value']}"
+    return f"{ident.get('system', '')}|{ident['value']}"
+
+
+def _retired_key(resource: dict[str, Any], system: str) -> str:
+    """The key of a retired Observation: its identifier in the report's
+    Observation ``system``, not whichever one the server lists first."""
+    for ident in resource.get("identifier", []):
+        if ident.get("system") == system and ident.get("value"):
+            return f"{system}|{ident['value']}"
+    return _key(resource)
 
 
 def _link_key(link: dict[str, Any], resolved: dict[str, str]) -> tuple[Any, Any]:
@@ -181,32 +195,57 @@ def _link_key(link: dict[str, Any], resolved: dict[str, str]) -> tuple[Any, Any]
     return link.get("type"), _patient_ref(resolved.get(ref, ref)) or ref
 
 
+def _identifier_key(ident: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """An identifier's system and value; with no system, its type code and
+    assigning authority too, so two systemless numbers of different types or
+    from different authorities stay apart."""
+    system = ident.get("system")
+    if system:
+        return system, ident.get("value"), None
+    codings = ident.get("type", {}).get("coding") or [{}]
+    extra = (codings[0].get("code"), ident.get("assigner", {}).get("display"))
+    return None, ident.get("value"), extra
+
+
 def merge_resource(
-    current: dict[str, Any], new: dict[str, Any], resolved: dict[str, str] | None = None
+    current: dict[str, Any],
+    new: dict[str, Any],
+    resolved: dict[str, str] | None = None,
+    clear: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """``new`` laid over ``current``: owned elements the message has replace
     the current ones, absent ones are kept, identifiers are added to, and
     additive elements (Patient.link) keep the current entries and gain the
     message's that are not there yet. ``resolved`` maps a ``urn:uuid`` full
-    URL of this transaction to its ``Patient/<id>``, for comparing links."""
+    URL of this transaction to its ``Patient/<id>``, for comparing links.
+    ``clear`` names owned elements the message explicitly nulled (the HL7
+    null): removed from the result when the message gives no value for them."""
     kind = new["resourceType"]
     merged = copy.deepcopy(current)
     ids = resolved or {}
     for element in OWNED[kind]:
         if element not in new:
+            if element in clear and (kind, element) not in ADDITIVE:
+                merged.pop(element, None)
             continue
         if (kind, element) in ADDITIVE:
             have_links = {_link_key(x, ids) for x in merged.get(element, [])}
             for item in new[element]:
                 if _link_key(item, ids) not in have_links:
-                    merged.setdefault(element, []).append(copy.deepcopy(item))
+                    added = copy.deepcopy(item)
+                    ref = str(added.get("other", {}).get("reference", ""))
+                    if ref in ids:
+                        # Written as the server's id, not left for it to resolve.
+                        added["other"]["reference"] = ids[ref]
+                    merged.setdefault(element, []).append(added)
         elif (kind, element) in NESTED and isinstance(merged.get(element), dict):
             merged[element] = {**merged[element], **new[element]}
         else:
             merged[element] = copy.deepcopy(new[element])
-    have = {(i.get("system"), i.get("value")) for i in merged.get("identifier", [])}
+    have = {_identifier_key(i) for i in merged.get("identifier", [])}
     for ident in new.get("identifier", []):
-        if (ident.get("system"), ident.get("value")) not in have:
+        if _identifier_key(ident) not in have:
+            have.add(_identifier_key(ident))
             merged.setdefault("identifier", []).append(copy.deepcopy(ident))
     if kind == "Encounter" and merged.get("period", {}).get("end"):
         # The IG sets finished when PV1-45 is valued; a discharge already
@@ -281,6 +320,7 @@ def _merge_entry(
     entry: dict[str, Any],
     current: dict[str, Any] | None,
     resolved: dict[str, str],
+    clear: frozenset[str] = frozenset(),
 ) -> None:
     new = entry["resource"]
     kind = new["resourceType"]
@@ -294,7 +334,7 @@ def _merge_entry(
             "ifNoneExist": search_query(ident["system"], ident["value"]),
         }
         return
-    merged = merge_resource(current, new, resolved)
+    merged = merge_resource(current, new, resolved, clear)
     server_id = current["id"]
     entry["resource"] = merged
     entry["request"] = {
@@ -399,7 +439,8 @@ def prepare(client: HapiClient, mapped: MappedMessage) -> dict[str, Any]:
         survivor, gone = (currents[e["fullUrl"]] for e in merging[:2])
         _check_merge(survivor, gone)
     for entry in merging:
-        _merge_entry(client, entry, currents[entry["fullUrl"]], resolved)
+        clear = mapped.clears.get(entry["fullUrl"], frozenset())
+        _merge_entry(client, entry, currents[entry["fullUrl"]], resolved, clear)
     report = next(
         (e["resource"] for e in entries if e["resource"]["resourceType"] == "DiagnosticReport"),
         None,
@@ -460,8 +501,19 @@ def post_mapped(client: HapiClient, mapped: MappedMessage) -> list[Committed]:
     results: list[EntryResult] = client.commit(body)
     check_created(body, results, creates, merge_event=mapped.message_type == MERGE_EVENT)
     mapped_count = len(mapped.bundle.entry or [])
+    # A merged resource keeps the server's identifier order, so a key is read
+    # from the mapped message (its first identifier is the key), not the merge.
+    keys = [_key(e["resource"]) for e in bundle_json(mapped)["entry"]]
     return [
-        Committed(r.kind, _key(entry["resource"]), r.code, r.server_id, retired=n >= mapped_count)
+        Committed(
+            r.kind,
+            keys[n]
+            if n < mapped_count
+            else _retired_key(entry["resource"], mapped.observation_system),
+            r.code,
+            r.server_id,
+            retired=n >= mapped_count,
+        )
         for n, (r, entry) in enumerate(zip(results, body["entry"], strict=True))
     ]
 

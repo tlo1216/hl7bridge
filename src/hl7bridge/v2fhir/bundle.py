@@ -58,7 +58,7 @@ from .fields import FieldReader
 from .jsontext import resource_dict
 from .observation import KEY_JOIN, notes_after, obx_to_observation
 from .order import accession_value, orc_obr_to_service_request
-from .patient import merged_patient, mrn_authority, mrn_value, pid_to_patient
+from .patient import cleared_elements, merged_patient, mrn_authority, mrn_value, pid_to_patient
 from .report import is_narrative, obr_to_diagnostic_report, report_text
 
 ADT_EVENTS = ("ADT^A01", "ADT^A04", "ADT^A08")
@@ -85,6 +85,9 @@ class MappedMessage:
     mrn_authority: str = ""
     # The profile's fhir.patient_policy. The batch post refuses match_only.
     patient_policy: str = "create"
+    # Per entry (full URL): owned elements the message explicitly nulls, so
+    # the post removes them from the server's copy (absent means keep).
+    clears: dict[str, frozenset[str]] = field(default_factory=dict)
 
     def entry_types(self) -> list[str]:
         return [e.resource.get_resource_type() for e in self.bundle.entry or [] if e.resource]
@@ -171,6 +174,7 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
 
     with _mapping(reader, "pid_to_patient", "PID"):
         patient = pid_to_patient(ctx)
+        cleared = cleared_elements(ctx, patient)
         authority = mrn_authority(ctx)
         survivor_mrn = mrn_value(ctx)
     patient_ref = _full_url(patient)
@@ -217,6 +221,7 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
         observation_system=hospital.systems.observation if report is not None else "",
         mrn_authority=authority,
         patient_policy=hospital.fhir.patient_policy,
+        clears={patient_ref: cleared} if cleared and is_adt else {},
     )
 
 
@@ -269,6 +274,7 @@ def patient_only(mapped: MappedMessage) -> MappedMessage:
         mapped,
         bundle=Bundle(type="transaction", entry=[first]),
         policies={str(first.fullUrl): mapped.policies[str(first.fullUrl)]},
+        clears={k: v for k, v in mapped.clears.items() if k == str(first.fullUrl)},
         accession="",
         observation_system="",
     )

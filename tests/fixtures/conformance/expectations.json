@@ -1,0 +1,788 @@
+{
+  "sources": {
+    "pid": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-segment-pid-to-patient.html",
+    "cx": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-datatype-cx-to-identifier.html",
+    "pv1": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-segment-pv1-to-encounter.html",
+    "orc": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-segment-orc-to-servicerequest.html",
+    "obr_order": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-segment-obr-to-servicerequest.html",
+    "obr_report": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-segment-obr-to-diagnosticreport.html",
+    "obx": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-segment-obx-to-observation.html",
+    "nte": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-segment-nte-to-observation.html",
+    "a01": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-message-adt-a01-to-bundle.html",
+    "orm": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-message-orm-o01-to-bundle.html",
+    "oru": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-message-oru-r01-to-bundle.html",
+    "msh": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-segment-msh-to-bundle.html",
+    "order_status": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-table-hl70119-to-request-status.html",
+    "sex": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-table-hl70001-to-administrative-gender.html",
+    "class": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-table-hl70004-to-v3-actcode.html",
+    "visit_status": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-table-hl70004-to-encounter-status.html",
+    "report_status": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-table-hl70123-queries-to-diagnostic-report-status.html",
+    "result_status": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-table-hl70085-to-observation-status.html",
+    "interpretation": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-table-hl70078-to-v3-observationinterpretation.html",
+    "sn": "https://hl7.org/fhir/uv/v2mappings/STU1/ConceptMap-datatype-sn-to-quantity.html"
+  },
+  "groups": {
+    "patient": [
+      {
+        "input": "PID-3 repetitions",
+        "path": "Patient.0.identifier.*.value",
+        "expected": [
+          "MR9001",
+          "ALT9001"
+        ],
+        "description": "Both supplied identifiers",
+        "source": "pid",
+        "unordered": true
+      },
+      {
+        "input": "PID-3.4 assigning authorities",
+        "path": "Patient.0.identifier.*.system",
+        "expected": [
+          "urn:oid:1.2.3.4",
+          "urn:oid:1.2.3.5"
+        ],
+        "description": "Under the declared system-authority assumption, use ISO OID URIs",
+        "source": "cx",
+        "unordered": true
+      },
+      {
+        "input": "PID-5 repetitions",
+        "path": "Patient.0.name.*.family",
+        "expected": [
+          "ZZZTEST",
+          "ZZZTESTOLD"
+        ],
+        "description": "Both family names",
+        "source": "pid",
+        "unordered": true
+      },
+      {
+        "input": "PID-5.2/3, first name",
+        "path": "Patient.0.name.0.given.*",
+        "expected": [
+          "ALPHA",
+          "B"
+        ],
+        "description": "Given and middle names",
+        "source": "pid"
+      },
+      {
+        "input": "PID-7 date",
+        "path": "Patient.0.birthDate",
+        "expected": [
+          "1980-01-02"
+        ],
+        "description": "Birth date",
+        "source": "pid"
+      },
+      {
+        "input": "PID-7 time",
+        "path": "Patient.0._birthDate.extension.*.valueDateTime",
+        "expected": [
+          "1980-01-02T03:04:05+00:00"
+        ],
+        "description": "birthTime extension for precision beyond date",
+        "source": "pid"
+      },
+      {
+        "input": "PID-8 = F",
+        "path": "Patient.0.gender",
+        "expected": [
+          "female"
+        ],
+        "description": "Administrative gender",
+        "source": "sex"
+      },
+      {
+        "input": "PID-11 repetitions",
+        "path": "Patient.0.address.*.city",
+        "expected": [
+          "TESTVILLE",
+          "OTHERTOWN"
+        ],
+        "description": "Both addresses (city selected)",
+        "source": "pid",
+        "unordered": true
+      },
+      {
+        "input": "PID-13 repetitions",
+        "path": "Patient.0.telecom.*",
+        "expected": [
+          {
+            "system": "email",
+            "value": "zzztest@example.invalid"
+          },
+          {
+            "system": "phone",
+            "value": "5550100",
+            "use": "home"
+          }
+        ],
+        "description": "Email and telephone with system and use (NET is unmapped by the IG, so no use)",
+        "source": "pid",
+        "unordered": true
+      }
+    ],
+    "visit": [
+      {
+        "input": "PV1-19",
+        "path": "Encounter.0.identifier.*.value",
+        "expected": [
+          "VIS9001"
+        ],
+        "description": "Visit identifier",
+        "source": "pv1",
+        "unordered": true
+      },
+      {
+        "input": "PID / PV1 relationship",
+        "path": "Encounter.0.subject.reference",
+        "expected": [
+          "Patient[0]"
+        ],
+        "description": "Encounter refers to the PID Patient",
+        "source": "a01"
+      },
+      {
+        "input": "PV1-44",
+        "path": "Encounter.0.period.start",
+        "expected": [
+          "2026-11-21T10:00:00+00:00"
+        ],
+        "description": "Visit start",
+        "source": "pv1"
+      },
+      {
+        "input": "PV1-3",
+        "path": "Encounter.0.location.*.status",
+        "expected": [
+          "active"
+        ],
+        "description": "Active location for non-planned class; location reference also required",
+        "source": "pv1"
+      }
+    ],
+    "envelope_a01": [
+      {
+        "input": "MSH",
+        "path": "Bundle.type",
+        "expected": [
+          "message"
+        ],
+        "description": "Message Bundle envelope",
+        "source": "msh"
+      },
+      {
+        "input": "MSH",
+        "path": "MessageHeader.*.resourceType",
+        "expected": [
+          "MessageHeader"
+        ],
+        "description": "Header resource",
+        "source": "a01"
+      },
+      {
+        "input": "MSH-4",
+        "path": "Provenance.0.resourceType",
+        "expected": [
+          "Provenance"
+        ],
+        "description": "At least source/transformation provenance",
+        "source": "a01"
+      }
+    ],
+    "envelope_orm": [
+      {
+        "input": "MSH",
+        "path": "Bundle.type",
+        "expected": [
+          "message"
+        ],
+        "description": "Message Bundle envelope",
+        "source": "msh"
+      },
+      {
+        "input": "MSH",
+        "path": "MessageHeader.*.resourceType",
+        "expected": [
+          "MessageHeader"
+        ],
+        "description": "Header resource",
+        "source": "orm"
+      },
+      {
+        "input": "MSH-4",
+        "path": "Provenance.0.resourceType",
+        "expected": [
+          "Provenance"
+        ],
+        "description": "At least source/transformation provenance",
+        "source": "orm"
+      }
+    ],
+    "envelope_oru": [
+      {
+        "input": "MSH",
+        "path": "Bundle.type",
+        "expected": [
+          "message"
+        ],
+        "description": "Message Bundle envelope",
+        "source": "msh"
+      },
+      {
+        "input": "MSH",
+        "path": "MessageHeader.*.resourceType",
+        "expected": [
+          "MessageHeader"
+        ],
+        "description": "Header resource",
+        "source": "oru"
+      },
+      {
+        "input": "MSH-4",
+        "path": "Provenance.0.resourceType",
+        "expected": [
+          "Provenance"
+        ],
+        "description": "At least source/transformation provenance",
+        "source": "oru"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "ADT A01",
+      "file": "adt_a01.hl7",
+      "scope": "Synthetic admission; ADT_A01 message and shared segment maps.",
+      "groups": [
+        "envelope_a01",
+        "patient",
+        "visit"
+      ],
+      "checks": [
+        {
+          "input": "PV1-2",
+          "path": "Encounter.0.class.code",
+          "expected": [
+            "IMP"
+          ],
+          "description": "Visit class",
+          "source": "class"
+        },
+        {
+          "input": "PV1-2 / PV1-45",
+          "path": "Encounter.0.status",
+          "expected": [
+            "in-progress"
+          ],
+          "description": "Visit status",
+          "source": "visit_status"
+        },
+        {
+          "input": "OBX-2 NM / OBX-5",
+          "path": "Observation.0.valueQuantity.value",
+          "expected": [
+            190
+          ],
+          "description": "Patient observation from the ADT OBX",
+          "source": "a01"
+        }
+      ]
+    },
+    {
+      "name": "ADT A04",
+      "file": "adt_a04.hl7",
+      "scope": "No separate event map in IG 1.0.0; shared PID/PV1 expectations applied by analogy.",
+      "groups": [
+        "patient",
+        "visit"
+      ],
+      "checks": [
+        {
+          "input": "PV1-2",
+          "path": "Encounter.0.class.code",
+          "expected": [
+            "AMB"
+          ],
+          "description": "Visit class",
+          "source": "class"
+        },
+        {
+          "input": "PV1-2 / PV1-45",
+          "path": "Encounter.0.status",
+          "expected": [
+            "in-progress"
+          ],
+          "description": "Visit status",
+          "source": "visit_status"
+        }
+      ]
+    },
+    {
+      "name": "ADT A08",
+      "file": "adt_a08.hl7",
+      "scope": "No separate event map in IG 1.0.0; shared PID/PV1 expectations applied by analogy.",
+      "groups": [
+        "patient",
+        "visit"
+      ],
+      "checks": [
+        {
+          "input": "PV1-2",
+          "path": "Encounter.0.class.code",
+          "expected": [
+            "IMP"
+          ],
+          "description": "Visit class",
+          "source": "class"
+        },
+        {
+          "input": "PV1-2 / PV1-45",
+          "path": "Encounter.0.status",
+          "expected": [
+            "finished"
+          ],
+          "description": "Visit status",
+          "source": "pv1"
+        },
+        {
+          "input": "PV1-45",
+          "path": "Encounter.0.period.end",
+          "expected": [
+            "2026-11-21T11:00:00+00:00"
+          ],
+          "description": "Updated visit end",
+          "source": "pv1"
+        }
+      ]
+    },
+    {
+      "name": "ADT A40",
+      "file": "adt_a40.hl7",
+      "scope": "No IG A40 or MRG-to-Patient map. PID rows apply to the survivor; merge rows are local.",
+      "groups": [
+        "patient"
+      ],
+      "checks": [
+        {
+          "input": "MRG-1",
+          "path": "Patient.1.identifier.*.value",
+          "expected": null,
+          "description": "No IG Patient merge target",
+          "source": "",
+          "unordered": true
+        },
+        {
+          "input": "MRG-1",
+          "path": "Patient.1.active",
+          "expected": null,
+          "description": "No IG active-state assertion",
+          "source": ""
+        },
+        {
+          "input": "MRG-1",
+          "path": "Patient.1.link.*.type",
+          "expected": null,
+          "description": "No IG link-type assertion",
+          "source": ""
+        },
+        {
+          "input": "MRG-1 / PID-3",
+          "path": "Patient.1.link.*.other.reference",
+          "expected": null,
+          "description": "No IG link-target assertion",
+          "source": ""
+        },
+        {
+          "input": "Offline merge policy",
+          "path": "Bundle.entry.1.request.method",
+          "expected": null,
+          "description": "Local conditional create; existing prior Patient is not merged by this file",
+          "source": ""
+        }
+      ]
+    },
+    {
+      "name": "ORM O01",
+      "file": "orm_o01.hl7",
+      "scope": "Synthetic new order. ORC-2/3 empty; OBR supplies placer and filler identifiers.",
+      "groups": [
+        "envelope_orm",
+        "patient"
+      ],
+      "checks": [
+        {
+          "input": "ORC-1 = NW, ORC-5 empty",
+          "path": "ServiceRequest.0.status",
+          "expected": [
+            "active"
+          ],
+          "description": "New order status",
+          "source": "order_status"
+        },
+        {
+          "input": "ORC-1",
+          "path": "ServiceRequest.0.intent",
+          "expected": [
+            "order"
+          ],
+          "description": "Order intent",
+          "source": "orc"
+        },
+        {
+          "input": "OBR-2/3, ORC-2/3 empty",
+          "path": "ServiceRequest.0.identifier.*.type.coding.*.code",
+          "expected": [
+            "FILL",
+            "PLAC"
+          ],
+          "description": "Filler and placer types (filler first for this comparison)",
+          "source": "obr_order",
+          "unordered": true
+        },
+        {
+          "input": "OBR-2/3",
+          "path": "ServiceRequest.0.identifier.*.value",
+          "expected": [
+            "ACC9001",
+            "PL9001"
+          ],
+          "description": "Filler and placer values (filler first)",
+          "source": "obr_order",
+          "unordered": true
+        },
+        {
+          "input": "OBR-4.1",
+          "path": "ServiceRequest.0.code.coding.*.code",
+          "expected": [
+            "51523-9"
+          ],
+          "description": "Service code",
+          "source": "obr_order"
+        },
+        {
+          "input": "OBR-4.3 = LN",
+          "path": "ServiceRequest.0.code.coding.*.system",
+          "expected": [
+            "http://loinc.org"
+          ],
+          "description": "LOINC coding system",
+          "source": "obr_order"
+        },
+        {
+          "input": "ORC-9 with NW",
+          "path": "ServiceRequest.0.authoredOn",
+          "expected": [
+            "2026-11-21T10:05:00+00:00"
+          ],
+          "description": "Order creation time",
+          "source": "orc"
+        },
+        {
+          "input": "OBR-6",
+          "path": "ServiceRequest.0.occurrenceDateTime",
+          "expected": [
+            "2026-11-21T10:30:00+00:00"
+          ],
+          "description": "Requested time",
+          "source": "obr_order"
+        },
+        {
+          "input": "ORC-12",
+          "path": "ServiceRequest.0.requester.reference",
+          "expected": [
+            "Practitioner[0]"
+          ],
+          "description": "Requester references the mapped Practitioner",
+          "source": "orc"
+        },
+        {
+          "input": "PID / ORC relationship",
+          "path": "ServiceRequest.0.subject.reference",
+          "expected": [
+            "Patient[0]"
+          ],
+          "description": "Order subject",
+          "source": "orm"
+        },
+        {
+          "input": "PV1",
+          "path": "Encounter.0.resourceType",
+          "expected": [
+            "Encounter"
+          ],
+          "description": "Visit resource",
+          "source": "orm"
+        }
+      ]
+    },
+    {
+      "name": "ORU R01",
+      "file": "oru_r01.hl7",
+      "scope": "Synthetic final report with NM, CE and TX results, a result note, and a time interval.",
+      "groups": [
+        "envelope_oru",
+        "patient"
+      ],
+      "checks": [
+        {
+          "input": "OBR-25 = F",
+          "path": "DiagnosticReport.0.status",
+          "expected": [
+            "final"
+          ],
+          "description": "Report status",
+          "source": "report_status"
+        },
+        {
+          "input": "OBR-4.1",
+          "path": "DiagnosticReport.0.code.coding.*.code",
+          "expected": [
+            "51523-9"
+          ],
+          "description": "Report code",
+          "source": "obr_report"
+        },
+        {
+          "input": "OBR-4.3 = LN",
+          "path": "DiagnosticReport.0.code.coding.*.system",
+          "expected": [
+            "http://loinc.org"
+          ],
+          "description": "LOINC system",
+          "source": "obr_report"
+        },
+        {
+          "input": "OBR-3",
+          "path": "DiagnosticReport.0.identifier.*.type.coding.*.code",
+          "expected": [
+            "FILL",
+            "PLAC"
+          ],
+          "description": "Filler and placer identifier types (OBR-3 and OBR-2; ORC-2/3 empty)",
+          "source": "obr_report",
+          "unordered": true
+        },
+        {
+          "input": "OBR-7 and OBR-8",
+          "path": "DiagnosticReport.0.effectivePeriod.start",
+          "expected": [
+            "2026-11-21T10:15:00+00:00"
+          ],
+          "description": "Interval start when end is supplied",
+          "source": "obr_report"
+        },
+        {
+          "input": "OBR-8",
+          "path": "DiagnosticReport.0.effectivePeriod.end",
+          "expected": [
+            "2026-11-21T10:20:00+00:00"
+          ],
+          "description": "Interval end",
+          "source": "obr_report"
+        },
+        {
+          "input": "OBR-22",
+          "path": "DiagnosticReport.0.issued",
+          "expected": [
+            "2026-11-21T11:00:00+00:00"
+          ],
+          "description": "Report issue time",
+          "source": "obr_report"
+        },
+        {
+          "input": "PID / OBR relationship",
+          "path": "DiagnosticReport.0.subject.reference",
+          "expected": [
+            "Patient[0]"
+          ],
+          "description": "Report subject",
+          "source": "oru"
+        },
+        {
+          "input": "Three OBX segments",
+          "path": "DiagnosticReport.0.result.*.reference",
+          "expected": [
+            "Observation[0]",
+            "Observation[1]",
+            "Observation[2]"
+          ],
+          "description": "Three linked results",
+          "source": "oru",
+          "unordered": true
+        },
+        {
+          "input": "OBX[1]-3",
+          "path": "Observation.0.code.coding.*.code",
+          "expected": [
+            "6153-1"
+          ],
+          "description": "Result code",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[1]-3.3 = LN",
+          "path": "Observation.0.code.coding.*.system",
+          "expected": [
+            "http://loinc.org"
+          ],
+          "description": "Result coding system",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[1]-2 = NM, OBX[1]-5",
+          "path": "Observation.0.valueQuantity.value",
+          "expected": [
+            3.9
+          ],
+          "description": "Numeric value",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[1]-6",
+          "path": "Observation.0.valueQuantity.code",
+          "expected": [
+            "k[IU]/L"
+          ],
+          "description": "UCUM unit code",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[1]-6.3 = UCUM",
+          "path": "Observation.0.valueQuantity.system",
+          "expected": [
+            "http://unitsofmeasure.org"
+          ],
+          "description": "UCUM system",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[1]-7",
+          "path": "Observation.0.referenceRange.*.text",
+          "expected": [
+            "<0.10"
+          ],
+          "description": "Reference range",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[1]-8 = A",
+          "path": "Observation.0.interpretation.*.coding.*.code",
+          "expected": [
+            "A"
+          ],
+          "description": "Abnormal interpretation",
+          "source": "interpretation"
+        },
+        {
+          "input": "OBX[1]-11 = F",
+          "path": "Observation.0.status",
+          "expected": [
+            "final"
+          ],
+          "description": "Result status",
+          "source": "result_status"
+        },
+        {
+          "input": "OBX[1]-14",
+          "path": "Observation.0.effectiveDateTime",
+          "expected": [
+            "2026-11-21T10:15:00+00:00"
+          ],
+          "description": "Result time",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[1] / PID relationship",
+          "path": "Observation.0.subject.reference",
+          "expected": [
+            "Patient[0]"
+          ],
+          "description": "Result subject",
+          "source": "oru"
+        },
+        {
+          "input": "NTE after OBX[1]",
+          "path": "Observation.0.note.*.text",
+          "expected": [
+            "Synthetic specimen note"
+          ],
+          "description": "Result annotation",
+          "source": "nte"
+        },
+        {
+          "input": "OBX[2]-2 = CE, OBX[2]-5",
+          "path": "Observation.1.valueCodeableConcept.coding.*.code",
+          "expected": [
+            "260385009"
+          ],
+          "description": "Coded result",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[2]-5.3 = SCT",
+          "path": "Observation.1.valueCodeableConcept.coding.*.system",
+          "expected": [
+            "http://snomed.info/sct"
+          ],
+          "description": "Coded result system",
+          "source": "obx"
+        },
+        {
+          "input": "OBX[3]-2 = TX, OBX[3]-5",
+          "path": "Observation.2.valueString",
+          "expected": [
+            "SYNTHETIC REPORT ONLY"
+          ],
+          "description": "Text result as Observation.valueString; bridge instead uses report conclusion",
+          "source": "obx"
+        },
+        {
+          "input": "PV1",
+          "path": "Encounter.0.resourceType",
+          "expected": [
+            "Encounter"
+          ],
+          "description": "Visit resource",
+          "source": "oru"
+        }
+      ]
+    },
+    {
+      "name": "ORU R01, SN rejection probe",
+      "file": "oru_r01_sn.hl7",
+      "scope": "Additional synthetic ORU with a valid comparator and number in separate SN components.",
+      "groups": [],
+      "checks": [
+        {
+          "input": "OBX-2 = SN, OBX-5 = <^0.10",
+          "path": "Observation.0.valueQuantity.value",
+          "expected": [
+            0.1
+          ],
+          "description": "Structured numeric value",
+          "source": "obx"
+        },
+        {
+          "input": "OBX-5.1 = <",
+          "path": "Observation.0.valueQuantity.comparator",
+          "expected": [
+            "<"
+          ],
+          "description": "Structured numeric comparator via SN-to-Quantity",
+          "source": "sn"
+        },
+        {
+          "input": "OBR-25 = F",
+          "path": "DiagnosticReport.0.status",
+          "expected": [
+            "final"
+          ],
+          "description": "Report status",
+          "source": "report_status"
+        }
+      ]
+    }
+  ]
+}

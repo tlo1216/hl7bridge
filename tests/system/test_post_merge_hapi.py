@@ -358,7 +358,8 @@ def test_an_a40_links_the_merged_patient_and_keeps_its_data_and_links(client, ru
         other,
         {"other": {"reference": f"Patient/{survivor['id']}"}, "type": "replaced-by"},
     ]
-    assert "link" not in survivor and survivor["name"][0]["family"] == "ZZZSAMPLE"
+    assert "link" not in survivor
+    assert survivor["name"][0]["family"] == "ZZZSAMPLE"
     version = gone["meta"]["versionId"]
     _post(client, registry, _a40("SC7001", "SC7002"))  # a resend changes nothing in content
     assert len(_patient(client, root, "SC7002")["link"]) == 2

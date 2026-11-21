@@ -212,8 +212,10 @@ refused. Orders, reports and encounters are not moved onto the survivor, and
 later messages can still write onto a merged-away Patient. The Bundle that
 `--out` writes makes the merged-away Patient a conditional create, so posting
 the file as is never replaces it with a bare body. That file does not apply
-the merge: the survivor entry is still a conditional update, and an existing
-merged-away Patient is left untouched. Use `--post` to apply a merge. A corrected report that drops a result sets that
+the merge: the survivor entry is still a conditional update that replaces the
+survivor with the message's own Patient (a thin PID erases the server's
+address), and an existing merged-away Patient is left untouched. Use `--post`
+to apply a merge. A corrected report that drops a result sets that
 Observation to `entered-in-error`. Narrative report lines (OBX-2 TX or FT)
 are the report's text, not Observations.
 `--out DIR` writes one Bundle per message (never over an existing file),
@@ -227,6 +229,10 @@ stored messages through the same mapping, so the two paths agree. What each fiel
 follows and where hl7bridge differs is in [docs/mapping.md](docs/mapping.md),
 which is generated from the code. A code that is not in its table is
 refused with the field position; it is never guessed.
+
+[docs/conformance.md](docs/conformance.md) compares synthetic messages with
+the HL7 v2-to-FHIR IG 1.0.0, showing both matches and gaps from fresh
+`to-fhir` runs. Regenerate it with `python tools/check_conformance.py`.
 
 `send` sends each message in its own MLLP frame (a file can hold several),
 reads stdin (`-`), sends a set several times with `--repeat`,

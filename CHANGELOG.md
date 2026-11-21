@@ -7,6 +7,23 @@ profile format may still change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- Review fixes for the repeating PID fields. Two identifiers with no system
+  and the same value, from different assigning authorities, are both kept
+  (in the mapping and in the merge with the server's copy). An explicit HL7
+  null (two double quotes, v2.8.2 section 2.10.5) in PID-5, PID-11, PID-13 or
+  PID-14 now clears the name, address or telephone list on the server; a field
+  left out still keeps it. A telephone repetition is mapped by the IG's XTN
+  rules (XTN.12, else XTN.1, else a number built from XTN.5 to XTN.7) and a
+  repetition with a value is never dropped. The PID-13 and PID-14 default use
+  applies only when XTN.2 is empty; a code the IG leaves unmapped (EMR, NET)
+  gives no use. The `Committed.key` of a retired Observation reads the
+  report's own identifier, not the first one the server lists. In
+  `docs/conformance.md` the telecom assertion now compares system, value and
+  use, and the DiagnosticReport identifier assertion expects both FILL and
+  PLAC; the counts are unchanged (GAP 37, GAP rejected 3, LOCAL 5, MATCH 81).
+
 ### Added
 
 - Optional MLLP over TLS: `listen --tls-cert --tls-key [--tls-ca]` (client
@@ -32,6 +49,21 @@ profile format may still change between minor versions.
   failed. `send_messages` raises `ConnectError` instead of the raw `OSError`
   when it cannot connect.
 
+- `to-fhir` and `fhir sync` keep every repeat of PID-3 (identifiers, each with
+  its type from PID-3.5 and its assigning authority from PID-3.4), PID-5
+  (names, with prefix, suffix and use), PID-11 (addresses, with use and
+  district) and PID-13 and PID-14 (telephone numbers and email addresses),
+  following the IG 1.0.0 CX, XPN, XAD and XTN maps, where only the first was
+  written before. The MRN repetition is still written first and is still the
+  key: conditional URLs, full URLs and `Committed.key` are unchanged. In
+  `docs/conformance.md` the PID-3, PID-5, PID-11 and PID-13 repeat assertions
+  move from gap to match (the PID-3.4 system assertion stays a gap: the MRN
+  system comes from the profile).
+
+- Reproducible IG 1.0.0 conformance evidence in `docs/conformance.md`, with
+  synthetic ADT A01/A04/A08/A40, ORM O01 and ORU R01 fixtures, a separate
+  structured-number rejection probe, a CLI comparison tool and regression tests.
+
 - `to-fhir` and `fhir sync` map ADT^A40 (patient merge). The surviving
   Patient (PID) is merged as for any ADT; the merged-away Patient (MRG-1) is
   set inactive with a `replaced-by` link to the survivor, keeping what the
@@ -55,7 +87,20 @@ profile format may still change between minor versions.
   US Core. `listen --target fhir` still answers A40 with AR
   `patient_read_only`.
 
+### Fixed
+
+- `--post` and `fhir sync` of an ADT^A40 write the resolved `Patient/<id>` in
+  the `replaced-by` link when both Patients exist, not a `urn:uuid`.
+- The key reported for a merged Patient is its MRN, not the server's first
+  identifier.
+
 ### Changed
+
+- `merge_resource` keeps identifiers apart by type when they have no system.
+  A post still replaces a Patient's names, addresses and telephone numbers
+  whole with the message's repeats (each ADT carries the sender's complete
+  current list, so a corrected address does not sit beside the old one) and
+  still adds to the identifiers and links the server holds.
 
 - `fhir sync` no longer leaves a merged-away patient out. Its messages and
   its ImagingStudy rows are posted like any other patient's, so the sync
