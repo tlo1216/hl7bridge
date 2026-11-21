@@ -60,7 +60,12 @@ from .ingest import IngestPipeline, send_messages, serve
 from .ingest.ack import ALL_REASONS
 from .ingest.direct import DirectHandler, DirectLog, check_profiles_for_direct
 from .ingest.loaders import load_outbound, load_studies
-from .ingest.mllp import client_ssl_context, server_ssl_context
+from .ingest.mllp import (
+    TlsHandshakeError,
+    client_ssl_context,
+    handshake_failures,
+    server_ssl_context,
+)
 from .ingest.parser import get_field, parse_hl7
 from .jsonout import dumps, to_jsonable
 from .lint import lint_directory, render_lint_text
@@ -601,22 +606,35 @@ class _Outgoing:
     next_step: str
 
 
+def _no_empty_tls_values(args: argparse.Namespace) -> None:
+    """An empty value (an unset variable) is a mistake, never "no TLS"."""
+    for name in ("tls_ca", "tls_cert", "tls_key"):
+        if getattr(args, name, None) == "":
+            flag = "--" + name.replace("_", "-")
+            raise UsageError(
+                f"{flag} is empty.",
+                hint="Give a file path. An unset shell variable gives an empty value.",
+            )
+
+
 def _sender_tls(args: argparse.Namespace) -> ssl.SSLContext | None:
     """The TLS context for ``send`` and ``replay``, or None for plain MLLP."""
+    _no_empty_tls_values(args)
     ca, cert, key = args.tls_ca, args.tls_cert, args.tls_key
-    if not (args.tls or ca or cert or key):
+    if not (args.tls or ca is not None or cert is not None or key is not None):
         return None
-    if bool(cert) != bool(key):
+    if (cert is None) != (key is None):
         raise UsageError("--tls-cert and --tls-key go together.")
     return client_ssl_context(ca, cert, key)
 
 
 def _listener_tls(args: argparse.Namespace) -> ssl.SSLContext | None:
     """The TLS context for ``listen``, or None for plain MLLP."""
+    _no_empty_tls_values(args)
     cert, key, ca = (getattr(args, n, None) for n in ("tls_cert", "tls_key", "tls_ca"))
-    if not (cert or key or ca):
+    if cert is None and key is None and ca is None:
         return None
-    if not (cert and key):
+    if cert is None or key is None:
         raise UsageError("TLS needs both --tls-cert and --tls-key.")
     return server_ssl_context(cert, key, ca)
 
@@ -654,29 +672,30 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
                 ssl_context=tls,
             )
         )
+    except TlsHandshakeError as exc:
+        cause = exc.cause
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            raise NetworkError(
+                f"the TLS certificate from {where} was refused: {cause.verify_message}."
+                " Nothing was sent.",
+                hint="Check --tls-ca and that --host matches a name in the certificate.",
+            ) from None
+        if isinstance(cause, TimeoutError | ConnectionAbortedError):
+            raise NetworkError(
+                f"no TLS handshake with {where} within {args.timeout:g} s. Nothing was sent.",
+                hint="Is the listener running with --tls-cert?",
+            ) from None
+        reason = getattr(cause, "reason", None) or type(cause).__name__
+        raise NetworkError(
+            f"the TLS handshake with {where} failed: {reason}. Nothing was sent.",
+            hint="The listener may need a client certificate (--tls-cert, --tls-key),"
+            " or may not use TLS.",
+        ) from None
     except TimeoutError:
         _print_send_results(outgoing, acks, source, args.expect)
-        if tls is not None and not acks:
-            raise NetworkError(
-                f"no TLS handshake or ACK from {where} within {args.timeout:g} s."
-                " Is the listener running with --tls-cert? Nothing was sent.",
-            ) from None
         raise NetworkError(
             f"no ACK from {where} within {args.timeout:g} s."
             " The message may or may not have been processed."
-        ) from None
-    except ssl.SSLCertVerificationError as exc:
-        raise NetworkError(
-            f"the TLS certificate from {where} was refused: {exc.verify_message}."
-            " Nothing was sent.",
-            hint="Check --tls-ca and that --host matches a name in the certificate.",
-        ) from None
-    except ssl.SSLError as exc:
-        raise NetworkError(
-            f"the TLS handshake with {where} failed: {exc.reason or type(exc).__name__}."
-            " Nothing was sent.",
-            hint="The listener may need a client certificate (--tls-cert, --tls-key),"
-            " or may not use TLS.",
         ) from None
     except (ConnectionRefusedError, socket.gaierror) as exc:
         reason = "connection refused" if isinstance(exc, ConnectionRefusedError) else "unknown host"
@@ -684,11 +703,12 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
             f"cannot connect to {where}: {reason}. Is the listener running?",
             hint="Try: hl7bridge listen",
         ) from None
-    except (ConnectionError, OSError) as exc:
+    except (ConnectionError, OSError) as exc:  # includes ssl.SSLError after the handshake
         _print_send_results(outgoing, acks, source, args.expect)
         raise NetworkError(
             f"the connection to {where} broke ({type(exc).__name__})"
-            f" after {len(acks)} of {len(payloads)} ACKs.",
+            f" after {len(acks)} of {len(payloads)} ACKs."
+            " The message after the last ACK may or may not have been processed.",
             hint="With TLS, a listener that does not use TLS, or that wants a client"
             " certificate, ends the connection like this."
             if tls is not None
@@ -759,6 +779,8 @@ def _print_send_results(
         if reason in ALL_REASONS:  # only hl7bridge's own reason codes
             print(f"  quarantine reason: {reason}")
         print(f"  next: {item.next_step}")
+    for item in outgoing[len(acks) :]:
+        print(f"{item.label}: no ACK (it may or may not have been processed)")
     print(f"sent {len(outgoing)} message(s) from {source}, got {len(acks)} ACK(s)")
     for code in sorted(counts):
         print(f"  {code}: {counts[code]}")
@@ -968,7 +990,7 @@ def _named_fhir_base(args: argparse.Namespace, command: str) -> str:
     return base
 
 
-def _listen_direct(args: argparse.Namespace) -> int:
+def _listen_direct(args: argparse.Namespace, tls: ssl.SSLContext | None) -> int:
     base = _named_fhir_base(args, "listen --target fhir")
     run_id = _run_id(args)
     registry = _registry(args)
@@ -992,7 +1014,7 @@ def _listen_direct(args: argparse.Namespace) -> int:
             handler = DirectHandler(registry, client, scope, direct_log)
             where = f"FHIR {safe_url(base)}, run {run_id}, log {db_path}"
             try:
-                return _serve_forever(args, handler.handle_frame, handler.handle_junk, where)
+                return _serve_forever(args, handler.handle_frame, handler.handle_junk, where, tls)
             finally:
                 handler.close()
     finally:
@@ -1004,8 +1026,8 @@ def _serve_forever(
     handle_frame: Callable[[bytes], Awaitable[bytes]],
     handle_junk: Callable[[bytes], Awaitable[None]],
     where: str,
+    tls: ssl.SSLContext | None,
 ) -> int:
-    tls = _listener_tls(args)
 
     async def run() -> None:
         try:
@@ -1025,6 +1047,13 @@ def _serve_forever(
                 " authentication; other machines can now send to this listener.",
                 file=sys.stderr,
             )
+        elif args.host not in LOOPBACK_HOSTS and not getattr(args, "tls_ca", None):
+            print(
+                f"warning: {args.host} is not loopback and no --tls-ca is set. TLS encrypts"
+                " the traffic but does not authenticate senders; any machine that can reach"
+                " the port can still send to this listener.",
+                file=sys.stderr,
+            )
         try:
             async with server:
                 await server.serve_forever()
@@ -1037,13 +1066,15 @@ def _serve_forever(
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
-        print("listener stopped")
+        failed = handshake_failures()
+        print("listener stopped" + (f"; {failed} TLS handshake(s) failed" if failed else ""))
     return EXIT_OK
 
 
 def cmd_listen(args: argparse.Namespace) -> int:
+    tls = _listener_tls(args)  # before any store is opened or server contacted
     if args.target == "fhir":
-        return _listen_direct(args)
+        return _listen_direct(args, tls)
     for flag in ("run_id", "mapping_module", "fhir_base"):
         if getattr(args, flag, None):
             raise UsageError(f"--{flag.replace('_', '-')} applies to --target fhir only.")
@@ -1052,7 +1083,9 @@ def cmd_listen(args: argparse.Namespace) -> int:
     conn = connect(db_path)
     pipeline = IngestPipeline(registry, conn)
     try:
-        return _serve_forever(args, pipeline.handle_frame, pipeline.handle_junk, f"db {db_path}")
+        return _serve_forever(
+            args, pipeline.handle_frame, pipeline.handle_junk, f"db {db_path}", tls
+        )
     finally:
         conn.close()
 

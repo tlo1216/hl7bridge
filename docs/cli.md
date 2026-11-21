@@ -47,12 +47,25 @@ Off by default; a listener started without these flags speaks plain MLLP.
 
 Senders always verify the certificate chain, its dates and that `--host`
 matches the certificate; there is no flag to turn that off. With TLS the
-not-loopback warning is not shown. Failures:
+sender's not-loopback warning is not shown. An empty flag value (an unset
+shell variable) is a usage error, never plain MLLP. The private key must be
+unencrypted; an encrypted key is refused with a message, never a prompt.
+
+A listener with TLS but no `--tls-ca` on a non-loopback `--host` prints
+`warning: ... TLS encrypts the traffic but does not authenticate senders`:
+anyone who can reach the port can still send. Use `--tls-ca` (mutual TLS).
+The listener logs each failed handshake (peer address and reason), counts
+them (reported when it stops), and logs the subject of each accepted client
+certificate. Failures:
 
 | Case | Message |
 | --- | --- |
 | Certificate refused | `error: the TLS certificate from 127.0.0.1:2575 was refused: <reason>. Nothing was sent.` (exit 3) |
 | Handshake failed | `error: the TLS handshake with 127.0.0.1:2575 failed: <reason>. Nothing was sent.` (exit 3) |
+| Handshake stalled | `error: no TLS handshake with 127.0.0.1:2575 within 10 s. Nothing was sent.` (exit 3) |
+| Broke after the handshake | `error: the connection to 127.0.0.1:2575 broke (SSLError) after 1 of 2 ACKs. The message after the last ACK may or may not have been processed.` (exit 3); each message without an ACK is listed |
+| Encrypted key | `error: the TLS server private key x.key is encrypted. Give an unencrypted key ...` (exit 2) |
+| Empty flag value | `error: --tls-ca is empty.` (exit 2) |
 | Missing or bad file | `error: cannot read the TLS CA file x.pem.` (exit 2) |
 | One of a pair given | `error: TLS needs both --tls-cert and --tls-key.` or `error: --tls-cert and --tls-key go together.` (exit 2) |
 

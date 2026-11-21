@@ -78,6 +78,10 @@ jobs:
       - name: Sync dependencies (locked)
         run: uv sync --locked
       - name: Unit and system tests (no FHIR server)
+        # HL7BRIDGE_TLS_REQUIRED=1 turns a missing openssl tool into a FAILURE
+        # instead of a silent skip of the TLS tests.
+        env:
+          HL7BRIDGE_TLS_REQUIRED: "1"
         run: uv run pytest -m "not fhir" -q
       - name: Runtime dependency licenses on this OS
         # Each OS installs its own dependencies (tzdata on Windows only), so

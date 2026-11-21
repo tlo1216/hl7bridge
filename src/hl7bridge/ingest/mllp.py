@@ -10,7 +10,9 @@ as explicit ``JunkBytes`` items so the pipeline can quarantine and count them
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import socket
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -80,13 +82,39 @@ async def decode_frames(reader: asyncio.StreamReader) -> AsyncIterator[Frame | J
 HANDSHAKE_TIMEOUT_S = 10.0
 
 
+class TlsHandshakeError(Exception):
+    """The TLS connection failed before any frame was written."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+class _EncryptedKey(Exception):
+    """Raised by the password callback so an encrypted key never prompts."""
+
+
+def _refuse_password() -> bytes:
+    raise _EncryptedKey
+
+
 def _load_chain(ctx: ssl.SSLContext, certfile: str, keyfile: str, what: str) -> None:
     """Load a certificate and its key. Errors name the file, never the key."""
     for path, kind in ((certfile, "certificate"), (keyfile, "private key")):
         if not Path(path).is_file():
             raise TlsConfigError(f"cannot read the TLS {what} {kind} file {path}.")
     try:
-        ctx.load_cert_chain(certfile, keyfile)
+        ctx.load_cert_chain(certfile, keyfile, password=_refuse_password)
+    except _EncryptedKey:
+        raise TlsConfigError(
+            f"the TLS {what} private key {keyfile} is encrypted. Give an unencrypted key"
+            " (hl7bridge never asks for a passphrase)."
+        ) from None
+    except PermissionError:
+        raise TlsConfigError(
+            f"cannot read the TLS {what} certificate {certfile} or key {keyfile}:"
+            " permission denied."
+        ) from None
     except (ssl.SSLError, OSError):
         raise TlsConfigError(
             f"the TLS {what} certificate {certfile} and key {keyfile} could not be loaded:"
@@ -108,6 +136,7 @@ def server_ssl_context(certfile: str, keyfile: str, cafile: str | None = None) -
     certificate that chains to it; without it, clients are not asked."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.options |= ssl.OP_NO_RENEGOTIATION
     _load_chain(ctx, certfile, keyfile, "server")
     if cafile is not None:
         _load_ca(ctx, cafile)
@@ -120,12 +149,15 @@ def client_ssl_context(
 ) -> ssl.SSLContext:
     """TLS 1.2 or newer, server certificate and host name always checked.
     ``cafile`` is the only trust anchor when given; otherwise the system store."""
+    # Both paths start from the same bare context, so the extras of
+    # create_default_context() (such as SSLKEYLOGFILE) apply to neither.
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verifies chain and host name
     if cafile is not None:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verifies chain and host name
         _load_ca(ctx, cafile)
     else:
-        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ctx.load_default_certs(ssl.Purpose.SERVER_AUTH)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.options |= ssl.OP_NO_RENEGOTIATION
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
     if (certfile is None) != (keyfile is None):
@@ -136,6 +168,43 @@ def client_ssl_context(
 
 
 Handler = Callable[[bytes], Awaitable[bytes]]
+
+_handshake_failures = 0
+
+
+def handshake_failures() -> int:
+    """Failed TLS handshakes seen by listeners in this process."""
+    return _handshake_failures
+
+
+def _subject(cert: object) -> str:
+    """A client certificate subject as ``commonName=x, organizationName=y``."""
+    if not isinstance(cert, dict):
+        return ""
+    return ", ".join(f"{k}={v}" for rdn in cert.get("subject", ()) for k, v in rdn)
+
+
+async def _start_tls(writer: asyncio.StreamWriter, ctx: ssl.SSLContext) -> bool:
+    """Upgrade an accepted connection to TLS. False (closed) when it fails."""
+    global _handshake_failures
+    peer = writer.get_extra_info("peername")
+    try:
+        await writer.start_tls(ctx, ssl_handshake_timeout=HANDSHAKE_TIMEOUT_S)
+    except (ssl.SSLError, OSError, TimeoutError) as exc:
+        _handshake_failures += 1
+        reason = getattr(exc, "reason", None) or type(exc).__name__
+        log.warning(
+            "mllp tls handshake failed peer=%s reason=%s total=%d",
+            peer,
+            reason,
+            _handshake_failures,
+        )
+        writer.close()
+        return False
+    subject = _subject(writer.get_extra_info("peercert"))
+    if subject:
+        log.info("mllp client certificate peer=%s subject=%s", peer, subject)
+    return True
 
 
 async def _handle_connection(
@@ -155,13 +224,13 @@ async def _handle_connection(
             response = await handler(item.payload)
             writer.write(encode_mllp(response))
             await writer.drain()
-    except ConnectionResetError:
-        log.warning("mllp connection reset peer=%s", peer)
+    except (ConnectionError, ssl.SSLError, TimeoutError) as exc:
+        log.warning("mllp connection broke peer=%s error=%s", peer, type(exc).__name__)
     finally:
         writer.close()
         try:
             await writer.wait_closed()
-        except (ConnectionResetError, BrokenPipeError):
+        except OSError:
             log.warning("mllp close race peer=%s", peer)
         log.info("mllp connection closed peer=%s", peer)
 
@@ -178,15 +247,13 @@ async def serve(
     Pass ``ssl_context`` (see ``server_ssl_context``) for MLLP over TLS."""
 
     async def connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # TLS starts here, not in start_server, so a failed handshake is seen
+        # with its peer address and can be logged and counted.
+        if ssl_context is not None and not await _start_tls(writer, ssl_context):
+            return
         await _handle_connection(reader, writer, handler, on_junk)
 
-    server = await asyncio.start_server(
-        connection,
-        host,
-        port,
-        ssl=ssl_context,
-        ssl_handshake_timeout=HANDSHAKE_TIMEOUT_S if ssl_context else None,
-    )
+    server = await asyncio.start_server(connection, host, port)
     sockets = ", ".join(str(s.getsockname()) for s in server.sockets)
     log.info("mllp listening on %s%s", sockets, " (tls)" if ssl_context else "")
     return server
@@ -210,12 +277,21 @@ async def send_messages(
     Pass ``ssl_context`` (see ``client_ssl_context``) for MLLP over TLS; the
     server's certificate must be valid for ``host``.
     """
-    reader, writer = await asyncio.open_connection(
-        host,
-        port,
-        ssl=ssl_context,
-        ssl_handshake_timeout=max(ack_timeout_s, 1.0) if ssl_context else None,
-    )
+    try:
+        reader, writer = await asyncio.open_connection(
+            host,
+            port,
+            ssl=ssl_context,
+            ssl_handshake_timeout=max(ack_timeout_s, 1.0) if ssl_context else None,
+            ssl_shutdown_timeout=min(ack_timeout_s, 5.0) if ssl_context else None,
+        )
+    except (ConnectionRefusedError, socket.gaierror):
+        raise
+    except (ssl.SSLError, ConnectionError, TimeoutError) as exc:
+        if ssl_context is None:
+            raise
+        # Nothing has been written yet: the connection never got going.
+        raise TlsHandshakeError(exc) from exc
     if acks is None:
         acks = []
     try:
@@ -228,7 +304,8 @@ async def send_messages(
             acks.append(ack)
     finally:
         writer.close()
-        await writer.wait_closed()
+        with contextlib.suppress(OSError):  # a slow TLS shutdown must not mask the result
+            await writer.wait_closed()
     return acks
 
 

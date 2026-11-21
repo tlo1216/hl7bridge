@@ -2,23 +2,37 @@
 
 Certificates are made at test time with a throwaway CA by the ``openssl``
 command line tool (the ``cryptography`` package is not a dependency). The
-tests skip, with the reason, when the tool is not installed.
+tests skip, with the reason, when the tool is not installed;
+HL7BRIDGE_TLS_REQUIRED=1 (set in CI) makes that a failure instead.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import shutil
+import sqlite3
 import ssl
 import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
+import hl7bridge
 from hl7bridge import cli
 from hl7bridge.errors import EXIT_CONNECTION, EXIT_OK, EXIT_USAGE, TlsConfigError
-from hl7bridge.ingest.mllp import client_ssl_context, send_messages, serve, server_ssl_context
+from hl7bridge.ingest.mllp import (
+    TlsHandshakeError,
+    client_ssl_context,
+    handshake_failures,
+    send_messages,
+    serve,
+    server_ssl_context,
+)
 from hl7bridge.profiles import SAMPLES_DIR
 
 _FALLBACKS = (
@@ -35,9 +49,17 @@ def _find_openssl() -> str | None:
 
 
 OPENSSL = _find_openssl()
-pytestmark = pytest.mark.skipif(
-    OPENSSL is None, reason="the openssl command line tool is not installed; cannot make test certs"
-)
+REQUIRED = os.environ.get("HL7BRIDGE_TLS_REQUIRED") == "1"
+
+
+@pytest.fixture(autouse=True)
+def _need_openssl() -> None:
+    if OPENSSL is None:
+        message = "the openssl command line tool is not installed; cannot make test certs"
+        if REQUIRED:
+            pytest.fail(f"HL7BRIDGE_TLS_REQUIRED=1 but {message}")
+        pytest.skip(message)
+
 
 CA_CNF = """[ca]
 default_ca = CA_default
@@ -164,6 +186,7 @@ def certs(tmp_path_factory) -> dict[str, str]:
     )
     wrong_name = pki.leaf("good", "wrongname", "DNS:other.example")
     stranger = pki.leaf("other", "stranger", "DNS:client.test", usage="clientAuth")
+    server_only = pki.leaf("good", "serveronly", "DNS:client.test", usage="serverAuth")
     return {
         "ca": str(ca),
         "other_ca": str(other),
@@ -177,14 +200,17 @@ def certs(tmp_path_factory) -> dict[str, str]:
         "wrongname_key": wrong_name[1],
         "stranger_cert": stranger[0],
         "stranger_key": stranger[1],
+        "serveronly_cert": server_only[0],
+        "serveronly_key": server_only[1],
     }
 
 
 class TlsServer:
     """An MLLP listener on a thread that answers every frame with AA."""
 
-    def __init__(self, ctx: ssl.SSLContext | None) -> None:
+    def __init__(self, ctx: ssl.SSLContext | None, drop_at: int | None = None) -> None:
         self.ctx = ctx
+        self.drop_at = drop_at
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
         self.port = 0
@@ -196,6 +222,8 @@ class TlsServer:
 
         async def handle(payload: bytes) -> bytes:
             self.received.append(payload)
+            if self.drop_at is not None and len(self.received) >= self.drop_at:
+                raise ConnectionResetError  # the connection ends with no ACK
             return ACK
 
         async def junk(_data: bytes) -> None:
@@ -224,7 +252,7 @@ def _send(port: int, ctx: ssl.SSLContext | None, host: str = "127.0.0.1") -> lis
     return asyncio.run(send_messages(host, port, [MSG], ack_timeout_s=3.0, ssl_context=ctx))
 
 
-REFUSED = (ssl.SSLError, ConnectionError, TimeoutError)
+REFUSED = (TlsHandshakeError, ssl.SSLError, ConnectionError)
 
 
 def test_tls_handshake_message_and_ack(certs):
@@ -282,14 +310,15 @@ def test_tls_client_is_refused_by_a_plain_server(certs):
 
 def test_wrong_ca_is_refused(certs):
     server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
-    with TlsServer(server_ctx) as srv, pytest.raises(ssl.SSLCertVerificationError):
+    with TlsServer(server_ctx) as srv, pytest.raises(TlsHandshakeError) as exc:
         _send(srv.port, client_ssl_context(certs["other_ca"]))
+    assert isinstance(exc.value.cause, ssl.SSLCertVerificationError)
     assert srv.received == []
 
 
 def test_expired_certificate_is_refused(certs):
     server_ctx = server_ssl_context(certs["expired_cert"], certs["expired_key"])
-    with TlsServer(server_ctx) as srv, pytest.raises(ssl.SSLCertVerificationError, match="expired"):
+    with TlsServer(server_ctx) as srv, pytest.raises(TlsHandshakeError, match="expired"):
         _send(srv.port, client_ssl_context(certs["ca"]))
     assert srv.received == []
 
@@ -298,7 +327,7 @@ def test_host_name_mismatch_is_refused(certs):
     server_ctx = server_ssl_context(certs["wrongname_cert"], certs["wrongname_key"])
     with (
         TlsServer(server_ctx) as srv,
-        pytest.raises(ssl.SSLCertVerificationError, match=r"127.0.0.1"),
+        pytest.raises(TlsHandshakeError, match=r"127.0.0.1"),
     ):
         _send(srv.port, client_ssl_context(certs["ca"]))
     assert srv.received == []
@@ -358,7 +387,7 @@ def test_cli_send_to_a_plain_listener_fails_with_a_tls_message(certs, capsys):
         rc = cli.main(_send_args(srv.port, "--tls-ca", certs["ca"], "--timeout", "1"))
     assert rc == EXIT_CONNECTION
     err = capsys.readouterr().err
-    assert "does not use TLS" in err or "TLS handshake" in err
+    assert "no TLS handshake" in err and "Nothing was sent" in err
     assert srv.received == []
 
 
@@ -371,3 +400,248 @@ def test_cli_flags_must_come_in_pairs(certs, capsys):
     assert "needs both --tls-cert and --tls-key" in capsys.readouterr().err
     rc = cli.main(["listen", "--tls-ca", certs["ca"]])
     assert rc == EXIT_USAGE
+
+
+# -- Findings from the Nov 21 review ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("--tls-ca", ""),
+        ("--tls-cert", "", "--tls-key", "k.pem"),
+        ("--tls-cert", "c.pem", "--tls-key", ""),
+    ],
+)
+def test_empty_tls_values_are_a_usage_error_not_plaintext(extra, capsys):
+    with TlsServer(None) as srv:
+        rc = cli.main(_send_args(srv.port, *extra))
+        assert srv.received == []
+    assert rc == EXIT_USAGE
+    assert "is empty" in capsys.readouterr().err
+
+
+def test_listen_empty_tls_value_fails_before_the_store_is_made(certs, tmp_path, capsys):
+    db = tmp_path / "never.db"
+    for extra in (["--tls-cert", ""], ["--tls-cert", certs["server_cert"], "--tls-key", ""]):
+        rc = cli.main(["listen", "--port", "0", "--db", str(db), *extra])
+        assert rc == EXIT_USAGE
+        assert "is empty" in capsys.readouterr().err
+    rc = cli.main(["listen", "--port", "0", "--db", str(db), "--tls-cert", certs["server_cert"]])
+    assert rc == EXIT_USAGE and not db.exists()
+    capsys.readouterr()
+
+
+def test_mid_stream_break_reports_acks_and_never_says_nothing_was_sent(certs, tmp_path, capsys):
+    two = tmp_path / "two"
+    two.mkdir()
+    for name in ("a.hl7", "b.hl7"):
+        (two / name).write_bytes((SAMPLES_DIR / "01_hospa_adt_a04.hl7").read_bytes())
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    with TlsServer(server_ctx, drop_at=2) as srv:
+        rc = cli.main(["send", str(two), "--port", str(srv.port), "--tls-ca", certs["ca"]])
+    captured = capsys.readouterr()
+    assert rc == EXIT_CONNECTION
+    assert "after 1 of 2 ACKs" in captured.err
+    assert "may or may not have been processed" in captured.err
+    assert "Nothing was sent" not in captured.err
+    assert "no ACK" in captured.out  # per-message result for the second one
+
+
+def test_a_stalled_handshake_says_nothing_was_sent(certs, capsys):
+    # A listener that accepts the connection and then says nothing.
+    with TlsServer(None) as srv:
+        rc = cli.main(_send_args(srv.port, "--tls-ca", certs["ca"], "--timeout", "1"))
+    err = capsys.readouterr().err
+    assert rc == EXIT_CONNECTION
+    assert "no TLS handshake" in err and "Nothing was sent" in err
+
+
+def test_system_store_context_is_built_like_the_ca_one():
+    ctx = client_ssl_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
+    assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
+    assert ctx.options & ssl.OP_NO_RENEGOTIATION
+    assert ctx.keylog_filename is None or ctx.keylog_filename == os.environ.get("SSLKEYLOGFILE")
+
+
+def test_cli_tls_flag_uses_the_system_store_and_refuses_a_private_ca(certs, capsys):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    with TlsServer(server_ctx) as srv:
+        rc = cli.main(_send_args(srv.port, "--tls"))
+        assert srv.received == []
+    err = capsys.readouterr().err
+    assert rc == EXIT_CONNECTION
+    assert "was refused" in err and "Nothing was sent" in err
+
+
+def test_renegotiation_is_off_on_both_contexts(certs):
+    server = server_ssl_context(certs["server_cert"], certs["server_key"])
+    assert server.options & ssl.OP_NO_RENEGOTIATION
+    assert client_ssl_context(certs["ca"]).options & ssl.OP_NO_RENEGOTIATION
+
+
+def test_a_client_certificate_for_server_auth_only_is_refused(certs):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"], certs["ca"])
+    client_ctx = client_ssl_context(certs["ca"], certs["serveronly_cert"], certs["serveronly_key"])
+    with TlsServer(server_ctx) as srv, pytest.raises(REFUSED):
+        _send(srv.port, client_ctx)
+    assert srv.received == []
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_tls_1_1_is_refused(certs):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    old = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    old.check_hostname = False
+    old.verify_mode = ssl.CERT_NONE
+    try:
+        old.set_ciphers("DEFAULT:@SECLEVEL=0")
+        old.minimum_version = ssl.TLSVersion.TLSv1
+        old.maximum_version = ssl.TLSVersion.TLSv1_1
+    except (ssl.SSLError, ValueError):
+        pytest.skip("this OpenSSL cannot offer TLS 1.1 at all")
+    with TlsServer(server_ctx) as srv, pytest.raises(REFUSED):
+        _send(srv.port, old)
+    assert srv.received == []
+
+
+def _wait_for(check, seconds: float = 5.0) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if check():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_failed_handshakes_are_logged_with_peer_and_counted(certs, caplog):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    before = handshake_failures()
+    with caplog.at_level(logging.INFO, logger="hl7bridge.ingest.mllp"):
+        with TlsServer(server_ctx) as srv, pytest.raises(REFUSED):
+            _send(srv.port, None)  # plain bytes sent to a TLS port
+        assert _wait_for(lambda: handshake_failures() > before)
+    text = caplog.text
+    assert "tls handshake failed" in text and "peer=('127.0.0.1'" in text and "reason=" in text
+    assert "MSH" not in text
+
+
+def test_the_accepted_client_certificate_subject_is_logged(certs, caplog):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"], certs["ca"])
+    client_ctx = client_ssl_context(certs["ca"], certs["client_cert"], certs["client_key"])
+    with (
+        caplog.at_level(logging.INFO, logger="hl7bridge.ingest.mllp"),
+        TlsServer(server_ctx) as srv,
+    ):
+        assert _send(srv.port, client_ctx) == [ACK]
+    assert "client certificate" in caplog.text and "commonName=client" in caplog.text
+
+
+def test_encrypted_and_unreadable_keys_get_their_own_messages(certs, tmp_path, monkeypatch):
+    encrypted = tmp_path / "enc.key"
+    _run(
+        tmp_path,
+        "pkcs8",
+        "-topk8",
+        "-in",
+        certs["server_key"],
+        "-out",
+        str(encrypted),
+        "-passout",
+        "pass:secret",
+        "-v2",
+        "aes-256-cbc",
+    )
+    with pytest.raises(TlsConfigError, match="is encrypted") as exc:
+        server_ssl_context(certs["server_cert"], str(encrypted))
+    assert "secret" not in str(exc.value) and "BEGIN" not in str(exc.value)
+
+    def denied(self, *args, **kwargs):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(ssl.SSLContext, "load_cert_chain", denied)
+    with pytest.raises(TlsConfigError, match="permission denied"):
+        server_ssl_context(certs["server_cert"], certs["server_key"])
+
+
+def test_listener_error_during_a_connection_is_one_warning_not_a_traceback(certs, caplog):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    with caplog.at_level(logging.WARNING, logger="hl7bridge.ingest.mllp"):
+        with TlsServer(server_ctx, drop_at=1) as srv, pytest.raises(REFUSED):
+            _send(srv.port, client_ssl_context(certs["ca"]))
+        assert _wait_for(lambda: "connection broke" in caplog.text)
+
+
+def _spawn_listener(certs, db: Path, host: str, *extra: str) -> tuple[subprocess.Popen, int]:
+    src = str(Path(hl7bridge.__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": src}
+    code = "import sys; from hl7bridge.cli import main; sys.exit(main())"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            code,
+            "listen",
+            "--host",
+            host,
+            "--port",
+            "0",
+            "--db",
+            str(db),
+            "--tls-cert",
+            certs["server_cert"],
+            "--tls-key",
+            certs["server_key"],
+            *extra,
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None
+    line = proc.stdout.readline()  # printed once the socket is bound
+    assert "MLLP over TLS listener on" in line, line
+    port = int(line.split(" listener on ")[1].split(" ")[0].rsplit(":", 1)[1].rstrip(","))
+    return proc, port
+
+
+def test_listen_over_tls_end_to_end_and_replay_over_tls(certs, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    proc, port = _spawn_listener(certs, db, "0.0.0.0")
+    try:
+        rc = cli.main(_send_args(port, "--tls-ca", certs["ca"]))
+        out = capsys.readouterr()
+        assert rc == EXIT_OK, out.err
+        assert "got 1 ACK(s)" in out.out
+        rows = sqlite3.connect(db).execute("select count(*) from messages").fetchone()[0]
+        assert rows == 1
+    finally:
+        proc.terminate()
+        _, err = proc.communicate(timeout=10)
+    # No --tls-ca on a non-loopback bind: encrypted, but senders are not authenticated.
+    assert "does not authenticate senders" in err
+
+    # Replay the stored message over TLS into a second listener (mutual TLS).
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"], certs["ca"])
+    with TlsServer(server_ctx) as srv:
+        rc = cli.main(
+            [
+                "replay",
+                "--from",
+                "store",
+                "--db",
+                str(db),
+                "--port",
+                str(srv.port),
+                "--tls-ca",
+                certs["ca"],
+                "--tls-cert",
+                certs["client_cert"],
+                "--tls-key",
+                certs["client_key"],
+            ]
+        )
+        assert rc == EXIT_OK, capsys.readouterr().err
+        assert len(srv.received) == 1
