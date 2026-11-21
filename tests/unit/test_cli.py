@@ -1174,10 +1174,14 @@ def test_fhir_probe_strips_control_characters_from_server_text(capsys, monkeypat
 
 
 class _AckingListener:
-    """A loopback MLLP listener that answers every frame with one fixed ACK."""
+    """A loopback MLLP listener that answers every frame with one fixed ACK.
+    With ``script``, frame n gets reply n instead (bytes sent as they are, or a
+    function of the frame), and the connection closes after the last one."""
 
-    def __init__(self, ack: bytes) -> None:
+    def __init__(self, ack: bytes = b"", *, script: tuple = ()) -> None:
         self.ack = ack
+        self.script = list(script)
+        self.seen: list[bytes] = []
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -1194,8 +1198,18 @@ class _AckingListener:
                 buffer += chunk
                 while b"\x1c\r" in buffer:
                     frame, buffer = buffer.split(b"\x1c\r", 1)
-                    writer.write(encode_mllp(_answering(self.ack, frame)))
+                    if not self.script:
+                        writer.write(encode_mllp(_answering(self.ack, frame)))
+                        await writer.drain()
+                        continue
+                    payload = frame.removeprefix(b"\x0b")
+                    reply = self.script[len(self.seen)]
+                    self.seen.append(payload)
+                    writer.write(reply(payload) if callable(reply) else reply)
                     await writer.drain()
+                    if len(self.seen) == len(self.script):
+                        writer.close()
+                        return
             writer.close()
 
         async def start():

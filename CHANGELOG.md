@@ -9,27 +9,47 @@ profile format may still change between minor versions.
 
 ### Fixed
 
+- Final review of MLLP over TLS. An ACK counts only when the reply starts with
+  MSH, has MSH-9 `ACK` and exactly one MSA, and its MSA-2 is the MSH-10 sent,
+  both read the same way (trimmed, first component, escapes decoded); `UNKNOWN`
+  counts only in a negative ACK. `send` and `replay` refuse a message with an
+  empty MSH-10 before sending (exit 2); `send_messages` still sends one but
+  accepts only a negative `UNKNOWN` ACK for it, never an AA.
+  The listener echoes a readable MSH-10 in its AR for an unparseable message or
+  an internal error, so `replay` of such rows and a non-UTF-8 `send` report the
+  AR instead of a protocol error. TLS listeners cap open connections
+  (`--max-connections`, default 256) and pending handshakes from one address
+  (4). SIGTERM on Linux and macOS takes the Ctrl+C path, so a busy client gets
+  its grace. Shutdown cancels a client still in its handshake instead of
+  aborting it, and the direct listener waits at most 5 seconds for its FHIR
+  workers. A maximum-size frame whose terminator splits across two reads is a
+  frame. A stuck name lookup no longer holds `send` past `--timeout`. Failed
+  handshake lines are capped at 20 a minute across all peers. A handshake reset
+  is no longer reported as a stall. `--show-ack-text` follows the ACK's sign,
+  not `--expect`. The docs no longer suggest `--tls-ca` works around the
+  Windows Disallowed store.
+
 - Third review of MLLP over TLS. An empty `--host` is a usage error for `send`,
   `replay` and `listen` (and `send_messages` and `serve` raise `ValueError`):
   it could skip the host name check or bind every interface. A TLS flag value
   is never echoed, only the flag name. An ACK counts only when its MSA-2 equals
   the MSH-10 sent; a truncated, non-ACK or stale reply is `AckProtocolError`
-  (exit 3), keeping the ACKs already confirmed. `send` no longer prints the
-  receiver's MSA-3 or ERR text unless `--show-ack-text` is given. The failed
+  (exit 3), keeping the ACKs already confirmed. Behaviour change: by default
+  `send` and `replay` no longer print the receiver's MSA-3 or ERR text for an
+  AE or AR (it can quote patient data); add `--show-ack-text` to see it. The
+  quarantine reason line for hl7bridge's own reason codes stays. The failed
   handshake table is a fixed-size LRU (1024 peers) and at most 64 handshakes
   may be pending. Shutdown (`shutdown_server`) closes idle clients at once and
   cuts a busy one after 5 seconds. `send_messages` refuses a TLS context that
   does not check the host name or require a certificate. Host names match
   subject alternative names only; partial-chain verification is on only with
   `--tls-ca`. The client certificate audit line carries the SHA-256
-  fingerprint and percent-encoded fields; subject and alternative names moved
-  to an INFO line. The `sent` total counts frames written. `--timeout` is one
+  fingerprint and percent-encoded fields. The `sent` total counts frames written. `--timeout` is one
   deadline for connecting (lookup, TCP, handshake) and one for each write plus
   ACK, and the reported value is the real one. The 1,000,000 byte frame cap
   is exact. `replay` checks TLS options before reading the store, also for a
-  dry run or an empty selection. The direct listener warns for any non-loopback
-  `http://` FHIR URL. Docs state the Windows Disallowed-store gap and that
-  Windows process termination skips the clean shutdown.
+  dry run or an empty selection. Docs state the Windows Disallowed-store gap and
+  that Windows process termination skips the clean shutdown.
 
 - Review fixes for the repeating PID fields. Two identifiers with no system
   and the same value, from different assigning authorities, are both kept
@@ -52,16 +72,17 @@ profile format may still change between minor versions.
   certificates with `--tls-ca`), and `send` and `replay` `--tls`, `--tls-ca`,
   `--tls-cert`, `--tls-key`. TLS 1.2 minimum, certificate and host name always
   verified. New `docs/threat-model.md`. Empty TLS flag values are a usage
-  error. The listener logs and counts failed handshakes, logs the client
-  certificate subject, and warns when TLS has no `--tls-ca` on a non-loopback
+  error. The listener logs and counts failed handshakes, logs each accepted
+  client certificate, and warns when TLS has no `--tls-ca` on a non-loopback
   bind. Encrypted keys are refused with a message. `send` reports "broke
   after N of M ACKs" instead of "Nothing was sent" once a frame was written.
   A failed connect (refused, no route, unknown host, timed out), with or
   without TLS, is one "Never connected, nothing was sent" error; after a
   break only the first message without an ACK is "may or may not have been
   processed", the rest are "not sent". The accepted client certificate line
-  (subject, alternative names, serial, issuer) is always written, sanitized,
-  at a level `--quiet` keeps. Failed-handshake warnings are limited to one a
+  (peer, SHA-256 fingerprint, serial, issuer) is always written, sanitized,
+  at a level `--quiet` keeps; the subject and alternative names are logged
+  only at DEBUG. Failed-handshake warnings are limited to one a
   minute per peer with a summary, include the check text, and the total is
   logged at any shutdown (SIGTERM stops the listener like Ctrl+C). `--timeout`
   must be a finite number above 0. Bytes of a half-read frame are quarantined

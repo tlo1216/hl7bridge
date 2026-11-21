@@ -41,6 +41,7 @@ Off by default; a listener started without these flags speaks plain MLLP.
 | --- | --- | --- |
 | `listen` | `--tls-cert FILE`, `--tls-key FILE` | Serve TLS 1.2 or newer. Both are needed together |
 | `listen` | `--tls-ca FILE` | Also require a client certificate that chains to this CA |
+| `listen` | `--max-connections N` | With TLS, at most N connections open at once (default 256) |
 | `send`, `replay` | `--tls` | Use TLS with the system CA store (on Windows the CA and ROOT stores; see below) |
 | `send`, `replay` | `--tls-ca FILE` | Trust only this CA for the listener's certificate (implies `--tls`) |
 | `send`, `replay` | `--tls-cert FILE`, `--tls-key FILE` | Present a client certificate (implies `--tls`; both together) |
@@ -60,53 +61,69 @@ value: a value can be key text.
 `--tls-ca` is the only trust anchor when given, and it may be an issuing
 (intermediate) CA on its own: partial-chain verification is switched on only
 then. Without it the system store applies. On Windows that is the certificates
-Python imports from the CA and ROOT stores; the Disallowed store (certificates
-an administrator has explicitly blocked) is not consulted, so a blocked
-certificate can still pass if its name, dates and chain are valid. Use
-`--tls-ca` where that matters.
+Python imports from the CA and ROOT stores. Neither `--tls` nor `--tls-ca`
+consults the Disallowed store (certificates an administrator has explicitly
+blocked), so a blocked certificate can still pass if its name, dates and chain
+are valid. `--tls-ca` narrows which issuers are trusted; it does not enforce
+those blocks.
 
 `--timeout` is one deadline per phase: connecting (name lookup, TCP and the TLS
 handshake together), then each message (writing it and waiting for its ACK
-together). The reported value is the one that applied.
+together). The reported value is the one that applied. A name lookup that does
+not return is abandoned at the deadline; it does not hold the exit.
 
-An ACK counts only when it answers the message sent: its MSA-2 must equal the
-outbound MSH-10 (hl7bridge's own listener echoes it with separators escaped and
-answers `UNKNOWN` for an empty one; both are accepted). A cut-short ACK, a
-reply with no MSA, or another message's ACK ends the run as an error (exit 3)
-with the ACKs already confirmed kept in the results; it is never counted. The
-`sent` total counts frames written, not messages queued.
+An ACK counts only when it answers the message sent: the reply must start with
+MSH, have MSH-9 `ACK` and exactly one MSA, and its MSA-2 must be the outbound
+MSH-10. Both are read the same way (trimmed, first component, HL7 escapes
+decoded), so hl7bridge's own listener, which echoes the decoded id with
+separators escaped, always matches. `UNKNOWN` (what hl7bridge's listener
+answers when it cannot read the MSH) counts only in a negative ACK (AE, AR, CE,
+CR), never in an AA or CA. A message with an empty MSH-10 is refused before
+anything is sent (exit 2): no reply could be matched to it. This also applies to
+`replay` of a quarantined message that has none. A cut-short ACK, a reply that
+is not one ACK, or another message's ACK ends the run as an error (exit 3) with
+the ACKs already confirmed kept in the results; it is never counted. The `sent`
+total counts frames written, not messages queued.
 
 A listener with TLS but no `--tls-ca` on a non-loopback `--host` prints
 `warning: ... TLS encrypts the traffic but does not authenticate senders`:
 anyone who can reach the port can still send. Use `--tls-ca` (mutual TLS).
 The listener logs a failed handshake with the peer address and the reason
 (including the certificate check text), at most once a minute for each peer
-address, followed by a summary count; it counts all of them and logs the
+address, followed by a summary count, and at most 20 such lines a minute across
+all peers (the rest are counted in one line); it counts all of them and logs the
 total when it stops cleanly (Ctrl+C, SIGTERM on Linux and macOS, or an error).
-On Windows only Ctrl+C is a clean stop: ordinary process termination (a service
-stop, `taskkill`, `Popen.terminate()`, which is `TerminateProcess`) ends the
-process at once, runs no Python code, and writes neither the total nor any
-shutdown line. On a clean stop idle clients are closed immediately and a client
-whose message is still being handled gets 5 seconds, then is cut. At most 64
-connections may wait to finish a handshake (more are closed, with one log line
-a minute); the per-peer failure table keeps 1024 peers. For each accepted
-client certificate it logs one line with the peer, the SHA-256 fingerprint,
-serial and issuer, every value percent-encoded so it holds no space or `=` and
-cannot start another field; this line is written at a level that `--quiet` does
-not hide. A second line at INFO (hidden by `--quiet`) adds the subject and
-subject alternative names, which can hold a person's name or email address.
-`--timeout` must be a finite number above 0. Failures:
+SIGTERM takes the same path as Ctrl+C. On Windows only Ctrl+C is a clean stop:
+ordinary process termination (a service stop, `taskkill`, `Popen.terminate()`,
+which is `TerminateProcess`) ends the process at once, runs no Python code, and
+writes neither the total nor any shutdown line. On a clean stop idle clients
+are closed immediately, a client still in its handshake is cancelled, and a
+client whose message is still being handled gets 5 seconds, then is cut. With
+`--target fhir` the listener then waits up to 5 more seconds for its FHIR
+workers; a worker still in a FHIR request is left to finish, and the process
+exits when that request ends (at `--fhir-timeout` at the latest). At most
+`--max-connections` TLS connections (default 256) may be open at once, at most
+64 may wait to finish a handshake, and at most 4 of those from one address;
+more are closed, with one log line a minute. The per-peer failure table keeps
+1024 peers. For each accepted client certificate it logs one line with the
+peer, the SHA-256 fingerprint, serial and issuer, every value percent-encoded
+so it holds no space or `=` and cannot start another field; this line is
+written at a level that `--quiet` does not hide. The subject and subject
+alternative names, which can hold a person's name, an email address or a URI
+query, are logged only at DEBUG (`-vv`). `--timeout` must be a finite number
+above 0. Failures:
 
 | Case | Message |
 | --- | --- |
 | Certificate refused | `error: the TLS certificate from 127.0.0.1:2575 was refused: <reason>. Nothing was sent.` (exit 3) |
 | Never connected (refused, no route, unknown host, timed out) | `error: cannot connect to 127.0.0.1:2575: connection refused. Never connected, nothing was sent.` (exit 3), the same with or without TLS |
 | Handshake failed | `error: the TLS handshake with 127.0.0.1:2575 failed: <reason>. Nothing was sent.` (exit 3) |
-| Handshake stalled | `error: no TLS handshake with 127.0.0.1:2575 within 10 s. Nothing was sent.` (exit 3) |
+| Handshake stalled (only when the deadline passed; a reset is "Handshake failed") | `error: no TLS handshake with 127.0.0.1:2575 within 10 s. Nothing was sent.` (exit 3) |
 | Broke after the handshake | `error: the connection to 127.0.0.1:2575 broke (SSLError) after 1 of 2 ACKs. The message after the last ACK may or may not have been processed.` (exit 3); the first message without an ACK is listed as `no ACK (it may or may not have been processed)`, the rest as `not sent` |
 | Encrypted key | `error: the TLS server private key given with --tls-key is encrypted. Give an unencrypted key ...` (exit 2) |
 | Wrong or cut-short ACK | `error: the reply from 127.0.0.1:2575 was not a valid ACK for the message sent (...) after 1 of 2 ACKs. ...` (exit 3) |
 | Empty host | `error: --host is empty.` (exit 2) |
+| Empty MSH-10 | `error: a.hl7 has an empty MSH-10 (control id); nothing sent.` (exit 2) |
 | Empty flag value | `error: --tls-ca is empty.` (exit 2) |
 | Missing or bad file | `error: cannot read the TLS CA file given with --tls-ca.` (exit 2) |
 | One of a pair given | `error: TLS needs both --tls-cert and --tls-key.` or `error: --tls-cert and --tls-key go together.` (exit 2) |
@@ -325,7 +342,7 @@ could do that print only their class name.
 | FHIR server down | `error: no answer from http://localhost:8080/fhir/metadata. Is the server running? Try: hl7bridge doctor` |
 | No `.hl7` files | `error: no *.hl7 files under ./msgs. Try: hl7bridge init` |
 | LF line ends in a file | A note on stdout, not an error: `note: a.hl7 uses LF line ends; converted to CR for sending.` |
-| ACK is AE or AR | On stdout: the code in words, the quarantine reason when MSA-3 starts with one of hl7bridge's own reason codes, and `next: hl7bridge lint <file>`. The receiver's own MSA-3 and ERR text is not printed (it can quote a patient identifier); add `--show-ack-text` to print it (control characters replaced by `?`, length capped) |
+| ACK is AE or AR | On stdout: the code in words, the quarantine reason when MSA-3 starts with one of hl7bridge's own reason codes, and `next: hl7bridge lint <file>`. The receiver's own MSA-3 and ERR text is not printed (it can quote a patient identifier); add `--show-ack-text` to print it for every negative ACK (AE, AR, CE, CR), also one `--expect` names; never for AA or CA (control characters replaced by `?`, length capped) |
 | No ACK in time | `error: no ACK from 127.0.0.1:2575 within 10 s. The message may or may not have been processed.` (exit 3) |
 | Listener not running | `error: cannot connect to 127.0.0.1:2575: connection refused. Never connected, nothing was sent. Is the listener running? Try: hl7bridge listen` |
 | Old database schema | `error: database hl7bridge.db has schema version 1; this hl7bridge needs version 3. There is no migration. Demo databases can be deleted and made again.` |

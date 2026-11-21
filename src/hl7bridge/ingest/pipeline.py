@@ -62,6 +62,7 @@ from . import ack as ackmod
 from .ack import AckDecision, build_ack
 from .parser import (
     collect_obx_text,
+    control_id_of,
     get_control_id,
     get_facilities,
     get_field,
@@ -296,9 +297,13 @@ class IngestPipeline:
                 " quarantined, AR sent",
                 quarantine_error,
             )
+        try:
+            control_id = control_id_of(payload)  # echoed when the MSH is readable
+        except Exception:  # noqa: BLE001  server boundary
+            control_id = ""
         return build_ack(
             decision=decision,
-            original_control_id="UNKNOWN",
+            original_control_id=control_id,
             ack_control_id=self._next_ack_id(),
             sending_app=self.sending_app,
             sending_facility=self.sending_facility,
@@ -338,7 +343,9 @@ class IngestPipeline:
             decision=AckDecision(
                 "AR", ackmod.REASON_PARSE_ERROR, detail, ack_text=_PARSE_ACK_TEXT[cause]
             ),
-            original_control_id="UNKNOWN",
+            # The MSH can often be read when the rest cannot: then the sender
+            # can match this AR to its message. UNKNOWN (from build_ack) otherwise.
+            original_control_id=control_id_of(raw),
             ack_control_id=self._next_ack_id(),
             sending_app=self.sending_app,
             sending_facility=self.sending_facility,

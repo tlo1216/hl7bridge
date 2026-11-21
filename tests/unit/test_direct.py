@@ -676,3 +676,28 @@ def test_two_control_ids_for_one_report_at_once_are_written_one_after_the_other(
         t.join()
     assert acks == [("AA", ""), ("AA", "")]
     assert len(lab.server.data["DiagnosticReport"]) == 1
+
+
+# -- MLLP TLS review: shutdown and parse-error ACKs ------------------------------------
+
+
+def test_close_with_a_timeout_returns_while_a_worker_is_busy(lab, caplog):
+    gate = threading.Event()
+    lab.handler._executor.submit(gate.wait, 30)  # a FHIR call that does not come back
+    start = time.monotonic()
+    try:
+        with caplog.at_level(logging.WARNING, logger="hl7bridge.ingest.direct"):
+            lab.handler.close(timeout=0.3)
+        elapsed = time.monotonic() - start
+    finally:
+        gate.set()
+    assert elapsed < 2.0, elapsed
+    assert "still busy" in caplog.text
+
+
+def test_a_parse_error_ack_names_a_readable_control_id(lab):
+    text = lab.a04()
+    control_id = text.split("\r")[0].split("|")[9]
+    ack = lab.handler.handle_bytes(text.encode().replace(b"PID|", b"PID|\xff", 1))
+    msa = next(s for s in ack.split("\r") if s.startswith("MSA|")).split("|")
+    assert msa[1] == "AR" and msa[2] == control_id

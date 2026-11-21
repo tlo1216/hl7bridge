@@ -46,7 +46,7 @@ percent-encoded, so it holds no space, quote or ``=`` and cannot forge a
 ``key=value`` pair or move the cursor. The line with the peer, SHA-256
 fingerprint, serial and issuer is written at ``NOTICE`` level, which
 ``--quiet`` does not hide; the subject and alternative names, which can hold
-a person's name, are on a separate INFO line.
+a person's name, are on a separate DEBUG line only.
 """
 
 from __future__ import annotations

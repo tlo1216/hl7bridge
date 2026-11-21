@@ -68,6 +68,9 @@ from .ingest.ack import ALL_REASONS
 from .ingest.direct import DirectHandler, DirectLog, check_profiles_for_direct
 from .ingest.loaders import load_outbound, load_studies
 from .ingest.mllp import (
+    MAX_CONNECTIONS,
+    NEGATIVE_ACK_CODES,
+    SHUTDOWN_GRACE_S,
     SendProgress,
     client_ssl_context,
     handshake_failures,
@@ -75,7 +78,7 @@ from .ingest.mllp import (
     server_ssl_context,
     shutdown_server,
 )
-from .ingest.parser import get_field, parse_hl7
+from .ingest.parser import control_id_of, get_field, parse_hl7
 from .jsonout import dumps, to_jsonable
 from .lint import lint_directory, render_lint_text
 from .logsafety import NOTICE, configure_logging, printable, safe_url
@@ -225,24 +228,14 @@ def _fhir_base(args: argparse.Namespace) -> tuple[str, bool]:
     return DEFAULT_FHIR_BASE, False
 
 
-def _warn_plain_http(base: str, headers: dict[str, str], *, patient_data: bool = False) -> None:
-    """Credentials over plain http to another machine can be read on the way.
-    ``patient_data`` (the direct listener) warns without credentials too: the
-    clinical data itself is the thing that crosses the network."""
+def _warn_plain_http(base: str, headers: dict[str, str]) -> None:
+    """Credentials over plain http to another machine can be read on the way."""
     parts = urlsplit(base)
-    if parts.scheme != "http" or parts.hostname in LOOPBACK_HOSTS:
-        return
     has_credentials = bool(headers) or parts.username is not None
-    if has_credentials:
+    if has_credentials and parts.scheme == "http" and parts.hostname not in LOOPBACK_HOSTS:
         print(
             f"warning: sending credentials to {safe_url(base)} over plain http;"
             " anyone on the network path can read them. Use https.",
-            file=sys.stderr,
-        )
-    elif patient_data:
-        print(
-            f"warning: sending patient data to {safe_url(base)} over plain http;"
-            " anyone on the network path can read it. Use https.",
             file=sys.stderr,
         )
 
@@ -687,6 +680,14 @@ def _transmit(
     """Send in order, one ACK at a time, then print the results. Shared by
     ``send`` and ``replay``. Exit 1 when any ACK differs from ``--expect``
     or one is missing; 3 when the listener does not answer in time."""
+    for item in outgoing:
+        if not control_id_of(item.payload):
+            # The ACK names the message by MSH-10: without one, no reply can
+            # be matched to it, so it is never sent.
+            raise UsageError(
+                f"{item.label} has an empty MSH-10 (control id); nothing sent.",
+                hint="Give every message a control id; its ACK is matched by it.",
+            )
     _warn_not_loopback(args.host, tls is not None)
     acks: list[bytes] = []
     progress = SendProgress()
@@ -730,7 +731,7 @@ def _transmit(
                 " Nothing was sent.",
                 hint="Check --tls-ca and that --host matches a name in the certificate.",
             ) from None
-        if isinstance(cause, TimeoutError | ConnectionAbortedError):
+        if isinstance(cause, TimeoutError):  # send_messages says when it is a real stall
             raise NetworkError(
                 f"no TLS handshake with {where} within {args.timeout:g} s. Nothing was sent.",
                 hint="Is the listener running with --tls-cert?",
@@ -829,14 +830,16 @@ def _print_send_results(
     for item, raw in zip(outgoing, acks, strict=False):
         view = _read_ack(raw)
         counts[view.code] += 1
-        if view.code == expect:
+        # The receiver's free text can quote a patient identifier: shown only on
+        # request, and only for a negative ACK, whatever --expect says.
+        text = show_text and view.code in NEGATIVE_ACK_CODES
+        if view.code == expect and not text:
             continue
         words = ACK_CODE_WORDS.get(view.code, "not a known ACK code")
         print(f"{item.label}: {view.code} ({words})")
-        # The receiver's free text can quote a patient identifier: shown only on request.
-        if show_text and view.text:
+        if text and view.text:
             print(f"  MSA-3: {view.text}")
-        if show_text and view.err:
+        if text and view.err:
             print(f"  ERR: {view.err}")
         reason = view.text.split(":", 1)[0].strip()
         if reason in ALL_REASONS:  # only hl7bridge's own reason codes
@@ -1078,7 +1081,7 @@ def _listen_direct(args: argparse.Namespace, tls: ssl.SSLContext | None) -> int:
     _note(args, f"using direct-mode log: {db_path}")
     scope = RunScope(run_id, _lab_tag(registry))
     headers = _fhir_headers()
-    _warn_plain_http(base, headers, patient_data=True)
+    _warn_plain_http(base, headers)
     direct_log = DirectLog(db_path)
     try:
         with HapiClient(base, timeout=args.fhir_timeout, extra_headers=headers) as client:
@@ -1088,7 +1091,8 @@ def _listen_direct(args: argparse.Namespace, tls: ssl.SSLContext | None) -> int:
             try:
                 return _serve_forever(args, handler.handle_frame, handler.handle_junk, where, tls)
             finally:
-                handler.close()
+                # Bounded: a worker still in a FHIR call ends at its own timeout.
+                handler.close(timeout=SHUTDOWN_GRACE_S)
     finally:
         direct_log.close()
 
@@ -1105,9 +1109,19 @@ def _serve_forever(
     tls: ssl.SSLContext | None,
 ) -> int:
 
+    main_thread = _in_main_thread()
+    posix = sys.platform != "win32"
+
     async def run() -> None:
+        main = asyncio.current_task()
+        if posix and main_thread and main is not None:
+            # SIGTERM takes the path of Ctrl+C: the main task is cancelled at
+            # an await, and shutdown_server gives a busy client its grace.
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, main.cancel)
         try:
-            extra: dict[str, Any] = {"ssl_context": tls} if tls else {}
+            extra: dict[str, Any] = (
+                {"ssl_context": tls, "max_connections": args.max_connections} if tls else {}
+            )
             server = await serve(args.host, args.port, handle_frame, handle_junk, **extra)
         except OSError as exc:
             raise _listen_error(args.host, args.port, exc) from None
@@ -1148,12 +1162,14 @@ def _serve_forever(
             ) from None
 
     def stop(_signum: int, _frame: object) -> None:
-        raise KeyboardInterrupt  # SIGTERM stops the listener like Ctrl+C
+        raise KeyboardInterrupt  # Windows: SIGTERM (raised in-process only) as Ctrl+C
 
-    previous = signal.signal(signal.SIGTERM, stop) if _in_main_thread() else None
+    previous = signal.getsignal(signal.SIGTERM) if main_thread else None
+    if not posix and main_thread:
+        signal.signal(signal.SIGTERM, stop)
     try:
         asyncio.run(run())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):  # Ctrl+C, or SIGTERM on POSIX
         failed = handshake_failures()
         print("listener stopped" + (f"; {failed} TLS handshake(s) failed" if failed else ""))
     finally:
@@ -2044,6 +2060,14 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
             help="PEM CA file: require and verify a client certificate from every sender",
         )
         p.add_argument(
+            "--max-connections",
+            type=_positive_int,
+            default=MAX_CONNECTIONS,
+            metavar="N",
+            help=f"with TLS, at most N connections open at once; more are closed and logged"
+            f" (default: {MAX_CONNECTIONS})",
+        )
+        p.add_argument(
             "--target",
             choices=("store", "fhir"),
             default="store",
@@ -2056,7 +2080,7 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         _add_run_id(p)
         p.add_argument(
             "--fhir-timeout",
-            type=_seconds,
+            type=float,
             default=10.0,
             metavar="SECONDS",
             help="with --target fhir, give up on a FHIR request after this long, then AE"

@@ -151,6 +151,21 @@ def get_control_id(message: hl7.Message) -> str:
     return get_field(message, "MSH-10")
 
 
+def control_id_of(raw: bytes) -> str:
+    """MSH-10 of a frame read as ``get_control_id`` reads it (trimmed, first
+    component, escapes decoded), or '' when there is no readable MSH. Only the
+    MSH segment is parsed, so a message whose body is broken or not UTF-8 still
+    names its control id. Sender and listener both use this, so they agree."""
+    text = raw.decode("utf-8", errors="replace").replace("\n", "\r").lstrip("\r")
+    first = text.split("\r", 1)[0]
+    if not first.startswith("MSH"):
+        return ""
+    try:
+        return get_control_id(parse_hl7(first))
+    except (HL7ParseError, ValueError, IndexError, KeyError):
+        return ""
+
+
 def get_facilities(message: hl7.Message) -> tuple[str, str]:
     """(sending facility MSH-4, receiving facility MSH-6)."""
     return get_field(message, "MSH-4"), get_field(message, "MSH-6")

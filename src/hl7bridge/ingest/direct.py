@@ -97,6 +97,7 @@ from ..store.db import utc_iso
 from ..v2fhir import message_to_bundle
 from .ack import AckCode, AckDecision, build_ack
 from .parser import (
+    control_id_of,
     get_control_id,
     get_facilities,
     get_field,
@@ -539,9 +540,27 @@ class DirectHandler:
             max_workers=workers, thread_name_prefix="hl7bridge-direct"
         )
 
-    def close(self) -> None:
-        """Finish the messages in hand and stop the worker threads."""
-        self._executor.shutdown(wait=True)
+    def close(self, timeout: float | None = None) -> None:
+        """Finish the messages in hand and stop the worker threads. With
+        ``timeout``, wait at most that long: a worker still in a FHIR call is
+        left to end on its own (at the FHIR request timeout at the latest; the
+        process exit waits for it) and a warning says so."""
+        if timeout is None:
+            self._executor.shutdown(wait=True)
+            return
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        end = time.monotonic() + timeout
+        workers = list(self._executor._threads)
+        for worker in workers:
+            worker.join(max(0.0, end - time.monotonic()))
+        busy = sum(w.is_alive() for w in workers)
+        if busy:
+            log.warning(
+                "direct mode: %d worker(s) still busy after %g s; each ends when its"
+                " FHIR request does",
+                busy,
+                timeout,
+            )
 
     def _next_ack_id(self) -> str:
         with self._ack_guard:
@@ -645,7 +664,10 @@ class DirectHandler:
             text = raw.decode("utf-8")
             message = parse_hl7(text)
         except (UnicodeDecodeError, HL7ParseError):
-            return early(Outcome("parse_error", "payload is not parseable as HL7 v2"))
+            return early(
+                Outcome("parse_error", "payload is not parseable as HL7 v2"),
+                control_id=control_id_of(raw),  # UNKNOWN when the MSH is unreadable
+            )
         digest = body_hash(text)
         control_id = get_control_id(message)
         msg_type = get_message_type(message)
@@ -807,7 +829,11 @@ class DirectHandler:
             error_type,
             frames,
         )
-        return self._ack(decision, now).encode("utf-8")
+        try:
+            control_id = control_id_of(payload)  # echoed when the MSH is readable
+        except Exception:  # noqa: BLE001  server boundary
+            control_id = ""
+        return self._ack(decision, now, control_id=control_id).encode("utf-8")
 
     async def handle_junk(self, data: bytes) -> None:
         now = self.clock()
