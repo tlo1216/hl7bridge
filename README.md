@@ -226,6 +226,10 @@ follows and where hl7bridge differs is in [docs/mapping.md](docs/mapping.md),
 which is generated from the code. A code that is not in its table is
 refused with the field position; it is never guessed.
 
+[docs/conformance.md](docs/conformance.md) compares synthetic messages with
+the HL7 v2-to-FHIR IG 1.0.0, showing both matches and gaps from fresh
+`to-fhir` runs. Regenerate it with `python tools/check_conformance.py`.
+
 `send` sends each message in its own MLLP frame (a file can hold several),
 reads stdin (`-`), sends a set several times with `--repeat`,
 paces itself with `--rate` (messages per second), and with `--expect AE`

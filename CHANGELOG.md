@@ -9,6 +9,10 @@ profile format may still change between minor versions.
 
 ### Added
 
+- Reproducible IG 1.0.0 conformance evidence in `docs/conformance.md`, with
+  synthetic ADT A01/A04/A08/A40, ORM O01 and ORU R01 fixtures, a separate
+  structured-number rejection probe, a CLI comparison tool and regression tests.
+
 - `to-fhir` and `fhir sync` map ADT^A40 (patient merge). The surviving
   Patient (PID) is merged as for any ADT; the merged-away Patient (MRG-1) is
   set inactive with a `replaced-by` link to the survivor, keeping what the
