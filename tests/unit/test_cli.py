@@ -551,7 +551,7 @@ class _FakeServer:
     async def wait_closed(self) -> None:
         return None
 
-    async def serve_forever(self):
+    async def start_serving(self):
         raise self.error
 
 

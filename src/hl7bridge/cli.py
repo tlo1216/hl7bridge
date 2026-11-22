@@ -1194,9 +1194,14 @@ def _serve_forever(
                 file=sys.stderr,
             )
         try:
-            # serve_forever waits for every client when it is cancelled (Python
-            # 3.12), so it runs as its own task: the clients are closed first.
-            serving = asyncio.ensure_future(server.serve_forever())
+            # Not serve_forever: once cancelled it waits for every client
+            # (3.12) or closes them all, a busy one too (3.13). start_server
+            # already accepts; this task only waits until it is cancelled.
+            async def wait_forever() -> None:
+                await server.start_serving()
+                await asyncio.get_running_loop().create_future()
+
+            serving = asyncio.ensure_future(wait_forever())
             try:
                 await asyncio.shield(serving)
             finally:

@@ -1101,7 +1101,7 @@ class _FakeServer:
     async def wait_closed(self) -> None:
         return None
 
-    async def serve_forever(self):
+    async def start_serving(self):
         mllp._note_handshake_failure(("203.0.113.9", 1), ssl.SSLError("x"))
         raise self.error
 
