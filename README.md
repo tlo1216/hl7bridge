@@ -15,7 +15,9 @@ defects, so every result can be checked against known answers.
 > patient names come from pools like `ZZZTEST ALPHA`, MRNs look like
 > `MA1001`. hl7bridge is not a certified medical device and has not had a
 > security review for real patient data. Do not point it at real PHI
-> without your own review. MLLP has no encryption or authentication.
+> without your own review. MLLP has no authentication, and encryption is
+> optional: see [MLLP over TLS](#mllp-over-tls) and
+> [docs/threat-model.md](docs/threat-model.md).
 
 ## Install
 
@@ -253,6 +255,39 @@ never changes a stored message: a retry carries the same MSH-7 and MSH-10.
 Neither `send` nor `replay` prints a value from the message; a host that is
 not loopback gets a warning, since MLLP has no encryption.
 
+## MLLP over TLS
+
+Off by default. Plain MLLP is unchanged. TLS 1.2 is the minimum, and there is
+no fallback to plain text or to unverified certificates.
+
+```
+# listener: TLS
+hl7bridge listen --tls-cert server.pem --tls-key server.key
+# listener: also require and verify a client certificate (mutual TLS)
+hl7bridge listen --tls-cert server.pem --tls-key server.key --tls-ca clients-ca.pem
+
+# sender: verify the listener against your CA, host name included
+hl7bridge send a.hl7 --host lis.example.org --tls-ca server-ca.pem
+# sender: also present a client certificate
+hl7bridge send a.hl7 --host lis.example.org --tls-ca server-ca.pem --tls-cert client.pem --tls-key client.key
+```
+
+`send` and `replay` check that `--host` matches a name in the server
+certificate, so use the name, not an IP address, unless the certificate has
+an IP address entry (the common name is never used). `--tls` alone uses the
+system CA store. Neither `--tls` nor `--tls-ca` consults the Windows
+Disallowed store (certificates an administrator has blocked): `--tls-ca`
+narrows which issuers are trusted, but a blocked certificate from a trusted
+issuer still passes. Errors name the flag or the reason and never print a key, a
+flag value or any message content, and `send` never prints a receiver's
+negative-ACK text unless `--show-ack-text` is given. An ACK counts only when it
+is an ACK whose MSA-2 is the MSH-10 sent; `send` does not send a message with no
+usable MSH-10, while `replay` sends quarantined bytes as they are. An empty
+`--host` is refused. The listener does
+not check revocation, and on Windows only Ctrl+C stops it cleanly (see
+[docs/cli.md](docs/cli.md)). See the
+[threat model](docs/threat-model.md) for what TLS does and does not cover.
+
 ## Direct to FHIR for a teaching lab
 
 `listen --target fhir` is the engine for a lab where students send HL7 v2
@@ -364,7 +399,7 @@ Most integration defects are born at boundaries, so the diagram shows those
 rather than components. Solid arrows carry clinical payloads; in a real
 deployment every arrow crossing the hospital boundary carries PHI and runs
 over site-to-site VPN or TLS, because MLLP itself has neither encryption nor
-authentication.
+authentication (hl7bridge can add TLS; see MLLP over TLS).
 
 ```mermaid
 flowchart LR
@@ -559,7 +594,7 @@ reports: see [SECURITY.md](SECURITY.md). Changes: see
 
 ```
 Dockerfile  compose.demo.yaml  compose.hapi-port.yaml
-docs/                    # cli, mapping, profiles, principles, testing, ADRs
+docs/                    # cli, mapping, profiles, principles, testing, threat model, ADRs
 src/hl7bridge/
   cli.py  config.py  errors.py  hl7time.py  logsafety.py
   demo.py    # hl7bridge demo

@@ -103,10 +103,44 @@ class ListenError(BridgeError):
     exit_code = EXIT_USAGE
 
 
+class TlsConfigError(BridgeError):
+    """A TLS certificate, key or CA file is missing or unusable."""
+
+    exit_code = EXIT_USAGE
+
+
 class NetworkError(BridgeError):
     """A listener or server did not answer, or the connection broke."""
 
     exit_code = EXIT_CONNECTION
+
+
+class ConnectError(NetworkError):
+    """The sender never connected to the listener: nothing was written.
+    ``cause`` is the OS error (refused, no route, unknown host, timed out)."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+class TlsHandshakeError(NetworkError):
+    """The TCP connection was made but the TLS handshake failed before any
+    frame was written. ``cause`` is the ssl or timeout error."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+class AckProtocolError(NetworkError):
+    """The peer's answer to a frame was not a valid ACK for it: the ACK was
+    cut short, was not an ACK, or answered another message (MSA-2 is not the
+    MSH-10 sent). ``reason`` is fixed text; nothing the peer wrote is kept."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class StoreError(BridgeError):

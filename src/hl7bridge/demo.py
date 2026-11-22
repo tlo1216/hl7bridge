@@ -134,7 +134,9 @@ def _replay(pipeline: IngestPipeline, payloads: list[bytes]) -> list[bytes]:
         server = await serve(LISTEN_HOST, 0, pipeline.handle_frame, pipeline.handle_junk)
         port = server.sockets[0].getsockname()[1]
         try:
-            return await send_messages(LISTEN_HOST, port, payloads)
+            # The synthetic feed holds faults on purpose, a message without a
+            # control id among them, to show its quarantine.
+            return await send_messages(LISTEN_HOST, port, payloads, allow_missing_control_id=True)
         finally:
             server.close()
             await server.wait_closed()

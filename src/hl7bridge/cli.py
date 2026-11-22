@@ -12,17 +12,22 @@ import argparse
 import asyncio
 import errno
 import logging
+import math
 import os
 import re
+import signal
 import socket
 import sqlite3
+import ssl
 import sys
+import threading
 import traceback
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import yaml
@@ -40,13 +45,16 @@ from .errors import (
     EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_USAGE,
+    AckProtocolError,
     BridgeError,
     ConfigError,
+    ConnectError,
     FhirPostError,
     HL7ParseError,
     ListenError,
     MappingError,
     NetworkError,
+    TlsHandshakeError,
     UsageError,
 )
 from .explain import as_json, explain_message, render_text, split_messages
@@ -59,10 +67,24 @@ from .ingest import IngestPipeline, send_messages, serve
 from .ingest.ack import ALL_REASONS
 from .ingest.direct import DirectHandler, DirectLog, check_profiles_for_direct
 from .ingest.loaders import load_outbound, load_studies
-from .ingest.parser import get_field, parse_hl7
+from .ingest.mllp import (
+    MAX_CONNECTIONS,
+    MAX_CONNECTIONS_PER_ADDRESS,
+    MAX_PENDING_PER_ADDRESS,
+    NEGATIVE_ACK_CODES,
+    SHUTDOWN_GRACE_S,
+    SendProgress,
+    client_ssl_context,
+    handshake_failures,
+    has_control_id,
+    log_handshake_total,
+    server_ssl_context,
+    shutdown_server,
+)
+from .ingest.parser import bounded_field, control_id_of, parse_hl7
 from .jsonout import dumps, to_jsonable
 from .lint import lint_directory, render_lint_text
-from .logsafety import configure_logging, printable, safe_url
+from .logsafety import NOTICE, configure_logging, printable, safe_url
 from .msgfiles import display_key, hl7_files
 from .profiles import Resolved, resolve_db, resolve_profiles
 from .reconcile import reconcile, render_reconcile_text
@@ -580,11 +602,12 @@ def _read_ack(raw: bytes) -> _AckView:
     """The ACK fields ``send`` shows. The receiver wrote them, so the code
     must look like an ACK code and the texts lose control characters."""
     message = parse_hl7(raw.decode("utf-8", errors="replace"))
-    err_parts = [get_field(message, f) for f in ("ERR-3", "ERR-1")]
-    code = get_field(message, "MSA-1") or ""
+    # Bounded reads: an escape that would expand or cannot be read shows as nothing.
+    err_parts = [bounded_field(message, f) or "" for f in ("ERR-3", "ERR-1")]
+    code = bounded_field(message, "MSA-1") or ""
     return _AckView(
         code=code if _ACK_CODE.fullmatch(code) else "??",
-        text=printable(get_field(message, "MSA-3") or ""),
+        text=printable(bounded_field(message, "MSA-3") or ""),
         err=printable(next((p for p in err_parts if p), "")),
     )
 
@@ -599,7 +622,54 @@ class _Outgoing:
     next_step: str
 
 
-def _warn_not_loopback(host: str) -> None:
+def _no_empty_tls_values(args: argparse.Namespace) -> None:
+    """An empty value (an unset variable) is a mistake, never "no TLS"."""
+    for name in ("tls_ca", "tls_cert", "tls_key"):
+        if getattr(args, name, None) == "":
+            flag = "--" + name.replace("_", "-")
+            raise UsageError(
+                f"{flag} is empty.",
+                hint="Give a file path. An unset shell variable gives an empty value.",
+            )
+
+
+def _check_host(args: argparse.Namespace) -> None:
+    """An empty host (an unset shell variable) is a mistake: a sender would
+    connect to this machine and skip the host name check, a listener would
+    bind every interface."""
+    host = getattr(args, "host", None)
+    if host is not None and not host.strip():
+        raise UsageError(
+            "--host is empty.",
+            hint="Give a host name or address. An unset shell variable gives an empty value.",
+        )
+
+
+def _sender_tls(args: argparse.Namespace) -> ssl.SSLContext | None:
+    """The TLS context for ``send`` and ``replay``, or None for plain MLLP."""
+    _no_empty_tls_values(args)
+    ca, cert, key = args.tls_ca, args.tls_cert, args.tls_key
+    if not (args.tls or ca is not None or cert is not None or key is not None):
+        return None
+    if (cert is None) != (key is None):
+        raise UsageError("--tls-cert and --tls-key go together.")
+    return client_ssl_context(ca, cert, key)
+
+
+def _listener_tls(args: argparse.Namespace) -> ssl.SSLContext | None:
+    """The TLS context for ``listen``, or None for plain MLLP."""
+    _no_empty_tls_values(args)
+    cert, key, ca = (getattr(args, n, None) for n in ("tls_cert", "tls_key", "tls_ca"))
+    if cert is None and key is None and ca is None:
+        return None
+    if cert is None or key is None:
+        raise UsageError("TLS needs both --tls-cert and --tls-key.")
+    return server_ssl_context(cert, key, ca)
+
+
+def _warn_not_loopback(host: str, tls: bool = False) -> None:
+    if tls:
+        return
     if host not in LOOPBACK_HOSTS:
         print(
             f"warning: sending to {host}, which is not loopback. MLLP has no encryption;"
@@ -608,12 +678,47 @@ def _warn_not_loopback(host: str) -> None:
         )
 
 
-def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) -> int:
+def _check_control_ids(outgoing: list[_Outgoing]) -> None:
+    """``send`` only: the ACK names a message by MSH-10 alone, so a message
+    without one an ACK can name, or two different messages with the same one,
+    are refused before anything is sent. The same bytes twice (``--repeat``)
+    are one message."""
+    seen: dict[str, bytes] = {}
+    for item in outgoing:
+        if not has_control_id(item.payload):
+            raise UsageError(
+                f"{item.label} has no usable MSH-10 (control id): it is empty, UNKNOWN,"
+                " not UTF-8, or holds an escape other than a separator or hex escape;"
+                " nothing sent.",
+                hint="Give every message a control id; its ACK is matched by it.",
+            )
+        first = seen.setdefault(control_id_of(item.payload), item.payload)
+        if first != item.payload:
+            raise UsageError(
+                f"{item.label} has the same MSH-10 (control id) as an earlier message with"
+                " other content; nothing sent.",
+                hint="Give each message its own control id; its ACK is matched by it.",
+            )
+
+
+def _transmit(
+    args: argparse.Namespace,
+    outgoing: list[_Outgoing],
+    source: str,
+    tls: ssl.SSLContext | None,
+    *,
+    replay: bool = False,
+) -> int:
     """Send in order, one ACK at a time, then print the results. Shared by
     ``send`` and ``replay``. Exit 1 when any ACK differs from ``--expect``
-    or one is missing; 3 when the listener does not answer in time."""
-    _warn_not_loopback(args.host)
+    or one is missing; 3 when the listener does not answer in time. A replay
+    also sends stored bytes with no control id (a quarantined message): only
+    a negative ``UNKNOWN`` ACK answers those."""
+    if not replay:
+        _check_control_ids(outgoing)
+    _warn_not_loopback(args.host, tls is not None)
     acks: list[bytes] = []
+    progress = SendProgress()
     where = f"{args.host}:{args.port}"
     interval = 1.0 / args.rate if args.rate else 0.0
     payloads = [o.payload for o in outgoing]
@@ -626,27 +731,72 @@ def _transmit(args: argparse.Namespace, outgoing: list[_Outgoing], source: str) 
                 ack_timeout_s=args.timeout,
                 acks=acks,
                 interval_s=interval,
+                ssl_context=tls,
+                progress=progress,
+                allow_missing_control_id=replay,
             )
         )
+    except ConnectError as exc:
+        cause = exc.cause
+        if isinstance(cause, ConnectionRefusedError):
+            reason = "connection refused"
+        elif isinstance(cause, socket.gaierror):
+            reason = "unknown host"
+        elif isinstance(cause, TimeoutError):
+            reason = "timed out"
+        else:
+            reason = (
+                "no connection (" + (getattr(cause, "strerror", None) or type(cause).__name__) + ")"
+            )
+        raise NetworkError(
+            f"cannot connect to {where}: {printable(reason)}. Never connected, nothing was sent.",
+            hint="Is the listener running? Try: hl7bridge listen",
+        ) from None
+    except TlsHandshakeError as exc:
+        cause = exc.cause
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            raise NetworkError(
+                f"the TLS certificate from {where} was refused: {cause.verify_message}."
+                " Nothing was sent.",
+                hint="Check --tls-ca and that --host matches a name in the certificate.",
+            ) from None
+        if isinstance(cause, TimeoutError):  # send_messages says when it is a real stall
+            raise NetworkError(
+                f"no TLS handshake with {where} within {args.timeout:g} s. Nothing was sent.",
+                hint="Is the listener running with --tls-cert?",
+            ) from None
+        reason = getattr(cause, "reason", None) or type(cause).__name__
+        raise NetworkError(
+            f"the TLS handshake with {where} failed: {reason}. Nothing was sent.",
+            hint="The listener may need a client certificate (--tls-cert, --tls-key),"
+            " or may not use TLS.",
+        ) from None
+    except AckProtocolError as exc:
+        _print_send_results(outgoing, acks, source, args, progress.written)
+        raise NetworkError(
+            f"the reply from {where} was not a valid ACK for the message sent ({exc.reason})"
+            f" after {len(acks)} of {len(payloads)} ACKs."
+            " The message after the last ACK may or may not have been processed.",
+            hint="Only an ACK that answers the message sent counts; this one was not kept.",
+        ) from None
     except TimeoutError:
-        _print_send_results(outgoing, acks, source, args.expect)
+        _print_send_results(outgoing, acks, source, args, progress.written)
         raise NetworkError(
             f"no ACK from {where} within {args.timeout:g} s."
             " The message may or may not have been processed."
         ) from None
-    except (ConnectionRefusedError, socket.gaierror) as exc:
-        reason = "connection refused" if isinstance(exc, ConnectionRefusedError) else "unknown host"
-        raise NetworkError(
-            f"cannot connect to {where}: {reason}. Is the listener running?",
-            hint="Try: hl7bridge listen",
-        ) from None
-    except (ConnectionError, OSError) as exc:
-        _print_send_results(outgoing, acks, source, args.expect)
+    except (ConnectionError, OSError) as exc:  # includes ssl.SSLError after the handshake
+        _print_send_results(outgoing, acks, source, args, progress.written)
         raise NetworkError(
             f"the connection to {where} broke ({type(exc).__name__})"
             f" after {len(acks)} of {len(payloads)} ACKs."
+            " The message after the last ACK may or may not have been processed.",
+            hint="With TLS, a listener that does not use TLS, or that wants a client"
+            " certificate, ends the connection like this."
+            if tls is not None
+            else "",
         ) from None
-    return _print_send_results(outgoing, acks, source, args.expect)
+    return _print_send_results(outgoing, acks, source, args, progress.written)
 
 
 def _split_frames(payload: bytes) -> list[bytes]:
@@ -666,6 +816,8 @@ def _split_frames(payload: bytes) -> list[bytes]:
 
 
 def cmd_send(args: argparse.Namespace) -> int:
+    _check_host(args)
+    tls = _sender_tls(args)  # a bad TLS option fails before any message is read
     outgoing: list[_Outgoing] = []
     for item in _inputs(args):
         payload, converted = _to_cr(item.data)
@@ -689,29 +841,47 @@ def cmd_send(args: argparse.Namespace) -> int:
     source = STDIN_NAME if _reads_stdin(args) else str(_message_path(args))
     # --repeat sends the same bytes again, never restamped: a listener that
     # keys on the control id answers AA and stores nothing new.
-    return _transmit(args, outgoing * args.repeat, source)
+    return _transmit(args, outgoing * args.repeat, source, tls)
 
 
 def _print_send_results(
-    outgoing: list[_Outgoing], acks: list[bytes], source: str, expect: str
+    outgoing: list[_Outgoing],
+    acks: list[bytes],
+    source: str,
+    args: argparse.Namespace,
+    written: int,
 ) -> int:
+    """``written`` is how many frames reached the connection: a message past
+    that was never put on the wire."""
+    expect = args.expect
+    show_text = bool(getattr(args, "show_ack_text", False))
     counts: Counter[str] = Counter()
     for item, raw in zip(outgoing, acks, strict=False):
         view = _read_ack(raw)
         counts[view.code] += 1
-        if view.code == expect:
+        # The receiver's free text can quote a patient identifier: shown only on
+        # request, and only for a negative ACK, whatever --expect says.
+        text = show_text and view.code in NEGATIVE_ACK_CODES
+        if view.code == expect and not text:
             continue
         words = ACK_CODE_WORDS.get(view.code, "not a known ACK code")
         print(f"{item.label}: {view.code} ({words})")
-        if view.text:
+        if text and view.text:
             print(f"  MSA-3: {view.text}")
-        if view.err:
+        if text and view.err:
             print(f"  ERR: {view.err}")
         reason = view.text.split(":", 1)[0].strip()
         if reason in ALL_REASONS:  # only hl7bridge's own reason codes
             print(f"  quarantine reason: {reason}")
         print(f"  next: {item.next_step}")
-    print(f"sent {len(outgoing)} message(s) from {source}, got {len(acks)} ACK(s)")
+    # Messages go one at a time, each after the last ACK: only the one written
+    # last, if any, is without an ACK and on the wire.
+    for n, item in enumerate(outgoing[len(acks) :], start=len(acks)):
+        if n < written:
+            print(f"{item.label}: no ACK (it may or may not have been processed)")
+        else:
+            print(f"{item.label}: not sent")
+    print(f"sent {written} message(s) from {source}, got {len(acks)} ACK(s)")
     for code in sorted(counts):
         print(f"  {code}: {counts[code]}")
     if expect != "AA":
@@ -793,6 +963,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
             )
     if args.since:
         _now_arg(args.since, "--since")  # a bad time is a usage error before anything opens
+    _check_host(args)
+    # The TLS options are checked before the store is read, so an empty
+    # selection or a dry run cannot pass a configuration that would fail later.
+    tls = _sender_tls(args)
     conn = _readonly_db(args)
     try:
         rows = _replay_rows(args, conn)
@@ -835,7 +1009,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         )
         for row in rows
     ]
-    return _transmit(args, outgoing, f"the {args.source}")
+    return _transmit(args, outgoing, f"the {args.source}", tls, replay=True)
 
 
 def cmd_synth(args: argparse.Namespace) -> int:
@@ -920,7 +1094,7 @@ def _named_fhir_base(args: argparse.Namespace, command: str) -> str:
     return base
 
 
-def _listen_direct(args: argparse.Namespace) -> int:
+def _listen_direct(args: argparse.Namespace, tls: ssl.SSLContext | None) -> int:
     base = _named_fhir_base(args, "listen --target fhir")
     run_id = _run_id(args)
     registry = _registry(args)
@@ -938,17 +1112,30 @@ def _listen_direct(args: argparse.Namespace) -> int:
     headers = _fhir_headers()
     _warn_plain_http(base, headers)
     direct_log = DirectLog(db_path)
+    idle = True
     try:
-        with HapiClient(base, timeout=args.fhir_timeout, extra_headers=headers) as client:
+        client = HapiClient(base, timeout=args.fhir_timeout, extra_headers=headers)
+        try:
             _require_metadata(client, base)
             handler = DirectHandler(registry, client, scope, direct_log)
             where = f"FHIR {safe_url(base)}, run {run_id}, log {db_path}"
             try:
-                return _serve_forever(args, handler.handle_frame, handler.handle_junk, where)
+                return _serve_forever(args, handler.handle_frame, handler.handle_junk, where, tls)
             finally:
-                handler.close()
+                idle = False  # a Ctrl+C inside close() must not close under a worker
+                idle = handler.close(timeout=SHUTDOWN_GRACE_S)
+        finally:
+            # A worker still busy may be in a commit: its client and log stay
+            # open so it can record the outcome; the process exit waits for it.
+            if idle:
+                client.close()
     finally:
-        direct_log.close()
+        if idle:
+            direct_log.close()
+
+
+def _in_main_thread() -> bool:
+    return threading.current_thread() is threading.main_thread()
 
 
 def _serve_forever(
@@ -956,40 +1143,101 @@ def _serve_forever(
     handle_frame: Callable[[bytes], Awaitable[bytes]],
     handle_junk: Callable[[bytes], Awaitable[None]],
     where: str,
+    tls: ssl.SSLContext | None,
 ) -> int:
+
+    main_thread = _in_main_thread()
+    posix = sys.platform != "win32"
+
     async def run() -> None:
+        main = asyncio.current_task()
+        if posix and main_thread and main is not None:
+            # SIGTERM takes the path of Ctrl+C: the main task is cancelled at
+            # an await, and shutdown_server gives a busy client its grace. A
+            # repeat while that runs is ignored, so it cannot cut the grace.
+            def terminate(task: asyncio.Task[None] = main) -> None:
+                if not task.cancelling():
+                    task.cancel()
+
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, terminate)
         try:
-            server = await serve(args.host, args.port, handle_frame, handle_junk)
+            extra: dict[str, Any] = (
+                {
+                    "ssl_context": tls,
+                    "max_connections": args.max_connections,
+                    "max_connections_per_address": args.max_connections_per_address,
+                    "max_pending_per_address": args.max_pending_per_address,
+                }
+                if tls
+                else {}
+            )
+            server = await serve(args.host, args.port, handle_frame, handle_junk, **extra)
         except OSError as exc:
             raise _listen_error(args.host, args.port, exc) from None
         bound = server.sockets[0].getsockname()[1] if server.sockets else args.port
         # Printed only once the socket is bound, so it is never a false claim.
-        print(f"MLLP listener on {args.host}:{bound}, {where} (Ctrl+C to stop)", flush=True)
-        if args.host not in LOOPBACK_HOSTS:
+        mode = "MLLP over TLS" if tls else "MLLP"
+        if tls and getattr(args, "tls_ca", None):
+            mode += " (client certificates required)"
+        print(f"{mode} listener on {args.host}:{bound}, {where} (Ctrl+C to stop)", flush=True)
+        if args.host not in LOOPBACK_HOSTS and not tls:
             print(
                 f"warning: {args.host} is not loopback. MLLP has no encryption or"
                 " authentication; other machines can now send to this listener.",
                 file=sys.stderr,
             )
+        elif args.host not in LOOPBACK_HOSTS and not getattr(args, "tls_ca", None):
+            print(
+                f"warning: {args.host} is not loopback and no --tls-ca is set. TLS encrypts"
+                " the traffic but does not authenticate senders; any machine that can reach"
+                " the port can still send to this listener.",
+                file=sys.stderr,
+            )
         try:
-            async with server:
-                await server.serve_forever()
+            # Not serve_forever: once cancelled it waits for every client
+            # (3.12) or closes them all, a busy one too (3.13). start_server
+            # already accepts; this task only waits until it is cancelled.
+            async def wait_forever() -> None:
+                await server.start_serving()
+                await asyncio.get_running_loop().create_future()
+
+            serving = asyncio.ensure_future(wait_forever())
+            try:
+                await asyncio.shield(serving)
+            finally:
+                # Idle clients are closed at once, a busy one gets a grace period.
+                await shutdown_server(server)
+                serving.cancel()
+                await asyncio.gather(serving, return_exceptions=True)
         except OSError as exc:
             raise NetworkError(
                 f"the listener on {args.host}:{bound} stopped:"
                 f" {exc.strerror or type(exc).__name__}."
             ) from None
 
+    def stop(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt  # Windows: SIGTERM (raised in-process only) as Ctrl+C
+
+    previous = signal.getsignal(signal.SIGTERM) if main_thread else None
+    if not posix and main_thread:
+        signal.signal(signal.SIGTERM, stop)
     try:
         asyncio.run(run())
-    except KeyboardInterrupt:
-        print("listener stopped")
+    except (KeyboardInterrupt, asyncio.CancelledError):  # Ctrl+C, or SIGTERM on POSIX
+        failed = handshake_failures()
+        print("listener stopped" + (f"; {failed} TLS handshake(s) failed" if failed else ""))
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+        log_handshake_total()  # any shutdown, not only Ctrl+C
     return EXIT_OK
 
 
 def cmd_listen(args: argparse.Namespace) -> int:
+    _check_host(args)  # an empty host would bind every interface
+    tls = _listener_tls(args)  # before any store is opened or server contacted
     if args.target == "fhir":
-        return _listen_direct(args)
+        return _listen_direct(args, tls)
     for flag in ("run_id", "mapping_module", "fhir_base"):
         if getattr(args, flag, None):
             raise UsageError(f"--{flag.replace('_', '-')} applies to --target fhir only.")
@@ -998,7 +1246,9 @@ def cmd_listen(args: argparse.Namespace) -> int:
     conn = connect(db_path)
     pipeline = IngestPipeline(registry, conn)
     try:
-        return _serve_forever(args, pipeline.handle_frame, pipeline.handle_junk, f"db {db_path}")
+        return _serve_forever(
+            args, pipeline.handle_frame, pipeline.handle_junk, f"db {db_path}", tls
+        )
     finally:
         conn.close()
 
@@ -1600,7 +1850,7 @@ def _common_options() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="only errors on stderr; no 'using ...' lines",
+        help="only errors (and TLS security notices) on stderr; no 'using ...' lines",
     )
     common.add_argument(
         "--debug",
@@ -1682,15 +1932,47 @@ def _rate(value: str) -> float:
     return rate
 
 
+def _seconds(value: str) -> float:
+    """A wait in seconds: a finite number above 0 (nan, inf, 0 and negatives are refused)."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError(f"{value} is not a finite number above 0")
+    return seconds
+
+
 ACK_CODES = ("AA", "AE", "AR", "CA", "CE", "CR")
 
 
 def _add_sender(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--tls",
+        action="store_true",
+        help="use MLLP over TLS (TLS 1.2 or newer; the certificate and host name are checked;"
+        " implied by the other --tls options)",
+    )
+    p.add_argument(
+        "--tls-ca",
+        metavar="FILE",
+        help="PEM file of the CA that signed the listener's certificate (default: system CAs)",
+    )
+    p.add_argument(
+        "--tls-cert", metavar="FILE", help="PEM client certificate to present (needs --tls-key)"
+    )
+    p.add_argument("--tls-key", metavar="FILE", help="PEM private key for --tls-cert")
     p.add_argument("--host", default="127.0.0.1", help="listener host (default: 127.0.0.1)")
     p.add_argument("--port", type=_port, default=2575, help="listener port (default: 2575)")
     p.add_argument(
+        "--show-ack-text",
+        action="store_true",
+        help="print the free text of a negative ACK (MSA-3, ERR); it is the receiver's own"
+        " words and can quote patient data, so it is off by default",
+    )
+    p.add_argument(
         "--timeout",
-        type=float,
+        type=_seconds,
         default=10.0,
         metavar="SECONDS",
         help="wait this long for each ACK (default: 10)",
@@ -1820,6 +2102,41 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         _add_config(p)
         p.add_argument("--host", default="127.0.0.1", help="address to bind (default: 127.0.0.1)")
         p.add_argument("--port", type=_port, default=2575, help="port to bind (default: 2575)")
+        p.add_argument(
+            "--tls-cert",
+            metavar="FILE",
+            help="PEM certificate: serve MLLP over TLS 1.2 or newer (needs --tls-key)",
+        )
+        p.add_argument("--tls-key", metavar="FILE", help="PEM private key for --tls-cert")
+        p.add_argument(
+            "--tls-ca",
+            metavar="FILE",
+            help="PEM CA file: require and verify a client certificate from every sender",
+        )
+        p.add_argument(
+            "--max-connections",
+            type=_positive_int,
+            default=MAX_CONNECTIONS,
+            metavar="N",
+            help=f"with TLS, at most N connections open at once; more are closed and logged"
+            f" (default: {MAX_CONNECTIONS})",
+        )
+        p.add_argument(
+            "--max-connections-per-address",
+            type=_positive_int,
+            default=MAX_CONNECTIONS_PER_ADDRESS,
+            metavar="N",
+            help="with TLS, at most N connections open at once from one address"
+            f" (default: {MAX_CONNECTIONS_PER_ADDRESS})",
+        )
+        p.add_argument(
+            "--max-pending-per-address",
+            type=_positive_int,
+            default=MAX_PENDING_PER_ADDRESS,
+            metavar="N",
+            help="with TLS, at most N handshakes pending at once from one address"
+            f" (default: {MAX_PENDING_PER_ADDRESS})",
+        )
         p.add_argument(
             "--target",
             choices=("store", "fhir"),
@@ -2038,7 +2355,7 @@ def _log_level(args: argparse.Namespace) -> int:
     if getattr(args, "debug", False):
         return logging.DEBUG
     if getattr(args, "quiet", False):
-        return logging.ERROR
+        return NOTICE  # hides WARNING and below, keeps TLS security notices and errors
     verbose = getattr(args, "verbose", 0) or 0
     if verbose >= 2:
         return logging.DEBUG

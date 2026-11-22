@@ -676,3 +676,88 @@ def test_two_control_ids_for_one_report_at_once_are_written_one_after_the_other(
         t.join()
     assert acks == [("AA", ""), ("AA", "")]
     assert len(lab.server.data["DiagnosticReport"]) == 1
+
+
+# -- MLLP TLS review: shutdown and parse-error ACKs ------------------------------------
+
+
+def test_close_with_a_timeout_returns_while_a_worker_is_busy(lab, caplog):
+    gate, started = threading.Event(), threading.Event()
+
+    def stuck() -> None:  # a FHIR call that does not come back
+        started.set()
+        gate.wait(30)
+
+    lab.handler._executor.submit(stuck)
+    assert started.wait(10)  # running, not still queued when close cancels the queue
+    start = time.monotonic()
+    try:
+        with caplog.at_level(logging.WARNING, logger="hl7bridge.ingest.direct"):
+            lab.handler.close(timeout=0.3)
+        elapsed = time.monotonic() - start
+    finally:
+        gate.set()
+    assert elapsed < 2.0, elapsed
+    assert "still busy" in caplog.text
+
+
+def test_a_parse_error_ack_names_a_readable_control_id(lab):
+    text = lab.a04()
+    control_id = text.split("\r")[0].split("|")[9]
+    ack = lab.handler.handle_bytes(text.encode().replace(b"PID|", b"PID|\xff", 1))
+    msa = next(s for s in ack.split("\r") if s.startswith("MSA|")).split("|")
+    assert msa[1] == "AR" and msa[2] == control_id
+
+
+def test_a_commit_in_flight_at_shutdown_still_gets_its_log_row(
+    registry, server, tmp_path, monkeypatch
+):
+    from hl7bridge import cli
+
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(body):
+        entered.set()
+        release.wait(10)
+        return None
+
+    server.before_commit = slow
+    logs: list[DirectLog] = []
+
+    class KeptLog(DirectLog):
+        def __init__(self, path) -> None:
+            super().__init__(path)
+            logs.append(self)
+
+    def client(base_url: str, **kwargs) -> HapiClient:
+        kwargs.pop("transport", None)
+        return HapiClient(base_url, transport=server.transport(), **kwargs)
+
+    patient = server.data["Patient"]["p1"]
+    text = Renderer(registry.by_id["LAB"], NOW).adt("A04", patient, pick_mrn(patient), "V1")
+    futures = []
+
+    def serve_one(args, handle_frame, handle_junk, where, tls):
+        handler = handle_frame.__self__
+        futures.append(handler._executor.submit(handler.handle_bytes, text.encode()))
+        assert entered.wait(10)  # the worker is inside its FHIR commit
+        return 0  # and the listener stops now, as on Ctrl+C
+
+    monkeypatch.setattr(cli, "HapiClient", client)
+    monkeypatch.setattr(cli, "DirectLog", KeptLog)
+    monkeypatch.setattr(cli, "_serve_forever", serve_one)
+    monkeypatch.setattr(cli, "SHUTDOWN_GRACE_S", 0.2)
+    args = ["listen", "--target", "fhir", "--fhir-base", BASE, "--run-id", "run-a"]
+    args += ["--config", str(tmp_path / "profiles"), "--db", str(tmp_path / "d.db")]
+    try:
+        rc = cli.main(args)
+        release.set()
+        ack = futures[0].result(10)
+        rows = logs[0].conn.execute("SELECT ack_code, reason FROM direct_log").fetchall()
+    finally:
+        release.set()
+        for kept in logs:
+            kept.close()
+    assert rc == 0
+    assert "\rMSA|AA|" in ack
+    assert rows == [("AA", COMMITTED)]

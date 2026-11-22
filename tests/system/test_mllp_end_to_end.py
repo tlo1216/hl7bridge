@@ -29,7 +29,8 @@ def flow(tmp_path_factory):
         server = await serve("127.0.0.1", 0, pipeline.handle_frame, pipeline.handle_junk)
         port = server.sockets[0].getsockname()[1]
         try:
-            return await send_messages("127.0.0.1", port, payloads)
+            # The seeded defects include a message without a control id.
+            return await send_messages("127.0.0.1", port, payloads, allow_missing_control_id=True)
         finally:
             server.close()
             await server.wait_closed()
