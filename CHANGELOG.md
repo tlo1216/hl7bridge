@@ -5,7 +5,7 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-21
 
 ### Fixed
 
