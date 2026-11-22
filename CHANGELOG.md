@@ -20,15 +20,18 @@ profile format may still change between minor versions.
   control characters dropped, then compared; `send` also refuses an MSH-10
   that is `UNKNOWN` or empty after that reading, and two different messages
   whose MSH-10 reads the same. An ACK now needs exactly one MSH, and MSA-1 must
-  be an ACK code before MSA-2 is compared; an `UNKNOWN` MSA-2 counts only in a
-  negative ACK, whatever was sent. Reading an ACK's fields can no longer expand
-  an escape past the frame or raise. `send_messages` raises ValueError before
-  connecting when a payload has no usable control id, unless
-  `allow_missing_control_id=True`. New `listen` flags
+  be exactly one ACK code (the whole field) before MSA-2 is compared; an
+  `UNKNOWN` MSA-2 counts only in a negative ACK, whatever was sent. Reading an ACK's fields can no longer expand
+  an escape past the frame or raise. `send_messages` raises ValueError when it
+  reaches a payload with no usable control id, before writing it, and sends
+  nothing more, unless `allow_missing_control_id=True`; it still reads its
+  input one message at a time. An MSH whose encoding characters repeat a
+  separator is a parse error, not an AssertionError. New `listen` flags
   `--max-connections-per-address` (default 32) and `--max-pending-per-address`
   (default 4); `serve` refuses a connection limit below 1. A TLS upgrade that
   ends with no transport is a failed handshake on both sides, not an
-  AttributeError. A second SIGTERM during the shutdown is ignored. The
+  AttributeError. A second SIGTERM is ignored while the event loop runs;
+  after it returns, one can stop the wait for the FHIR workers. The
   client-certificate issuer is logged at DEBUG only, like the subject. A
   sender whose first address family is unavailable tries the next lookup
   result. `docs/threat-model.md` has a Known limits section.

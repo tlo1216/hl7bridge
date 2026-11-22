@@ -2416,16 +2416,17 @@ def test_an_ack_text_with_a_bad_escape_is_shown_without_a_crash(tmp_path, capsys
     assert ": AE (" in captured.out
 
 
-# S5: the library refuses a message without a control id before writing anything
+# S5: the library refuses a message without a control id before writing it
 
 
 def test_send_messages_refuses_a_message_without_a_control_id_before_writing():
+    later = _with_control_id(b"LATER01")
     with (
-        _scripted_listener(_good, _good) as (port, seen),
-        pytest.raises(ValueError, match="MSH-10"),
+        _scripted_listener(_good, _good, _good) as (port, seen),
+        pytest.raises(ValueError, match=r"MSH-10.*nothing more sent"),
     ):
-        asyncio.run(send_messages("127.0.0.1", port, [MSG, _with_control_id(b"")]))
-    assert seen == []
+        asyncio.run(send_messages("127.0.0.1", port, [MSG, _with_control_id(b""), later]))
+    assert seen == [MSG]  # the one before it went; it and the rest did not
 
 
 # S6: one address cannot hold every open connection; the limits are checked
@@ -2634,3 +2635,113 @@ def test_a_socket_failure_on_one_address_tries_the_next(monkeypatch):
     with TlsServer(None) as srv:
         monkeypatch.setattr(mllp, "socket", fake)
         assert asyncio.run(send_messages("localhost", srv.port, [MSG], ack_timeout_s=5)) == [ACK]
+
+
+# -- Round 7 ----------------------------------------------------------------------------
+
+
+# send_messages streams: an iterator is read one message at a time
+
+
+def test_send_messages_reads_an_iterator_one_message_at_a_time():
+    acks: list[bytes] = []
+    taken: list[int] = []
+
+    def stream():
+        for n in range(3):
+            taken.append(len(acks))  # ACKs already in when message n is taken
+            yield _with_control_id(f"STREAM{n}".encode())
+
+    with _scripted_listener(_good, _good, _good) as (port, seen):
+        asyncio.run(send_messages("127.0.0.1", port, stream(), acks=acks))
+    assert taken == [0, 1, 2] and len(seen) == len(acks) == 3
+
+
+# python-hl7 asserts on an MSH whose encoding characters repeat a separator
+
+_REPEATED_ENCODING = b"MSH|^^~&|A|B|C|D|20261121||ADT^A01|X1|P|2.5"
+
+
+def test_repeated_encoding_characters_are_a_parse_error():
+    from hl7bridge.errors import HL7ParseError
+    from hl7bridge.ingest.parser import control_id_of, parse_hl7
+
+    with pytest.raises(HL7ParseError):
+        parse_hl7(_REPEATED_ENCODING.decode())
+    assert control_id_of(_REPEATED_ENCODING) == ""
+
+
+def test_the_listener_rejects_and_replay_reports_repeated_encoding_characters(tmp_path, capsys):
+    source = tmp_path / "source.db"
+    _fill_quarantine(source, _REPEATED_ENCODING + b"\r", b"not hl7 at all")
+    assert _store_rows(source) == (0, 2)
+    with _Listener(tmp_path / "target.db") as listener:
+        rc = cli.main(
+            ["replay", "--from", "quarantine", "--db", str(source), "--port", str(listener.port)]
+        )
+    captured = capsys.readouterr()
+    assert rc == EXIT_FINDINGS, captured.err
+    assert "not a valid ACK" not in captured.err
+    assert "got 2 ACK(s)" in captured.out and "  AR: 2" in captured.out
+    assert _store_rows(tmp_path / "target.db") == (0, 2)
+
+
+# A Ctrl+C while the direct workers are joined closes nothing under them
+
+
+def test_a_ctrl_c_during_the_worker_join_leaves_the_client_and_log_open(tmp_path, monkeypatch):
+    import argparse
+
+    closed: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+
+    class Handler:
+        handle_frame = handle_junk = None
+
+        def __init__(self, *_a) -> None:
+            pass
+
+        def close(self, timeout: float) -> bool:
+            raise KeyboardInterrupt
+
+    for name, value in {
+        "_named_fhir_base": lambda *_a: "http://127.0.0.1:9/fhir",
+        "_run_id": lambda _a: "r1",
+        "_registry": lambda _a: None,
+        "check_profiles_for_direct": lambda _r: None,
+        "_load_hooks": lambda _a: None,
+        "_lab_tag": lambda _r: ("urn:x", "y"),
+        "RunScope": lambda *_a: None,
+        "_fhir_headers": dict,
+        "_warn_plain_http": lambda *_a: None,
+        "DirectLog": lambda _p: Resource("log"),
+        "HapiClient": lambda *_a, **_k: Resource("client"),
+        "_require_metadata": lambda *_a: None,
+        "DirectHandler": Handler,
+        "_serve_forever": lambda *_a: 0,
+    }.items():
+        monkeypatch.setattr(cli, name, value)
+    args = argparse.Namespace(
+        mapping_module=None, host="127.0.0.1", db=str(tmp_path / "d.db"), fhir_timeout=5.0
+    )
+    with pytest.raises(KeyboardInterrupt):
+        cli._listen_direct(args, None)
+    assert closed == []
+
+
+# MSA-1 is exactly one ACK code: the whole field
+
+
+@pytest.mark.parametrize(
+    "msa1", [b"AA~AR", b"AA^AE", b"AA&x", b"AA~AA", b" AA"], ids=lambda v: v.decode()
+)
+def test_msa1_must_be_exactly_one_ack_code(msa1):
+    with pytest.raises(AckProtocolError, match="MSA-1"):
+        mllp.check_ack(MSG, _HEADER + b"MSA|" + msa1 + b"|SMPA0001\r")
+    mllp.check_ack(MSG, _HEADER + b"MSA|AA|SMPA0001\r")

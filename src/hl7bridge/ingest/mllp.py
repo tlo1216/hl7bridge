@@ -39,6 +39,7 @@ from .parser import (
     get_segment_count,
     normalize_control_id,
     parse_hl7,
+    raw_field,
 )
 
 log = logging.getLogger(__name__)
@@ -684,8 +685,9 @@ def has_control_id(payload: bytes) -> bool:
 def check_ack(payload: bytes, ack: bytes) -> None:
     """Raise ``AckProtocolError`` unless ``ack`` answers ``payload``: an HL7
     ACK (MSH first, the only MSH, MSH-9 ``ACK``) with exactly one MSA, whose
-    MSA-1 is an ACK code and whose MSA-2 is the MSH-10 sent. Both ids are read
-    the same way (``control_id_of``: trimmed, first component, separator and
+    whole MSA-1 is exactly an ACK code (no components or repeats) and whose
+    MSA-2 is the MSH-10 sent. Both ids are read the same way
+    (``control_id_of``: trimmed, first component, separator and
     hex escapes decoded, control characters dropped), so an escaped echo
     matches; any other escape in MSA-2 is refused unread. hl7bridge's listener
     answers ``UNKNOWN`` when it cannot read the MSH or MSH-10 is empty: that
@@ -703,7 +705,7 @@ def check_ack(payload: bytes, ack: bytes) -> None:
             raise AckProtocolError("the reply is not an ACK (MSH-9)")
         if get_segment_count(message, "MSA") != 1:
             raise AckProtocolError("the reply does not hold exactly one MSA segment")
-        code = bounded_field(message, "MSA-1")
+        code = raw_field(message, "MSA-1")  # the whole field: no component or repeat
         answered = bounded_field(message, "MSA-2")
     except (HL7ParseError, ValueError, IndexError, KeyError):
         raise AckProtocolError("the reply is not an HL7 message") from None
@@ -791,9 +793,10 @@ async def send_messages(
     """Send each payload as one MLLP frame and collect the ACK responses.
 
     A payload that no ACK can name (``has_control_id`` is false: MSH-10 empty,
-    unreadable or ``UNKNOWN``) raises ValueError before anything is sent,
-    unless ``allow_missing_control_id`` (a replay of quarantined bytes); then
-    only a negative ``UNKNOWN`` ACK answers it.
+    unreadable or ``UNKNOWN``) raises ValueError when it is reached, before it
+    is written, and nothing more is sent (payloads are read one at a time, so
+    an iterator streams), unless ``allow_missing_control_id`` (a replay of
+    quarantined bytes); then only a negative ``UNKNOWN`` ACK answers it.
     A missing or late ACK raises TimeoutError; silence is never success. An
     ACK that is cut short, is not one ACK, or answers another message (see
     ``check_ack``) raises ``AckProtocolError``; it is never collected.
@@ -819,13 +822,6 @@ async def send_messages(
             "the TLS context must verify the server: check_hostname on and"
             " verify_mode CERT_REQUIRED (see client_ssl_context)."
         )
-    payloads = list(payloads)
-    if not allow_missing_control_id:
-        for n, payload in enumerate(payloads, start=1):
-            if not has_control_id(payload):
-                raise ValueError(
-                    f"message {n} has no MSH-10 (control id) an ACK can name; nothing sent"
-                )
     loop = asyncio.get_running_loop()
     deadline = loop.time() + ack_timeout_s
     try:
@@ -858,6 +854,11 @@ async def send_messages(
     clean = False
     try:
         for i, payload in enumerate(payloads):
+            # Checked as each one is taken, so an iterator is never read ahead.
+            if not allow_missing_control_id and not has_control_id(payload):
+                raise ValueError(
+                    f"message {i + 1} has no MSH-10 (control id) an ACK can name; nothing more sent"
+                )
             if i and interval_s > 0:
                 await asyncio.sleep(interval_s)
             ack = await asyncio.wait_for(

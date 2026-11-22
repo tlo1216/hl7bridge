@@ -38,6 +38,8 @@ def parse_hl7(raw: str) -> hl7.Message:
         return hl7.parse(normalized)
     except (hl7.ParseException, ValueError, IndexError) as exc:
         raise HL7ParseError(f"not parseable as HL7 v2: {exc}") from exc
+    except AssertionError as exc:  # python-hl7 asserts on repeated encoding characters
+        raise HL7ParseError("not parseable as HL7 v2: bad MSH encoding characters") from exc
 
 
 def split_field_ref(ref: str) -> tuple[str, int]:

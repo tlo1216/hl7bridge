@@ -67,6 +67,11 @@ Of MLLP over TLS and `send` and `replay`, as of the final review:
   ends with a protocol error instead of its AA.
 - At a clean stop of `listen --target fhir`, a frame still waiting for a worker
   is dropped unprocessed: no ACK went out, so its sender resends it.
+- Two control ids that differ only by an escaped control character get
+  different audit keys in direct mode but one ACK id.
+- An ACK that hex-escapes a UTF-8 control id byte by byte is rejected.
+- A second SIGTERM after the event loop returns can stop a commit in flight in
+  direct mode (`listen --target fhir`).
 
 ## Out of scope
 

@@ -75,8 +75,9 @@ together). The reported value is the one that applied. A name lookup that does
 not return is abandoned at the deadline; it does not hold the exit.
 
 An ACK counts only when it answers the message sent: the reply must start with
-MSH, hold exactly one MSH and one MSA, have MSH-9 `ACK` and an MSA-1 that is an
-ACK code (AA, AE, AR, CA, CE, CR), and its MSA-2 must be the outbound MSH-10.
+MSH, hold exactly one MSH and one MSA, have MSH-9 `ACK` and an MSA-1 that is
+exactly one ACK code (AA, AE, AR, CA, CE, CR; the whole field, no components
+or repeats), and its MSA-2 must be the outbound MSH-10.
 Both are read the same way, the way the listener reads them (leading
 whitespace skipped, trimmed, first component, separator and hex escapes
 decoded, control characters dropped), so hl7bridge's own listener, which echoes
@@ -111,9 +112,12 @@ client whose message is still being handled gets 5 seconds, then is cut. With
 `--target fhir` the listener then waits up to 5 more seconds for its FHIR
 workers. A worker still busy is left to finish its message and write its log
 row: the FHIR client and the direct-mode log stay open for it, and the process
-exits only when it is done. That can take longer than `--fhir-timeout`, which
-bounds each request, not the several requests one message can need. A repeated
-SIGTERM during the shutdown is ignored. At most
+exits only when it is done. That can take longer than `--fhir-timeout`: it is
+an httpx timeout, so it bounds each phase of each request (connecting, each
+read, each write, waiting for a pooled connection) on its own, not a whole
+request and not the several requests one message can need. A repeated SIGTERM
+is ignored while the event loop runs (the client grace above); after it
+returns, a second SIGTERM can stop the wait for the FHIR workers. At most
 `--max-connections` TLS connections (default 256) may be open at once, at most
 `--max-connections-per-address` of those from one address (default 32), at most
 64 may wait to finish a handshake, and at most `--max-pending-per-address` of

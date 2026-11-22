@@ -1122,6 +1122,7 @@ def _listen_direct(args: argparse.Namespace, tls: ssl.SSLContext | None) -> int:
             try:
                 return _serve_forever(args, handler.handle_frame, handler.handle_junk, where, tls)
             finally:
+                idle = False  # a Ctrl+C inside close() must not close under a worker
                 idle = handler.close(timeout=SHUTDOWN_GRACE_S)
         finally:
             # A worker still busy may be in a commit: its client and log stay
