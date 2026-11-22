@@ -42,6 +42,8 @@ Off by default; a listener started without these flags speaks plain MLLP.
 | `listen` | `--tls-cert FILE`, `--tls-key FILE` | Serve TLS 1.2 or newer. Both are needed together |
 | `listen` | `--tls-ca FILE` | Also require a client certificate that chains to this CA |
 | `listen` | `--max-connections N` | With TLS, at most N connections open at once (default 256) |
+| `listen` | `--max-connections-per-address N` | With TLS, at most N of those from one address (default 32) |
+| `listen` | `--max-pending-per-address N` | With TLS, at most N handshakes pending at once from one address (default 4) |
 | `send`, `replay` | `--tls` | Use TLS with the system CA store (on Windows the CA and ROOT stores; see below) |
 | `send`, `replay` | `--tls-ca FILE` | Trust only this CA for the listener's certificate (implies `--tls`) |
 | `send`, `replay` | `--tls-cert FILE`, `--tls-key FILE` | Present a client certificate (implies `--tls`; both together) |
@@ -73,14 +75,21 @@ together). The reported value is the one that applied. A name lookup that does
 not return is abandoned at the deadline; it does not hold the exit.
 
 An ACK counts only when it answers the message sent: the reply must start with
-MSH, have MSH-9 `ACK` and exactly one MSA, and its MSA-2 must be the outbound
-MSH-10. Both are read the same way (trimmed, first component, HL7 escapes
-decoded), so hl7bridge's own listener, which echoes the decoded id with
-separators escaped, always matches. `UNKNOWN` (what hl7bridge's listener
-answers when it cannot read the MSH) counts only in a negative ACK (AE, AR, CE,
-CR), never in an AA or CA. A message with an empty MSH-10 is refused before
-anything is sent (exit 2): no reply could be matched to it. This also applies to
-`replay` of a quarantined message that has none. A cut-short ACK, a reply that
+MSH, hold exactly one MSH and one MSA, have MSH-9 `ACK` and an MSA-1 that is an
+ACK code (AA, AE, AR, CA, CE, CR), and its MSA-2 must be the outbound MSH-10.
+Both are read the same way, the way the listener reads them (leading
+whitespace skipped, trimmed, first component, separator and hex escapes
+decoded, control characters dropped), so hl7bridge's own listener, which echoes
+the decoded id with separators escaped, always matches. Any other escape in
+MSA-2 is refused unread, and an MSH that is not UTF-8 names no control id.
+`UNKNOWN` (what hl7bridge's listener answers when it cannot read the MSH)
+counts only in a negative ACK (AE, AR, CE, CR), never in an AA or CA, even for
+a message whose MSH-10 is `UNKNOWN`. `send` refuses before anything is sent
+(exit 2) a message with no MSH-10 an ACK can name (empty after that reading,
+`UNKNOWN`, not UTF-8, or with another escape), and two different messages
+whose MSH-10 reads the same; the same bytes again (`--repeat`) are fine.
+`replay` sends stored bytes as they are, also a quarantined message with no
+control id; only the listener's negative `UNKNOWN` ACK answers it. A cut-short ACK, a reply that
 is not one ACK, or another message's ACK ends the run as an error (exit 3) with
 the ACKs already confirmed kept in the results; it is never counted. The `sent`
 total counts frames written, not messages queued.
@@ -100,17 +109,23 @@ writes neither the total nor any shutdown line. On a clean stop idle clients
 are closed immediately, a client still in its handshake is cancelled, and a
 client whose message is still being handled gets 5 seconds, then is cut. With
 `--target fhir` the listener then waits up to 5 more seconds for its FHIR
-workers; a worker still in a FHIR request is left to finish, and the process
-exits when that request ends (at `--fhir-timeout` at the latest). At most
+workers. A worker still busy is left to finish its message and write its log
+row: the FHIR client and the direct-mode log stay open for it, and the process
+exits only when it is done. That can take longer than `--fhir-timeout`, which
+bounds each request, not the several requests one message can need. A repeated
+SIGTERM during the shutdown is ignored. At most
 `--max-connections` TLS connections (default 256) may be open at once, at most
-64 may wait to finish a handshake, and at most 4 of those from one address;
+`--max-connections-per-address` of those from one address (default 32), at most
+64 may wait to finish a handshake, and at most `--max-pending-per-address` of
+those from one address (default 4);
 more are closed, with one log line a minute. The per-peer failure table keeps
 1024 peers. For each accepted client certificate it logs one line with the
-peer, the SHA-256 fingerprint, serial and issuer, every value percent-encoded
+peer, the SHA-256 fingerprint and serial, every value percent-encoded
 so it holds no space or `=` and cannot start another field; this line is
-written at a level that `--quiet` does not hide. The subject and subject
-alternative names, which can hold a person's name, an email address or a URI
-query, are logged only at DEBUG (`-vv`). `--timeout` must be a finite number
+written at a level that `--quiet` does not hide. The subject, subject
+alternative names and issuer, which can hold a person's name, an email address
+or a URI query (a self-issued certificate's issuer is its subject), are logged
+only at DEBUG (`-vv`). `--timeout` must be a finite number
 above 0. Failures:
 
 | Case | Message |
@@ -123,7 +138,8 @@ above 0. Failures:
 | Encrypted key | `error: the TLS server private key given with --tls-key is encrypted. Give an unencrypted key ...` (exit 2) |
 | Wrong or cut-short ACK | `error: the reply from 127.0.0.1:2575 was not a valid ACK for the message sent (...) after 1 of 2 ACKs. ...` (exit 3) |
 | Empty host | `error: --host is empty.` (exit 2) |
-| Empty MSH-10 | `error: a.hl7 has an empty MSH-10 (control id); nothing sent.` (exit 2) |
+| No usable MSH-10 | `error: a.hl7 has no usable MSH-10 (control id): it is empty, UNKNOWN, not UTF-8, or holds an escape other than a separator or hex escape; nothing sent.` (exit 2) |
+| Shared MSH-10 | `error: b.hl7 has the same MSH-10 (control id) as an earlier message with other content; nothing sent.` (exit 2) |
 | Empty flag value | `error: --tls-ca is empty.` (exit 2) |
 | Missing or bad file | `error: cannot read the TLS CA file given with --tls-ca.` (exit 2) |
 | One of a pair given | `error: TLS needs both --tls-cert and --tls-key.` or `error: --tls-cert and --tls-key go together.` (exit 2) |

@@ -33,8 +33,13 @@ from ..errors import (
     TlsHandshakeError,
 )
 from ..logsafety import NOTICE, printable
-from .ack import ack_value
-from .parser import control_id_of, get_field, get_segment_count, parse_hl7
+from .parser import (
+    bounded_field,
+    control_id_of,
+    get_segment_count,
+    normalize_control_id,
+    parse_hl7,
+)
 
 log = logging.getLogger(__name__)
 
@@ -386,11 +391,24 @@ def _fingerprint(writer: asyncio.StreamWriter) -> str:
     return hashlib.sha256(der).hexdigest() if der else "unknown"
 
 
+async def _upgrade(writer: asyncio.StreamWriter, ctx: ssl.SSLContext, **kw: Any) -> None:
+    """``writer.start_tls``. When the loop hands back no TLS transport (the
+    connection went during the upgrade), asyncio fails on None: that is a
+    ConnectionResetError here, with the plain transport put back so the
+    writer can still be closed."""
+    plain = writer.transport
+    try:
+        await writer.start_tls(ctx, **kw)
+    except AttributeError:
+        writer._transport = plain  # type: ignore[attr-defined]
+        raise ConnectionResetError("the connection closed during the TLS upgrade") from None
+
+
 async def _start_tls(writer: asyncio.StreamWriter, ctx: ssl.SSLContext) -> bool:
     """Upgrade an accepted connection to TLS. False (closed) when it fails."""
     peer = writer.get_extra_info("peername")
     try:
-        await writer.start_tls(ctx, ssl_handshake_timeout=HANDSHAKE_TIMEOUT_S)
+        await _upgrade(writer, ctx, ssl_handshake_timeout=HANDSHAKE_TIMEOUT_S)
     except (ssl.SSLError, OSError, TimeoutError) as exc:
         _note_handshake_failure(peer, exc)
         writer.close()
@@ -398,23 +416,24 @@ async def _start_tls(writer: asyncio.StreamWriter, ctx: ssl.SSLContext) -> bool:
     ident = _identity(writer.get_extra_info("peercert"))
     if ident:
         # A verified client always gets this line, whatever its subject. It
-        # names the certificate by fingerprint, serial and issuer; the subject
-        # and alternative names, which can hold a person's name, an email
+        # names the certificate by fingerprint and serial; the subject, the
+        # alternative names and the issuer (the subject again for a
+        # self-issued certificate), which can hold a person's name, an email
         # address or a URI query, are in a second line at DEBUG only.
         fingerprint = _fingerprint(writer)
         log.log(
             NOTICE,
-            "mllp client certificate peer=%s sha256=%s serial=%s issuer=%s",
+            "mllp client certificate peer=%s sha256=%s serial=%s",
             _peer_text(peer),
             fingerprint,
             ident["serial"],
-            ident["issuer"],
         )
         log.debug(
-            "mllp client certificate details sha256=%s subject=%s san=%s",
+            "mllp client certificate details sha256=%s subject=%s san=%s issuer=%s",
             fingerprint,
             ident["subject"],
             ident["san"],
+            ident["issuer"],
         )
     return True
 
@@ -435,6 +454,7 @@ SHUTDOWN_GRACE_S = 5.0
 MAX_PENDING_HANDSHAKES = 64
 MAX_PENDING_PER_ADDRESS = 4
 MAX_CONNECTIONS = 256
+MAX_CONNECTIONS_PER_ADDRESS = 32
 _refused_pending = 0
 _refused_log_at: float | None = None
 
@@ -503,20 +523,33 @@ async def serve(
     max_pending_handshakes: int = MAX_PENDING_HANDSHAKES,
     max_pending_per_address: int = MAX_PENDING_PER_ADDRESS,
     max_connections: int = MAX_CONNECTIONS,
+    max_connections_per_address: int = MAX_CONNECTIONS_PER_ADDRESS,
 ) -> asyncio.Server:
     """Start the MLLP listener. Caller owns the returned server's lifetime and
     ends it with ``shutdown_server``. Pass ``ssl_context`` (see
     ``server_ssl_context``) for MLLP over TLS. Then at most ``max_connections``
-    TLS connections may be open at once, at most ``max_pending_handshakes`` may
-    be waiting to finish a handshake, and at most ``max_pending_per_address``
-    of those from one address; a connection past a limit is closed and logged.
+    TLS connections may be open at once and ``max_connections_per_address``
+    from one address, at most ``max_pending_handshakes`` may be waiting to
+    finish a handshake, and at most ``max_pending_per_address`` of those from
+    one address; a connection past a limit is closed and logged. Every limit
+    must be at least 1 (ValueError otherwise).
     ``host`` must name an address: an empty one would bind every interface."""
     if not host.strip():
         raise ValueError("host must not be empty")
+    limits = {
+        "max_pending_handshakes": max_pending_handshakes,
+        "max_pending_per_address": max_pending_per_address,
+        "max_connections": max_connections,
+        "max_connections_per_address": max_connections_per_address,
+    }
+    for name, value in limits.items():
+        if value < 1:
+            raise ValueError(f"{name} must be at least 1")
     clients: set[_Client] = set()
     pending = 0
     pending_from: dict[str, int] = {}  # address -> handshakes; no entry at zero
     open_tls = 0
+    open_from: dict[str, int] = {}  # address -> open connections; no entry at zero
 
     async def connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal pending, open_tls
@@ -533,6 +566,12 @@ async def serve(
             refused: tuple[str, int, int] | None = None
             if open_tls >= max_connections:
                 refused = ("open TLS connections", open_tls, max_connections)
+            elif open_from.get(address, 0) >= max_connections_per_address:
+                refused = (
+                    "open TLS connections from one address",
+                    open_from[address],
+                    max_connections_per_address,
+                )
             elif pending >= max_pending_handshakes:
                 refused = ("pending TLS handshakes", pending, max_pending_handshakes)
             elif pending_from.get(address, 0) >= max_pending_per_address:
@@ -546,6 +585,7 @@ async def serve(
                 writer.close()
                 return
             open_tls += 1  # held from admission through disconnect
+            open_from[address] = open_from.get(address, 0) + 1
             try:
                 pending += 1
                 pending_from[address] = pending_from.get(address, 0) + 1
@@ -562,6 +602,9 @@ async def serve(
                     await _handle_connection(reader, writer, handler, on_junk, client)
             finally:
                 open_tls -= 1
+                open_from[address] -= 1
+                if not open_from[address]:
+                    del open_from[address]
         finally:
             clients.discard(client)
 
@@ -625,32 +668,55 @@ class SendProgress:
     written: int = 0
 
 
+ACK_CODES = frozenset({"AA", "AE", "AR", "CA", "CE", "CR"})
 NEGATIVE_ACK_CODES = frozenset({"AE", "AR", "CE", "CR"})
+UNKNOWN_CONTROL_ID = "UNKNOWN"
+
+
+def has_control_id(payload: bytes) -> bool:
+    """True when an ACK can name ``payload``: its MSH-10 is readable (see
+    ``control_id_of``), not empty and not ``UNKNOWN``, which only ever counts
+    in a negative ACK."""
+    sent = control_id_of(payload)
+    return bool(sent) and sent != UNKNOWN_CONTROL_ID
 
 
 def check_ack(payload: bytes, ack: bytes) -> None:
     """Raise ``AckProtocolError`` unless ``ack`` answers ``payload``: an HL7
-    ACK (MSH first, MSH-9 ``ACK``) with exactly one MSA, whose MSA-2 is the
-    MSH-10 sent. Both are read the same way (trimmed, first component, HL7
-    escapes decoded, control characters dropped), so an escaped echo matches.
-    hl7bridge's listener answers ``UNKNOWN`` when it cannot read the MSH or
-    MSH-10 is empty: that counts only in a negative ACK (AE, AR, CE, CR), never
-    in an AA or CA, so a message without a control id is never confirmed."""
+    ACK (MSH first, the only MSH, MSH-9 ``ACK``) with exactly one MSA, whose
+    MSA-1 is an ACK code and whose MSA-2 is the MSH-10 sent. Both ids are read
+    the same way (``control_id_of``: trimmed, first component, separator and
+    hex escapes decoded, control characters dropped), so an escaped echo
+    matches; any other escape in MSA-2 is refused unread. hl7bridge's listener
+    answers ``UNKNOWN`` when it cannot read the MSH or MSH-10 is empty: that
+    counts only in a negative ACK (AE, AR, CE, CR), never in an AA or CA,
+    whatever was sent, so a message without a control id is never confirmed."""
     sent = control_id_of(payload)
     if not ack.lstrip(b"\r\n").startswith(b"MSH"):
         raise AckProtocolError("the reply does not start with an MSH segment")
     try:
-        message = parse_hl7(ack.decode("utf-8", errors="replace"))
-    except HL7ParseError:
+        # Bytes that are not UTF-8 stay distinct (surrogates), never equal.
+        message = parse_hl7(ack.decode("utf-8", errors="surrogateescape"))
+        if get_segment_count(message, "MSH") != 1:
+            raise AckProtocolError("the reply does not hold exactly one MSH segment")
+        if bounded_field(message, "MSH-9") != "ACK":
+            raise AckProtocolError("the reply is not an ACK (MSH-9)")
+        if get_segment_count(message, "MSA") != 1:
+            raise AckProtocolError("the reply does not hold exactly one MSA segment")
+        code = bounded_field(message, "MSA-1")
+        answered = bounded_field(message, "MSA-2")
+    except (HL7ParseError, ValueError, IndexError, KeyError):
         raise AckProtocolError("the reply is not an HL7 message") from None
-    if get_field(message, "MSH-9") != "ACK":
-        raise AckProtocolError("the reply is not an ACK (MSH-9)")
-    if get_segment_count(message, "MSA") != 1:
-        raise AckProtocolError("the reply does not hold exactly one MSA segment")
-    answered = get_field(message, "MSA-2")
-    if sent and ack_value(answered) == ack_value(sent):
-        return
-    if answered == "UNKNOWN" and get_field(message, "MSA-1") in NEGATIVE_ACK_CODES:
+    if code not in ACK_CODES:
+        raise AckProtocolError("MSA-1 is not an ACK code")
+    if answered is None:
+        raise AckProtocolError("MSA-2 holds an escape sequence that is not read")
+    answered = normalize_control_id(answered)
+    if answered == UNKNOWN_CONTROL_ID:
+        if code in NEGATIVE_ACK_CODES:
+            return
+        raise AckProtocolError("an UNKNOWN MSA-2 counts only in a negative ACK")
+    if sent and answered == sent:
         return
     raise AckProtocolError("the ACK does not answer the message sent (MSA-2 is not its MSH-10)")
 
@@ -691,7 +757,11 @@ async def _open_connection(
     loop = asyncio.get_running_loop()
     last: OSError = OSError(f"no address found for port {port}")
     for family, kind, proto, _name, address in await _resolve(host, port):
-        sock = socket.socket(family, kind, proto)
+        try:
+            sock = socket.socket(family, kind, proto)
+        except OSError as exc:  # an address family this machine lacks: try the next
+            last = exc
+            continue
         try:
             sock.setblocking(False)
             await loop.sock_connect(sock, address)
@@ -716,9 +786,14 @@ async def send_messages(
     interval_s: float = 0.0,
     ssl_context: ssl.SSLContext | None = None,
     progress: SendProgress | None = None,
+    allow_missing_control_id: bool = False,
 ) -> list[bytes]:
     """Send each payload as one MLLP frame and collect the ACK responses.
 
+    A payload that no ACK can name (``has_control_id`` is false: MSH-10 empty,
+    unreadable or ``UNKNOWN``) raises ValueError before anything is sent,
+    unless ``allow_missing_control_id`` (a replay of quarantined bytes); then
+    only a negative ``UNKNOWN`` ACK answers it.
     A missing or late ACK raises TimeoutError; silence is never success. An
     ACK that is cut short, is not one ACK, or answers another message (see
     ``check_ack``) raises ``AckProtocolError``; it is never collected.
@@ -744,6 +819,13 @@ async def send_messages(
             "the TLS context must verify the server: check_hostname on and"
             " verify_mode CERT_REQUIRED (see client_ssl_context)."
         )
+    payloads = list(payloads)
+    if not allow_missing_control_id:
+        for n, payload in enumerate(payloads, start=1):
+            if not has_control_id(payload):
+                raise ValueError(
+                    f"message {n} has no MSH-10 (control id) an ACK can name; nothing sent"
+                )
     loop = asyncio.get_running_loop()
     deadline = loop.time() + ack_timeout_s
     try:
@@ -756,7 +838,8 @@ async def send_messages(
         try:
             if remaining <= 0:
                 raise TimeoutError("no time left for the TLS handshake")
-            await writer.start_tls(
+            await _upgrade(
+                writer,
                 ssl_context,
                 server_hostname=host,
                 ssl_handshake_timeout=remaining,

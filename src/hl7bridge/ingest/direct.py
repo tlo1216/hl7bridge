@@ -540,14 +540,17 @@ class DirectHandler:
             max_workers=workers, thread_name_prefix="hl7bridge-direct"
         )
 
-    def close(self, timeout: float | None = None) -> None:
+    def close(self, timeout: float | None = None) -> bool:
         """Finish the messages in hand and stop the worker threads. With
-        ``timeout``, wait at most that long: a worker still in a FHIR call is
-        left to end on its own (at the FHIR request timeout at the latest; the
-        process exit waits for it) and a warning says so."""
+        ``timeout``, wait at most that long, and frames not yet started are
+        dropped (no ACK went out, so their senders resend them). A worker
+        still busy is left to finish its message, which can take several FHIR
+        requests, and a warning says so; the process exit waits for it. True
+        when every worker has finished: only then may the client and the log
+        it uses be closed."""
         if timeout is None:
             self._executor.shutdown(wait=True)
-            return
+            return True
         self._executor.shutdown(wait=False, cancel_futures=True)
         end = time.monotonic() + timeout
         workers = list(self._executor._threads)
@@ -556,11 +559,12 @@ class DirectHandler:
         busy = sum(w.is_alive() for w in workers)
         if busy:
             log.warning(
-                "direct mode: %d worker(s) still busy after %g s; each ends when its"
-                " FHIR request does",
+                "direct mode: %d worker(s) still busy after %g s; each finishes and logs"
+                " its message before the process exits",
                 busy,
                 timeout,
             )
+        return not busy
 
     def _next_ack_id(self) -> str:
         with self._ack_guard:

@@ -11,6 +11,7 @@ values returned here are plain text and must NOT be unescaped again.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import hl7
 
@@ -151,19 +152,62 @@ def get_control_id(message: hl7.Message) -> str:
     return get_field(message, "MSH-10")
 
 
+# An identifier (MSH-10, MSA-2) and an ACK code are read with separator and
+# hex escapes only. Neither decodes longer than it was sent, so a reply cannot
+# make the reader allocate past the frame size, as a formatting escape such
+# as \.sp99999999\ would, and a malformed one cannot raise.
+_ID_ESCAPE_OK = re.compile(r"[FRSTE]|X(?:[0-9A-Fa-f]{2})+")
+
+
+def bounded_field(
+    message: hl7.Message, ref: str, *, component: int = 1, segment_num: int = 1
+) -> str | None:
+    """``get_field`` for a field whose escapes are all separator or hex
+    escapes. None when it holds any other escape, a malformed one, or hex
+    that is not text (decoded to a replacement character, it would make
+    distinct values equal)."""
+    raw = raw_field(message, ref, segment_num=segment_num)
+    esc = message.esc
+    if esc and esc in raw:
+        parts = raw.split(esc)
+        if len(parts) % 2 == 0 or not all(_ID_ESCAPE_OK.fullmatch(p) for p in parts[1::2]):
+            return None
+    try:
+        value = get_field(message, ref, component=component, segment_num=segment_num)
+    except ValueError:
+        return None
+    if esc and esc in raw and "\ufffd" in value:
+        return None
+    return value
+
+
+def normalize_control_id(value: str) -> str:
+    """A control id in the form an ACK can carry back: control characters
+    dropped (``ack_value`` drops them from the echo) and the ends trimmed (the
+    reader of the echo trims). Sender and listener compare this form."""
+    return "".join(c for c in value if unicodedata.category(c) != "Cc").strip()
+
+
 def control_id_of(raw: bytes) -> str:
-    """MSH-10 of a frame read as ``get_control_id`` reads it (trimmed, first
-    component, escapes decoded), or '' when there is no readable MSH. Only the
-    MSH segment is parsed, so a message whose body is broken or not UTF-8 still
-    names its control id. Sender and listener both use this, so they agree."""
-    text = raw.decode("utf-8", errors="replace").replace("\n", "\r").lstrip("\r")
+    """MSH-10 of a frame, normalized (``normalize_control_id``), or '' when
+    there is no readable one. The frame is read as the listener reads it: line
+    ends become CR and leading whitespace is skipped (python-hl7 strips it).
+    Only the MSH segment is decoded, and strictly, so a message whose body is
+    broken or not UTF-8 still names its control id, but an MSH that is not
+    UTF-8 names none: replacement characters would make distinct ids equal.
+    An escape other than a separator or hex escape names none either. Sender
+    and listener both use this, so they agree."""
+    text = raw.decode("utf-8", errors="surrogateescape")
+    text = text.replace("\r\n", "\r").replace("\n", "\r").lstrip()
     first = text.split("\r", 1)[0]
     if not first.startswith("MSH"):
         return ""
     try:
-        return get_control_id(parse_hl7(first))
-    except (HL7ParseError, ValueError, IndexError, KeyError):
+        first.encode("utf-8")  # a lone surrogate is a byte that was not UTF-8
+        value = bounded_field(parse_hl7(first), "MSH-10")
+    except (HL7ParseError, UnicodeError, ValueError, IndexError, KeyError):
         return ""
+    return normalize_control_id(value) if value is not None else ""
 
 
 def get_facilities(message: hl7.Message) -> tuple[str, str]:

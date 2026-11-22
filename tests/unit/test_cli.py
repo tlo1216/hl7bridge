@@ -1285,10 +1285,12 @@ def test_send_shows_a_quarantine_reason_only_for_known_codes(tmp_path, capsys):
 def test_send_never_prints_a_code_that_is_not_an_ack_code(tmp_path, capsys):
     msg = _one_message(tmp_path)
     with _AckingListener(_ack("\x1b[2J", "x")) as listener:
-        cli.main(["send", str(msg), "--port", str(listener.port)])
-    out = capsys.readouterr().out
-    assert "\x1b" not in out
-    assert "a.hl7: ?? (not a known ACK code)" in out
+        rc = cli.main(["send", str(msg), "--port", str(listener.port)])
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.out and "\x1b" not in captured.err
+    # An MSA-1 that is not an ACK code makes the reply no ACK at all.
+    assert rc == EXIT_CONNECTION
+    assert "not a valid ACK" in captured.err and "MSA-1 is not an ACK code" in captured.err
 
 
 # -- --json: an explicit list of fields per report ----------------------------------------

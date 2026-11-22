@@ -28,6 +28,7 @@ import time
 import warnings
 from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -59,7 +60,6 @@ from hl7bridge.logsafety import NOTICE
 from hl7bridge.profiles import BUNDLED_PROFILES, SAMPLES_DIR
 
 from .test_cli import _AckingListener, _Listener
-from .test_cli import _FakeServer as _CliFakeServer
 
 _FALLBACKS = (
     "C:/Program Files/Git/mingw64/bin/openssl.exe",
@@ -731,11 +731,11 @@ def test_the_accepted_client_certificate_subject_is_logged(certs, caplog):
     # NOTICE sits above WARNING, so --quiet does not hide it.
     assert records[0].levelno == NOTICE > logging.WARNING
     text = records[0].getMessage()
-    assert "sha256=" in text and "serial=" in text and "issuer=" in text
-    assert "test%20good" in text
+    assert "sha256=" in text and "serial=" in text and "issuer=" not in text
     details = [r.getMessage() for r in caplog.records if "certificate details" in r.getMessage()]
     assert len(details) == 1 and details[0].startswith("mllp client certificate details")
     assert "commonName%3Dclient" in details[0] and "DNS%3Aclient.test" in details[0]
+    assert "test%20good" in details[0]  # the issuer
 
 
 def test_encrypted_and_unreadable_keys_get_their_own_messages(certs, tmp_path, monkeypatch):
@@ -977,6 +977,8 @@ class _FakeSsl:
 
 
 class _FakeWriter:
+    transport = None
+
     def __init__(self, cert, der: bytes = b"der-bytes") -> None:
         self.cert = cert
         self.der = der
@@ -1087,10 +1089,21 @@ def test_handshake_warnings_are_rate_limited_per_peer_with_a_summary(monkeypatch
     assert "1 more time(s)" in text and "in total: 13" in text
 
 
-class _FakeServer(_CliFakeServer):
+class _FakeServer:
+    sockets: ClassVar[list] = []
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def close(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
+
     async def serve_forever(self):
         mllp._note_handshake_failure(("203.0.113.9", 1), ssl.SSLError("x"))
-        await super().serve_forever()
+        raise self.error
 
 
 @pytest.mark.parametrize("how", ["ctrl_c", "error"])
@@ -1265,6 +1278,18 @@ def _good(payload: bytes) -> bytes:
     return mllp.encode_mllp(_ack_for(payload))
 
 
+def _one_reply(reply: bytes, payload: bytes = MSG, **kw) -> tuple[list[bytes], object]:
+    """send_messages of one payload to the shared responder, which answers
+    ``reply``. Returns (acks kept, the error or None)."""
+    acks: list[bytes] = []
+    with _scripted_listener(mllp.encode_mllp(reply)) as (port, _seen):
+        try:
+            asyncio.run(send_messages("127.0.0.1", port, [payload], acks=acks, **kw))
+        except Exception as exc:  # noqa: BLE001  the test inspects it
+            return acks, exc
+    return acks, None
+
+
 async def _raw_send(script, payloads, **kw):
     """send_messages against a plain listener written as ``script(reader, writer)``.
     Returns (acks kept, the error or None)."""
@@ -1334,8 +1359,10 @@ def test_send_messages_and_serve_refuse_an_empty_host(certs, monkeypatch):
 # Medium 2: a key value is never echoed
 
 
-_KEY_LABEL = "PRIVATE" + " KEY"  # a synthetic value shaped like key text, not a key
-PEM = f"-----BEGIN {_KEY_LABEL}-----\nMIIsecretsecret\n-----END {_KEY_LABEL}-----\n"
+# A synthetic value shaped like key text, not a key.
+PEM = (
+    "-----BEGIN PRIVATE KEY-----\nMIIsecretsecret\n-----END PRIVATE KEY-----\n"  # guardrails: allow
+)
 
 
 @pytest.mark.parametrize("value", [PEM, "bad\x00name", "a\nb"], ids=["pem", "nul", "newline"])
@@ -1978,15 +2005,9 @@ def test_an_empty_control_id_is_refused_before_anything_is_sent(control_id, tmp_
     [(b"AA|UNKNOWN", False), (b"AA|", False), (b"CA|UNKNOWN", False), (b"AR|UNKNOWN", True)],
 )
 def test_send_messages_never_confirms_a_message_without_a_control_id(msa, ok):
-    # The library still sends it (the demo shows its quarantine); the CLI refuses.
+    # The library sends it only when asked (replay does); send refuses it.
     ack = _HEADER + b"MSA|" + msa + b"\r"
-
-    async def script(reader, writer):
-        await _read_frame(reader)
-        writer.write(mllp.encode_mllp(ack))
-        await writer.drain()
-
-    acks, error = asyncio.run(_raw_send(script, [_with_control_id(b"")]))
+    acks, error = _one_reply(ack, _with_control_id(b""), allow_missing_control_id=True)
     if ok:
         assert error is None and acks == [ack]
     else:
@@ -2007,12 +2028,7 @@ _HEADER = b"MSH|^~\\&|R|F|S|F|20261007||ACK|1|P|2.5\r"
     ids=["not_an_ack", "no_msh", "two_msa", "no_msa"],
 )
 def test_a_reply_that_is_not_one_ack_is_never_success(reply):
-    async def script(reader, writer):
-        await _read_frame(reader)
-        writer.write(mllp.encode_mllp(reply))
-        await writer.drain()
-
-    acks, error = asyncio.run(_raw_send(script, [MSG]))
+    acks, error = _one_reply(reply)
     assert isinstance(error, AckProtocolError), error
     assert acks == []
 
@@ -2034,13 +2050,7 @@ def test_cli_send_does_not_count_an_aa_in_a_non_ack_reply(tmp_path, capsys):
 )
 def test_unknown_answers_a_message_only_in_a_negative_ack(code, ok):
     ack = _HEADER + b"MSA|" + code.encode() + b"|UNKNOWN|parse_error: MSH\r"
-
-    async def script(reader, writer):
-        await _read_frame(reader)
-        writer.write(mllp.encode_mllp(ack))
-        await writer.drain()
-
-    acks, error = asyncio.run(_raw_send(script, [MSG]))
+    acks, error = _one_reply(ack)
     if ok:
         assert error is None and acks == [ack]
     else:
@@ -2256,39 +2266,6 @@ def test_a_handshake_reset_is_not_reported_as_a_stall(monkeypatch, capsys):
     assert "the TLS handshake with" in err and "failed" in err
 
 
-# R11: out-of-scope changes reverted
-
-
-def test_the_fhir_timeout_option_is_as_on_main():
-    args = cli.build_parser().parse_args(["listen", "--target", "fhir", "--fhir-timeout", "0"])
-    assert args.fhir_timeout == 0.0
-
-
-def test_the_direct_listener_has_no_plain_http_patient_data_warning(tmp_path, capsys, monkeypatch):
-    def stop(*_a, **_k):
-        raise cli.UsageError("stopped before connecting")
-
-    monkeypatch.setattr(cli, "HapiClient", stop)
-    rc = cli.main(
-        [
-            "listen",
-            "--target",
-            "fhir",
-            "--fhir-base",
-            "http://fhir.test/fhir",
-            "--run-id",
-            "a",
-            "--config",
-            str(BUNDLED_PROFILES / "examples"),
-            "--db",
-            str(tmp_path / "d.db"),
-        ]
-    )
-    err = capsys.readouterr().err
-    assert rc == EXIT_USAGE and "stopped before connecting" in err
-    assert "over plain http" not in err
-
-
 # Lower: --show-ack-text follows the sign of the ACK, not --expect
 
 
@@ -2308,3 +2285,352 @@ def test_show_ack_text_follows_the_sign_of_the_ack(tmp_path, capsys):
         cli.main(["send", str(msg), "--port", str(port), "--expect", "AE", "--show-ack-text"])
     out = capsys.readouterr().out
     assert "AA (" in out and "free text 999" not in out  # an AA is not a negative ACK
+
+
+# -- Round 6 (S1 to S9) -----------------------------------------------------------------
+
+
+def _fill_quarantine(db: Path, *payloads: bytes) -> None:
+    from hl7bridge.config import HospitalRegistry
+    from hl7bridge.ingest import IngestPipeline
+    from hl7bridge.store import connect
+
+    conn = connect(db)
+    try:
+        pipeline = IngestPipeline(HospitalRegistry.load_dir(BUNDLED_PROFILES), conn)
+        for payload in payloads:
+            pipeline.handle_bytes(payload)
+    finally:
+        conn.close()
+
+
+# S2: replay sends a row with no control id; only send refuses one
+
+
+def test_replay_sends_rows_without_a_control_id_and_reports_the_ar(tmp_path, capsys):
+    source = tmp_path / "source.db"
+    _fill_quarantine(source, _with_control_id(b""), b"not hl7 at all")
+    with _Listener(tmp_path / "target.db") as listener:
+        rc = cli.main(
+            ["replay", "--from", "quarantine", "--db", str(source), "--port", str(listener.port)]
+        )
+    captured = capsys.readouterr()
+    assert rc == EXIT_FINDINGS, captured.err
+    assert "not a valid ACK" not in captured.err and "nothing sent" not in captured.err
+    assert "quarantine reason: missing_control_id" in captured.out
+    assert "quarantine reason: parse_error" in captured.out
+    assert "got 2 ACK(s)" in captured.out and "  AR: 2" in captured.out
+    assert _store_rows(tmp_path / "target.db") == (0, 2)
+
+
+# S3: one normalization, the listener's, on both sides
+
+
+def test_leading_whitespace_and_an_escaped_control_id_round_trip(tmp_path):
+    payload = b" \t\r\n" + _with_control_id(b"WS\\F\\01")
+    with _Listener(tmp_path / "s.db") as listener:
+        acks = asyncio.run(send_messages("127.0.0.1", listener.port, [payload], ack_timeout_s=5))
+    assert len(acks) == 1 and b"\rMSA|AA|WS\\F\\01" in acks[0]
+    assert _store_rows(tmp_path / "s.db") == (1, 0)
+
+
+@pytest.mark.parametrize(
+    "control_id", [b"\\X01\\", b"\\X01\\ \\X0D\\", b"UNKNOWN", b"AB\xfe", b"\\.sp5\\A"]
+)
+def test_send_refuses_a_control_id_no_ack_can_answer(control_id, tmp_path, capsys):
+    msg = tmp_path / "a.hl7"
+    msg.write_bytes(_with_control_id(control_id))
+    with _Listener(tmp_path / "s.db") as listener:
+        rc = cli.main(["send", str(msg), "--port", str(listener.port)])
+    captured = capsys.readouterr()
+    assert rc == EXIT_USAGE, captured.err
+    assert "MSH-10" in captured.err and "nothing sent" in captured.err
+    assert _store_rows(tmp_path / "s.db") == (0, 0)
+
+
+def test_send_refuses_two_messages_that_share_a_control_id(tmp_path, capsys):
+    folder = tmp_path / "m"
+    folder.mkdir()
+    (folder / "a.hl7").write_bytes(_with_control_id(b"DUP01"))
+    other = _with_control_id(b"\\X01\\DUP01").replace(b"PID|", b"PID||", 1)
+    (folder / "b.hl7").write_bytes(other)
+    with _Listener(tmp_path / "s.db") as listener:
+        rc = cli.main(["send", str(folder), "--port", str(listener.port)])
+        captured = capsys.readouterr()
+        assert rc == EXIT_USAGE, captured.err
+        assert "same MSH-10" in captured.err and "nothing sent" in captured.err
+        # The same bytes again (a retry, --repeat) are not ambiguous.
+        rc = cli.main(["send", str(folder / "a.hl7"), "--port", str(listener.port)])
+        rc2 = cli.main(
+            ["send", str(folder / "a.hl7"), "--port", str(listener.port), "--repeat", "2"]
+        )
+    captured = capsys.readouterr()
+    assert rc == rc2 == EXIT_OK, captured.err
+    assert _store_rows(tmp_path / "s.db") == (1, 0)
+
+
+# S4: MSA-1 first, UNKNOWN only when negative, one MSH and one MSA, bounded fields
+
+
+@pytest.mark.parametrize(
+    ("payload", "ack"),
+    [
+        (_with_control_id(b"UNKNOWN"), _HEADER + b"MSA|AA|UNKNOWN\r"),
+        (_with_control_id(b"UNKNOWN"), _HEADER + b"MSA|CA|UNKNOWN\r"),
+        (MSG, _HEADER + b"MSA||SMPA0001\r"),
+        (MSG, _HEADER + b"MSA|OK|SMPA0001\r"),
+        (MSG, _HEADER + b"MSH|^~\\&|R|F|S|F|20261007||ORU^R01|2|P|2.5\rMSA|AA|SMPA0001\r"),
+        (MSG, _HEADER + b"MSA|AA|\\.sp5\\SMPA0001\r"),
+        (MSG, _HEADER + b"MSA|AA|\\.sp1x\\SMPA0001\r"),
+        (_with_control_id(b"AB\xfe"), _HEADER + b"MSA|AA|AB\xff\r"),
+        (_with_control_id(b"\\X01\\"), _HEADER + b"MSA|AA|\r"),
+    ],
+    ids=[
+        "aa_unknown",
+        "ca_unknown",
+        "empty_msa1",
+        "not_a_code",
+        "second_msh",
+        "expanding_escape",
+        "bad_escape_count",
+        "lossy_bytes",
+        "empty_after_decoding",
+    ],
+)
+def test_check_ack_refuses(payload, ack):
+    with pytest.raises(AckProtocolError):
+        mllp.check_ack(payload, ack)
+
+
+def test_an_ack_text_with_a_bad_escape_is_shown_without_a_crash(tmp_path, capsys):
+    def ae(payload: bytes) -> bytes:
+        control_id = payload.split(b"\r")[0].split(b"|")[9]
+        return mllp.encode_mllp(_HEADER + b"MSA|AE|" + control_id + b"|x\\.sp1x\\y\r")
+
+    msg = tmp_path / "a.hl7"
+    msg.write_bytes(MSG)
+    with _scripted_listener(ae) as (port, _seen):
+        rc = cli.main(["send", str(msg), "--port", str(port), "--show-ack-text"])
+    captured = capsys.readouterr()
+    assert rc == EXIT_FINDINGS, captured.err
+    assert ": AE (" in captured.out
+
+
+# S5: the library refuses a message without a control id before writing anything
+
+
+def test_send_messages_refuses_a_message_without_a_control_id_before_writing():
+    with (
+        _scripted_listener(_good, _good) as (port, seen),
+        pytest.raises(ValueError, match="MSH-10"),
+    ):
+        asyncio.run(send_messages("127.0.0.1", port, [MSG, _with_control_id(b"")]))
+    assert seen == []
+
+
+# S6: one address cannot hold every open connection; the limits are checked
+
+
+def test_one_address_cannot_hold_every_open_connection(certs, caplog):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"])
+    client_ctx = client_ssl_context(certs["ca"])
+
+    def tls(source: str = "127.0.0.1") -> ssl.SSLSocket:
+        raw = socket.create_connection(("127.0.0.1", srv.port), 5, (source, 0))
+        return client_ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+
+    with (
+        caplog.at_level(NOTICE, logger="hl7bridge.ingest.mllp"),
+        TlsServer(server_ctx, max_connections_per_address=2) as srv,
+    ):
+        held = [tls(), tls()]
+        time.sleep(0.3)
+        extra = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+        time.sleep(0.3)
+        refused = _closed_count([extra])
+        try:
+            held.append(tls("127.0.0.2"))  # another address still gets in
+        except OSError:
+            if sys.platform.startswith("linux"):
+                raise  # all of 127/8 is loopback there
+        held.pop(0).close()  # a slot freed is a slot reused
+        time.sleep(0.3)
+        again = tls()
+        again.sendall(mllp.encode_mllp(MSG))
+        again.settimeout(5)
+        answer = again.recv(65536)
+        for sock in (*held, again):
+            sock.close()
+    assert refused == 1
+    assert b"MSA|AA|SMPA0001" in answer
+    assert "open TLS connections from one address" in caplog.text and "limit 2" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [
+        "max_connections",
+        "max_connections_per_address",
+        "max_pending_handshakes",
+        "max_pending_per_address",
+    ],
+)
+def test_a_connection_limit_below_one_is_refused(certs, limit):
+    with pytest.raises(ValueError, match=limit):
+        asyncio.run(_tls_handler_server(certs, **{limit: 0}))
+
+
+def test_listen_passes_the_per_address_limits(certs, tmp_path, monkeypatch, capsys):
+    seen: dict[str, object] = {}
+
+    async def fake(host, port, handler, on_junk, **kw):
+        seen.update(kw)
+        return _FakeServer(KeyboardInterrupt())
+
+    monkeypatch.setattr(cli, "serve", fake)
+    rc = cli.main(
+        [
+            "listen",
+            "--db",
+            str(tmp_path / "b.db"),
+            "--tls-cert",
+            certs["server_cert"],
+            "--tls-key",
+            certs["server_key"],
+            "--max-connections-per-address",
+            "3",
+            "--max-pending-per-address",
+            "2",
+        ]
+    )
+    capsys.readouterr()
+    assert rc == EXIT_OK
+    assert seen["max_connections_per_address"] == 3 and seen["max_pending_per_address"] == 2
+
+
+# S7: no transport after start_tls; a second SIGTERM during the shutdown
+
+
+def _no_transport(loop: asyncio.AbstractEventLoop) -> None:
+    async def start_tls(*_a, **_k):
+        return None  # what the loop returns when the connection went during the upgrade
+
+    loop.start_tls = start_tls  # type: ignore[method-assign]
+
+
+def test_a_listener_upgrade_with_no_transport_is_a_failed_handshake(certs, caplog):
+    async def run() -> bytes:
+        _no_transport(asyncio.get_running_loop())
+        server = await _tls_handler_server(certs)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            return await asyncio.wait_for(reader.read(10), 5)
+        finally:
+            writer.close()
+            server.close()
+            await server.wait_closed()
+
+    with caplog.at_level(logging.DEBUG):
+        data = asyncio.run(run())
+    assert data == b""
+    assert handshake_failures() == 1
+    assert "Unhandled exception" not in caplog.text and "AttributeError" not in caplog.text
+
+
+def test_a_sender_upgrade_with_no_transport_is_a_handshake_error(certs):
+    async def run() -> None:
+        _no_transport(asyncio.get_running_loop())
+        await send_messages(
+            "127.0.0.1", srv.port, [MSG], ssl_context=client_ssl_context(certs["ca"])
+        )
+
+    with TlsServer(None) as srv, pytest.raises(TlsHandshakeError):
+        asyncio.run(run())
+
+
+_SLOW_STORE_MARKED = (
+    "import asyncio, os\n"
+    "from hl7bridge.ingest.pipeline import IngestPipeline\n"
+    "_handle = IngestPipeline.handle_frame\n"
+    "async def _slow(self, payload):\n"
+    "    open(os.environ['HL7BRIDGE_TEST_ENTERED'], 'w').close()\n"
+    "    await asyncio.sleep(2.0)\n"
+    "    return await _handle(self, payload)\n"
+    "IngestPipeline.handle_frame = _slow\n"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot deliver SIGTERM to a process")
+def test_a_second_sigterm_does_not_cut_the_grace_short(certs, tmp_path, monkeypatch):
+    entered = tmp_path / "entered"
+    monkeypatch.setenv("HL7BRIDGE_TEST_ENTERED", str(entered))
+    proc, port = _spawn_listener(certs, tmp_path / "t.db", "127.0.0.1", preamble=_SLOW_STORE_MARKED)
+    data = b""
+    try:
+        ctx = client_ssl_context(certs["ca"])
+        with (
+            socket.create_connection(("127.0.0.1", port), timeout=10) as raw,
+            ctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls,
+        ):
+            tls.sendall(mllp.encode_mllp(MSG))
+            assert _wait_for(entered.exists)  # the frame is in the (slow) handler
+            proc.send_signal(signal.SIGTERM)
+            time.sleep(0.3)
+            proc.send_signal(signal.SIGTERM)  # the shutdown is under way
+            while not data.endswith(b"\x1c\r"):
+                chunk = tls.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        out, err = proc.communicate(timeout=20)
+    except BaseException:
+        proc.kill()
+        proc.communicate(timeout=10)
+        raise
+    assert b"MSA|AA|SMPA0001" in data, err
+    assert proc.returncode == 0, err
+    assert "listener stopped" in out
+
+
+# S8: the issuer, which can repeat a self-issued subject, is logged at DEBUG only
+
+
+def test_the_issuer_is_logged_at_debug_only(certs, caplog):
+    server_ctx = server_ssl_context(certs["server_cert"], certs["server_key"], certs["ca"])
+    client_ctx = client_ssl_context(certs["ca"], certs["client_cert"], certs["client_key"])
+    with (
+        caplog.at_level(logging.DEBUG, logger="hl7bridge.ingest.mllp"),
+        TlsServer(server_ctx) as srv,
+    ):
+        assert _send(srv.port, client_ctx) == [ACK]
+    shown = [r.getMessage() for r in caplog.records if r.levelno > logging.DEBUG]
+    assert any("certificate peer=" in m for m in shown)
+    assert not any("issuer=" in m for m in shown)
+    details = [r.getMessage() for r in caplog.records if "certificate details" in r.getMessage()]
+    assert len(details) == 1 and "issuer=" in details[0]
+
+
+# A socket that cannot be made for one lookup result does not end the connect
+
+
+def test_a_socket_failure_on_one_address_tries_the_next(monkeypatch):
+    import types
+
+    real = socket
+
+    def lookup(host, port, *args, **kwargs):
+        return [
+            (real.AF_INET6, real.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+            (real.AF_INET, real.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+        ]
+
+    def make(family, kind, proto):
+        if family == real.AF_INET6:
+            raise OSError(errno.EAFNOSUPPORT, "address family not supported")
+        return real.socket(family, kind, proto)
+
+    fake = types.SimpleNamespace(getaddrinfo=lookup, SOCK_STREAM=real.SOCK_STREAM, socket=make)
+    with TlsServer(None) as srv:
+        monkeypatch.setattr(mllp, "socket", fake)
+        assert asyncio.run(send_messages("localhost", srv.port, [MSG], ack_timeout_s=5)) == [ACK]

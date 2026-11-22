@@ -69,16 +69,19 @@ from .ingest.direct import DirectHandler, DirectLog, check_profiles_for_direct
 from .ingest.loaders import load_outbound, load_studies
 from .ingest.mllp import (
     MAX_CONNECTIONS,
+    MAX_CONNECTIONS_PER_ADDRESS,
+    MAX_PENDING_PER_ADDRESS,
     NEGATIVE_ACK_CODES,
     SHUTDOWN_GRACE_S,
     SendProgress,
     client_ssl_context,
     handshake_failures,
+    has_control_id,
     log_handshake_total,
     server_ssl_context,
     shutdown_server,
 )
-from .ingest.parser import control_id_of, get_field, parse_hl7
+from .ingest.parser import bounded_field, control_id_of, parse_hl7
 from .jsonout import dumps, to_jsonable
 from .lint import lint_directory, render_lint_text
 from .logsafety import NOTICE, configure_logging, printable, safe_url
@@ -599,11 +602,12 @@ def _read_ack(raw: bytes) -> _AckView:
     """The ACK fields ``send`` shows. The receiver wrote them, so the code
     must look like an ACK code and the texts lose control characters."""
     message = parse_hl7(raw.decode("utf-8", errors="replace"))
-    err_parts = [get_field(message, f) for f in ("ERR-3", "ERR-1")]
-    code = get_field(message, "MSA-1") or ""
+    # Bounded reads: an escape that would expand or cannot be read shows as nothing.
+    err_parts = [bounded_field(message, f) or "" for f in ("ERR-3", "ERR-1")]
+    code = bounded_field(message, "MSA-1") or ""
     return _AckView(
         code=code if _ACK_CODE.fullmatch(code) else "??",
-        text=printable(get_field(message, "MSA-3") or ""),
+        text=printable(bounded_field(message, "MSA-3") or ""),
         err=printable(next((p for p in err_parts if p), "")),
     )
 
@@ -674,20 +678,44 @@ def _warn_not_loopback(host: str, tls: bool = False) -> None:
         )
 
 
+def _check_control_ids(outgoing: list[_Outgoing]) -> None:
+    """``send`` only: the ACK names a message by MSH-10 alone, so a message
+    without one an ACK can name, or two different messages with the same one,
+    are refused before anything is sent. The same bytes twice (``--repeat``)
+    are one message."""
+    seen: dict[str, bytes] = {}
+    for item in outgoing:
+        if not has_control_id(item.payload):
+            raise UsageError(
+                f"{item.label} has no usable MSH-10 (control id): it is empty, UNKNOWN,"
+                " not UTF-8, or holds an escape other than a separator or hex escape;"
+                " nothing sent.",
+                hint="Give every message a control id; its ACK is matched by it.",
+            )
+        first = seen.setdefault(control_id_of(item.payload), item.payload)
+        if first != item.payload:
+            raise UsageError(
+                f"{item.label} has the same MSH-10 (control id) as an earlier message with"
+                " other content; nothing sent.",
+                hint="Give each message its own control id; its ACK is matched by it.",
+            )
+
+
 def _transmit(
-    args: argparse.Namespace, outgoing: list[_Outgoing], source: str, tls: ssl.SSLContext | None
+    args: argparse.Namespace,
+    outgoing: list[_Outgoing],
+    source: str,
+    tls: ssl.SSLContext | None,
+    *,
+    replay: bool = False,
 ) -> int:
     """Send in order, one ACK at a time, then print the results. Shared by
     ``send`` and ``replay``. Exit 1 when any ACK differs from ``--expect``
-    or one is missing; 3 when the listener does not answer in time."""
-    for item in outgoing:
-        if not control_id_of(item.payload):
-            # The ACK names the message by MSH-10: without one, no reply can
-            # be matched to it, so it is never sent.
-            raise UsageError(
-                f"{item.label} has an empty MSH-10 (control id); nothing sent.",
-                hint="Give every message a control id; its ACK is matched by it.",
-            )
+    or one is missing; 3 when the listener does not answer in time. A replay
+    also sends stored bytes with no control id (a quarantined message): only
+    a negative ``UNKNOWN`` ACK answers those."""
+    if not replay:
+        _check_control_ids(outgoing)
     _warn_not_loopback(args.host, tls is not None)
     acks: list[bytes] = []
     progress = SendProgress()
@@ -705,6 +733,7 @@ def _transmit(
                 interval_s=interval,
                 ssl_context=tls,
                 progress=progress,
+                allow_missing_control_id=replay,
             )
         )
     except ConnectError as exc:
@@ -980,7 +1009,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         )
         for row in rows
     ]
-    return _transmit(args, outgoing, f"the {args.source}", tls)
+    return _transmit(args, outgoing, f"the {args.source}", tls, replay=True)
 
 
 def cmd_synth(args: argparse.Namespace) -> int:
@@ -1083,18 +1112,25 @@ def _listen_direct(args: argparse.Namespace, tls: ssl.SSLContext | None) -> int:
     headers = _fhir_headers()
     _warn_plain_http(base, headers)
     direct_log = DirectLog(db_path)
+    idle = True
     try:
-        with HapiClient(base, timeout=args.fhir_timeout, extra_headers=headers) as client:
+        client = HapiClient(base, timeout=args.fhir_timeout, extra_headers=headers)
+        try:
             _require_metadata(client, base)
             handler = DirectHandler(registry, client, scope, direct_log)
             where = f"FHIR {safe_url(base)}, run {run_id}, log {db_path}"
             try:
                 return _serve_forever(args, handler.handle_frame, handler.handle_junk, where, tls)
             finally:
-                # Bounded: a worker still in a FHIR call ends at its own timeout.
-                handler.close(timeout=SHUTDOWN_GRACE_S)
+                idle = handler.close(timeout=SHUTDOWN_GRACE_S)
+        finally:
+            # A worker still busy may be in a commit: its client and log stay
+            # open so it can record the outcome; the process exit waits for it.
+            if idle:
+                client.close()
     finally:
-        direct_log.close()
+        if idle:
+            direct_log.close()
 
 
 def _in_main_thread() -> bool:
@@ -1116,11 +1152,23 @@ def _serve_forever(
         main = asyncio.current_task()
         if posix and main_thread and main is not None:
             # SIGTERM takes the path of Ctrl+C: the main task is cancelled at
-            # an await, and shutdown_server gives a busy client its grace.
-            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, main.cancel)
+            # an await, and shutdown_server gives a busy client its grace. A
+            # repeat while that runs is ignored, so it cannot cut the grace.
+            def terminate(task: asyncio.Task[None] = main) -> None:
+                if not task.cancelling():
+                    task.cancel()
+
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, terminate)
         try:
             extra: dict[str, Any] = (
-                {"ssl_context": tls, "max_connections": args.max_connections} if tls else {}
+                {
+                    "ssl_context": tls,
+                    "max_connections": args.max_connections,
+                    "max_connections_per_address": args.max_connections_per_address,
+                    "max_pending_per_address": args.max_pending_per_address,
+                }
+                if tls
+                else {}
             )
             server = await serve(args.host, args.port, handle_frame, handle_junk, **extra)
         except OSError as exc:
@@ -2066,6 +2114,22 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
             metavar="N",
             help=f"with TLS, at most N connections open at once; more are closed and logged"
             f" (default: {MAX_CONNECTIONS})",
+        )
+        p.add_argument(
+            "--max-connections-per-address",
+            type=_positive_int,
+            default=MAX_CONNECTIONS_PER_ADDRESS,
+            metavar="N",
+            help="with TLS, at most N connections open at once from one address"
+            f" (default: {MAX_CONNECTIONS_PER_ADDRESS})",
+        )
+        p.add_argument(
+            "--max-pending-per-address",
+            type=_positive_int,
+            default=MAX_PENDING_PER_ADDRESS,
+            metavar="N",
+            help="with TLS, at most N handshakes pending at once from one address"
+            f" (default: {MAX_PENDING_PER_ADDRESS})",
         )
         p.add_argument(
             "--target",

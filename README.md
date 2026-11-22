@@ -281,8 +281,9 @@ narrows which issuers are trusted, but a blocked certificate from a trusted
 issuer still passes. Errors name the flag or the reason and never print a key, a
 flag value or any message content, and `send` never prints a receiver's
 negative-ACK text unless `--show-ack-text` is given. An ACK counts only when it
-is an ACK whose MSA-2 is the MSH-10 sent; a message with an empty MSH-10 is not
-sent. An empty `--host` is refused. The listener does
+is an ACK whose MSA-2 is the MSH-10 sent; `send` does not send a message with no
+usable MSH-10, while `replay` sends quarantined bytes as they are. An empty
+`--host` is refused. The listener does
 not check revocation, and on Windows only Ctrl+C stops it cleanly (see
 [docs/cli.md](docs/cli.md)). See the
 [threat model](docs/threat-model.md) for what TLS does and does not cover.

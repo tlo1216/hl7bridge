@@ -9,6 +9,30 @@ profile format may still change between minor versions.
 
 ### Fixed
 
+- Last review of MLLP over TLS. Shutdown of `listen --target fhir` no longer
+  closes the FHIR client and the direct-mode log under a worker that is still
+  committing: the worker finishes and writes its log row, and the process
+  exits after it. `replay` again sends quarantined rows with no control id
+  (and unparseable ones) and reports the listener's AR; only `send` refuses a
+  message no ACK can name. Control ids are read once, the listener's way, on
+  both sides: leading whitespace skipped, only separator and hex escapes
+  decoded (any other escape, or an MSH that is not UTF-8, names no control id),
+  control characters dropped, then compared; `send` also refuses an MSH-10
+  that is `UNKNOWN` or empty after that reading, and two different messages
+  whose MSH-10 reads the same. An ACK now needs exactly one MSH, and MSA-1 must
+  be an ACK code before MSA-2 is compared; an `UNKNOWN` MSA-2 counts only in a
+  negative ACK, whatever was sent. Reading an ACK's fields can no longer expand
+  an escape past the frame or raise. `send_messages` raises ValueError before
+  connecting when a payload has no usable control id, unless
+  `allow_missing_control_id=True`. New `listen` flags
+  `--max-connections-per-address` (default 32) and `--max-pending-per-address`
+  (default 4); `serve` refuses a connection limit below 1. A TLS upgrade that
+  ends with no transport is a failed handshake on both sides, not an
+  AttributeError. A second SIGTERM during the shutdown is ignored. The
+  client-certificate issuer is logged at DEBUG only, like the subject. A
+  sender whose first address family is unavailable tries the next lookup
+  result. `docs/threat-model.md` has a Known limits section.
+
 - Final review of MLLP over TLS. An ACK counts only when the reply starts with
   MSH, has MSH-9 `ACK` and exactly one MSA, and its MSA-2 is the MSH-10 sent,
   both read the same way (trimmed, first component, escapes decoded); `UNKNOWN`
@@ -80,9 +104,9 @@ profile format may still change between minor versions.
   without TLS, is one "Never connected, nothing was sent" error; after a
   break only the first message without an ACK is "may or may not have been
   processed", the rest are "not sent". The accepted client certificate line
-  (peer, SHA-256 fingerprint, serial, issuer) is always written, sanitized,
-  at a level `--quiet` keeps; the subject and alternative names are logged
-  only at DEBUG. Failed-handshake warnings are limited to one a
+  (peer, SHA-256 fingerprint, serial) is always written, sanitized,
+  at a level `--quiet` keeps; the subject, alternative names and issuer are
+  logged only at DEBUG. Failed-handshake warnings are limited to one a
   minute per peer with a summary, include the check text, and the total is
   logged at any shutdown (SIGTERM stops the listener like Ctrl+C). `--timeout`
   must be a finite number above 0. Bytes of a half-read frame are quarantined
