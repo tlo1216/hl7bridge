@@ -110,8 +110,8 @@ def test_version_flag(capsys):
     assert capsys.readouterr().out.strip() == f"hl7bridge {__version__}"
 
 
-def test_version_is_0_5(capsys):
-    assert __version__.startswith("0.5.")
+def test_version_is_0_6(capsys):
+    assert __version__.startswith("0.6.")
 
 
 def test_top_help_groups_every_command(capsys):
