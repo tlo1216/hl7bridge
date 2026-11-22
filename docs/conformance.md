@@ -11,16 +11,16 @@ No server is contacted and no patient data is used.
 Reviewed on 2026-11-21:
 
 - The permanent [1.0.0 test conversions page](https://hl7.org/fhir/uv/v2mappings/STU1/test_conversions.html)
-  publishes A01, ORM O01 and ORU R01 examples. Each corresponding FHIR Bundle
-  is still marked "To be provided". These are informative examples, not a
+  publishes seven example v2 messages: ADT_A01, SIU_S12, ORM_O01, OML_O21,
+  ORU_R01, MDM_T02 and VXU_V04. Every expected FHIR Bundle on that page is
+  still marked "To be provided". These are informative examples, not a
   supplied set of executable expected Bundles.
 - The [message map index](https://hl7.org/fhir/uv/v2mappings/STU1/message_maps.html)
   lists ADT_A01, ORM_O01 and ORU_R01, but no separate A04, A08 or A40 map.
-- Direct HTTPS download from this workspace failed with a connection refusal
-  (WinError 10061). The pages were readable through web search. Per the
-  requested fallback, **all bundled messages here are authored synthetic
-  equivalents**, not downloaded IG samples and not byte-for-byte replacements.
-  Their names begin ZZZTEST and contact details use example.invalid.
+- The IG's example messages are not bundled. **Every bundled message is
+  synthetic and was written for this project**, not copied from an IG example.
+  The patient names in them begin with ZZZTEST and the email addresses use
+  example.invalid.
 - A01, ORM and ORU exercise the same core PID/PV1, ORC/OBR and OBX concepts
   as the published examples, with reduced segment coverage. A04, A08 and A40
   are additional synthetic events. The separate ORU SN case exercises a
