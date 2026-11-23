@@ -622,3 +622,8 @@ Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 HL7 and FHIR are registered trademarks of Health Level Seven International.
 This project is not affiliated with or endorsed by HL7.
+
+The conformance test fixtures (tests/fixtures/conformance) and
+docs/conformance.md contain LOINC codes:
+
+This material contains content from LOINC (http://loinc.org). LOINC is copyright © Regenstrief Institute, Inc. and the Logical Observation Identifiers Names and Codes (LOINC) Committee and is available at no cost under the license at http://loinc.org/license. LOINC® is a registered United States trademark of Regenstrief Institute, Inc.

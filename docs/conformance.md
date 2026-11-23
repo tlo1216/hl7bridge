@@ -34,6 +34,9 @@ independent of `v2fhir/spec.py`, mapper code and mapper output. Each table row
 links its map. The [mapping inventory](mapping.md) describes implementation
 choices but is not the expectation oracle.
 
+The samples and tables below contain LOINC codes; see the LOINC notice in
+[NOTICE](../NOTICE).
+
 ## Reading the evidence
 
 **MATCH** means the selected values agree, including multiplicity. Identifier,
