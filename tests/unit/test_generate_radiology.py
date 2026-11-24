@@ -1,4 +1,4 @@
-"""from-synthea: radiology HL7 v2 from Synthea-style FHIR Bundles.
+"""generate-radiology: radiology HL7 v2 from Synthea-style FHIR Bundles.
 
 The fixtures in tests/fixtures/synthea are hand-written in Synthea's shape
 (identifier systems, urn:uuid references, ImagingStudy series) with
@@ -55,7 +55,7 @@ from hl7bridge.synth.synthea import (
     SKIP_TOO_LARGE,
     SKIP_UNSAFE_MRN,
     SYNTHETIC_LINE,
-    generate_from_synthea,
+    generate_radiology,
     write_run,
 )
 from hl7bridge.v2fhir import bundle_json, message_to_bundle
@@ -155,7 +155,7 @@ def _resource(bundle: dict, kind: str, n: int = 0) -> dict:
 
 
 def test_the_fixtures_give_the_expected_feed(hospital):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     assert (run.bundles, run.studies, run.skipped) == (4, 4, [])
     assert dict(run.counts) == {"ADT^A01": 1, "ADT^A04": 3, "ORM^O01": 4, "ORU^R01": 4}
     assert [s["imaging_study"] for s in run.index["studies"]] == [
@@ -173,7 +173,7 @@ def test_the_fixtures_give_the_expected_feed(hospital):
 
 
 def test_every_message_gets_aa_from_the_store_listener(tmp_path, registry):
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     conn = connect(tmp_path / "store.db")
     pipeline = IngestPipeline(registry, conn)
     for name, text in _messages(run):
@@ -191,7 +191,7 @@ def test_every_message_gets_aa_from_the_store_listener(tmp_path, registry):
 
 
 def test_every_message_maps_to_fhir_and_lints_clean(registry):
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     for name, text in _messages(run):
         assert lint_text(text, registry) == [], name
         mapped = message_to_bundle(text, registry)
@@ -208,7 +208,7 @@ def test_every_message_maps_to_fhir_and_lints_clean(registry):
 
 
 def test_a_linked_report_keeps_its_text_and_status(registry):
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     study = next(s for s in run.index["studies"] if s["imaging_study"] == MR_STUDY)
     assert (study["report_status"], study["report_text"]) == ("P", "source")
     text = run.files[study["report_file"]].decode()
@@ -224,14 +224,14 @@ def test_a_linked_report_keeps_its_text_and_status(registry):
 
 
 def test_a_clinical_note_on_the_encounter_is_never_the_report(hospital):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     study = next(s for s in run.index["studies"] if s["imaging_study"] == CR_STUDY)
     assert study["report_text"] == "generated"
     assert "history and physical" not in run.files[study["report_file"]].decode().lower()
 
 
 def test_the_service_request_gives_code_priority_and_order_time(hospital):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     study = next(s for s in run.index["studies"] if s["imaging_study"] == CT_STUDY)
     orm = parse_hl7(run.files[study["order_file"]].decode())
     assert get_field(orm, "OBR-4", component=1) == "303653007"
@@ -245,7 +245,7 @@ def test_the_service_request_gives_code_priority_and_order_time(hospital):
 
 
 def test_an_inpatient_encounter_gives_an_a01(hospital):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     study = next(s for s in run.index["studies"] if s["imaging_study"] == MR_STUDY)
     assert study["adt_file"].endswith("_adt_a01.hl7")
     adt = parse_hl7(run.files[study["adt_file"]].decode())
@@ -253,7 +253,7 @@ def test_an_inpatient_encounter_gives_an_a01(hospital):
 
 
 def test_a_study_with_no_encounter_is_its_own_outpatient_visit(hospital):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     study = next(s for s in run.index["studies"] if s["imaging_study"] == US_STUDY)
     assert study["visit"].startswith("V") and len(study["visit"]) == 16
     adt = parse_hl7(run.files[study["adt_file"]].decode())
@@ -268,7 +268,7 @@ def test_two_studies_in_one_visit_share_one_adt(tmp_path, hospital):
     second["started"] = "2026-03-02T09:55:00-05:00"
     second["encounter"] = {"reference": "Encounter/00000000-5e1d-4a00-8000-000000000011"}
     bundle["entry"].append({"fullUrl": f"urn:uuid:{second['id']}", "resource": second})
-    run = generate_from_synthea(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
     first, other = run.index["studies"][:2]
     assert first["adt_file"] == other["adt_file"] and first["visit"] == other["visit"]
     assert run.counts["ADT^A04"] == 2  # this visit and the emergency one
@@ -277,7 +277,7 @@ def test_two_studies_in_one_visit_share_one_adt(tmp_path, hospital):
 @pytest.mark.parametrize("field", ALLOWED_ACCESSION_FIELDS)
 def test_the_accession_goes_where_the_profile_reads_it(tmp_path, field):
     registry = _registry(tmp_path, accession_field=field)
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     conn = connect(tmp_path / "store.db")
     pipeline = IngestPipeline(registry, conn)
     for name, text in _messages(run):
@@ -290,7 +290,7 @@ def test_the_accession_goes_where_the_profile_reads_it(tmp_path, field):
 
 def test_an_old_version_without_offsets_still_gets_aa(tmp_path):
     registry = _registry(tmp_path, version="2.3", offset=False)
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     conn = connect(tmp_path / "store.db")
     pipeline = IngestPipeline(registry, conn)
     for _, text in _messages(run):
@@ -314,7 +314,7 @@ def test_every_message_gets_aa_from_the_direct_listener(tmp_path, registry):
     for n, name in enumerate(names, start=1):
         server._write("Patient", f"p{n}", _fhir_patient(name))
     before = copy.deepcopy(server.data["Patient"])
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     with HapiClient(BASE, transport=server.transport()) as client:
         handler = DirectHandler(
             registry,
@@ -338,14 +338,14 @@ def test_every_message_gets_aa_from_the_direct_listener(tmp_path, registry):
 
 
 def test_same_input_and_seed_give_the_same_bytes(hospital):
-    a = generate_from_synthea(FIXTURES, hospital, seed=42)
-    b = generate_from_synthea(FIXTURES, hospital, seed=42)
+    a = generate_radiology(FIXTURES, hospital, seed=42)
+    b = generate_radiology(FIXTURES, hospital, seed=42)
     assert a.files == b.files
 
 
 def test_the_seed_moves_times_and_text_but_never_keys(hospital):
-    a = generate_from_synthea(FIXTURES, hospital, seed=42)
-    b = generate_from_synthea(FIXTURES, hospital, seed=7)
+    a = generate_radiology(FIXTURES, hospital, seed=42)
+    b = generate_radiology(FIXTURES, hospital, seed=7)
     keys = ("imaging_study", "accession", "visit", "mrn")
     assert [[s[k] for k in keys] for s in a.index["studies"]] == [
         [s[k] for k in keys] for s in b.index["studies"]
@@ -378,10 +378,10 @@ def test_the_seed_moves_times_and_text_but_never_keys(hospital):
 
 
 def test_adding_a_patient_changes_no_other_patients_messages(tmp_path, hospital):
-    small = generate_from_synthea(
+    small = generate_radiology(
         _bundles(tmp_path, "zzztest_alpha.json", "qqfake_charlie.json"), hospital, seed=42
     )
-    full = generate_from_synthea(FIXTURES, hospital, seed=42)
+    full = generate_radiology(FIXTURES, hospital, seed=42)
 
     def by_file(run):
         return {
@@ -398,7 +398,7 @@ def test_adding_a_patient_changes_no_other_patients_messages(tmp_path, hospital)
 def test_the_cli_writes_the_same_bytes_twice(tmp_path, registry, capsys):
     config = str(tmp_path / "profiles")
     for out in ("a", "b"):
-        args = ["from-synthea", str(FIXTURES), "--hospital", "SYNLAB", "--out"]
+        args = ["generate-radiology", str(FIXTURES), "--hospital", "SYNLAB", "--out"]
         assert cli.main([*args, str(tmp_path / out), "--config", config]) == 0
     a = {p.name: p.read_bytes() for p in (tmp_path / "a").iterdir()}
     b = {p.name: p.read_bytes() for p in (tmp_path / "b").iterdir()}
@@ -411,12 +411,12 @@ def test_the_cli_writes_the_same_bytes_twice(tmp_path, registry, capsys):
 
 def test_no_network_is_used(monkeypatch, tmp_path, hospital):
     def refuse(*args, **kwargs):
-        raise AssertionError("from-synthea opened a socket")
+        raise AssertionError("generate-radiology opened a socket")
 
     monkeypatch.setattr(socket, "socket", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
     monkeypatch.setattr(socket, "getaddrinfo", refuse)
-    write_run(generate_from_synthea(FIXTURES, hospital, seed=42), tmp_path / "out")
+    write_run(generate_radiology(FIXTURES, hospital, seed=42), tmp_path / "out")
     assert (tmp_path / "out" / INDEX_NAME).is_file()
 
 
@@ -425,7 +425,7 @@ def test_no_network_is_used(monkeypatch, tmp_path, hospital):
 
 def _usage(path: Path, hospital, match: str) -> None:
     with pytest.raises(UsageError, match=match):
-        generate_from_synthea(path, hospital, seed=42)
+        generate_radiology(path, hospital, seed=42)
 
 
 def test_a_missing_path_or_an_empty_folder_is_refused(tmp_path, hospital):
@@ -473,7 +473,7 @@ def test_a_profile_missing_a_needed_type_is_refused(tmp_path):
 def test_a_patient_outside_the_profiles_mrn_systems_is_refused_by_file(tmp_path):
     hospa = HospitalRegistry.load_dir(BUNDLED_PROFILES).by_id["HOSPA"]
     with pytest.raises(UsageError, match=r"^file 2: the Patient has no identifier"):
-        generate_from_synthea(FIXTURES, hospa, seed=42)
+        generate_radiology(FIXTURES, hospa, seed=42)
 
 
 @pytest.mark.parametrize(
@@ -487,28 +487,35 @@ def test_a_birth_date_pid7_cannot_hold_skips_the_patient(tmp_path, hospital, bor
 
 
 def test_out_must_be_new_and_files_are_never_replaced(tmp_path, hospital):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     (tmp_path / "file").write_text("x", encoding="utf-8")
     with pytest.raises(UsageError, match="exists and is not a folder"):
         write_run(run, tmp_path / "file")
     write_run(run, tmp_path / "out")
-    with pytest.raises(UsageError, match="is not empty; from-synthea never mixes two runs"):
+    with pytest.raises(UsageError, match="is not empty; generate-radiology never mixes two runs"):
         write_run(run, tmp_path / "out")
     (tmp_path / "empty").mkdir()
-    with pytest.raises(UsageError, match="already exists; from-synthea writes a new folder"):
+    with pytest.raises(UsageError, match="already exists; generate-radiology writes a new folder"):
         write_run(run, tmp_path / "empty")
 
 
 def test_a_usage_error_in_the_last_file_writes_nothing(tmp_path, registry):
     folder = _bundles(tmp_path, "qqfake_charlie.json")
     (folder / "zz_broken.json").write_bytes(b"{")
-    args = ["from-synthea", str(folder), "--hospital", "SYNLAB", "--out", str(tmp_path / "out")]
+    args = [
+        "generate-radiology",
+        str(folder),
+        "--hospital",
+        "SYNLAB",
+        "--out",
+        str(tmp_path / "out"),
+    ]
     assert cli.main([*args, "--config", str(tmp_path / "profiles")]) == 2
     assert not (tmp_path / "out").exists()
 
 
 def test_the_cli_refuses_an_unknown_hospital(tmp_path, registry, capsys):
-    args = ["from-synthea", str(FIXTURES), "--hospital", "NOPE", "--out", str(tmp_path / "o")]
+    args = ["generate-radiology", str(FIXTURES), "--hospital", "NOPE", "--out", str(tmp_path / "o")]
     assert cli.main([*args, "--config", str(tmp_path / "profiles")]) == 2
     assert "--hospital names no loaded profile." in capsys.readouterr().err
 
@@ -517,7 +524,7 @@ def test_the_cli_refuses_an_unknown_hospital(tmp_path, registry, capsys):
 
 
 def _skips(tmp_path: Path, hospital, bundle: dict) -> list[str]:
-    run = generate_from_synthea(_write(tmp_path / "in", "b.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "b.json", bundle), hospital, seed=42)
     return [k.reason for k in run.skipped]
 
 
@@ -634,7 +641,7 @@ def test_a_report_linked_through_the_service_request_is_used(tmp_path, hospital)
         presentedForm=[{"contentType": "text/plain", "data": text}],
     )
     bundle["entry"].append({"resource": report})
-    run = generate_from_synthea(_write(tmp_path / "in", "b.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "b.json", bundle), hospital, seed=42)
     study = next(s for s in run.index["studies"] if s["imaging_study"] == CT_STUDY)
     assert study["report_text"] == "source"
     assert (
@@ -648,7 +655,7 @@ def test_an_empty_text_form_is_passed_over_for_the_next(tmp_path, hospital):
     text = base64.b64encode(b"FINDINGS: The second form.").decode()
     forms = [{"contentType": "text/plain", "data": ""}, {"contentType": "text/plain", "data": text}]
     bundle["entry"].append({"resource": _linked_report(presentedForm=forms)})
-    run = generate_from_synthea(_write(tmp_path / "in", "b.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "b.json", bundle), hospital, seed=42)
     study = next(s for s in run.index["studies"] if s["imaging_study"] == CT_STUDY)
     assert study["report_text"] == "source"
     assert "FINDINGS: The second form." in run.files[study["report_file"]].decode()
@@ -656,7 +663,7 @@ def test_an_empty_text_form_is_passed_over_for_the_next(tmp_path, hospital):
 
 def test_an_inpatient_study_is_skipped_when_the_profile_has_no_a01(tmp_path):
     registry = _registry(tmp_path, types="[ADT^A04, ORM^O01, ORU^R01]")
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     assert [(k.imaging_study, k.reason) for k in run.skipped] == [(MR_STUDY, SKIP_INPATIENT)]
     assert "ADT^A01" not in run.counts
 
@@ -671,7 +678,7 @@ def test_the_same_study_twice_is_read_once(tmp_path, hospital):
     folder = _bundles(tmp_path, "qqfake_charlie.json")
     (folder / "sub").mkdir()
     shutil.copy(FIXTURES / "qqfake_charlie.json", folder / "sub" / "again.json")
-    run = generate_from_synthea(folder, hospital, seed=42)
+    run = generate_radiology(folder, hospital, seed=42)
     assert [(k.source, k.reason) for k in run.skipped] == [("file 2", SKIP_DUPLICATE)]
     assert run.counts["ORM^O01"] == 1
 
@@ -679,7 +686,7 @@ def test_the_same_study_twice_is_read_once(tmp_path, hospital):
 def test_the_cli_exits_1_and_lists_skips(tmp_path, registry, capsys):
     bundle = _alpha_with(lambda b: _cr(b).update(started="2026-03-02"))
     path = _write(tmp_path / "in", "b.json", bundle)
-    args = ["from-synthea", str(path), "--hospital", "SYNLAB", "--out", str(tmp_path / "o")]
+    args = ["generate-radiology", str(path), "--hospital", "SYNLAB", "--out", str(tmp_path / "o")]
     assert cli.main([*args, "--config", str(tmp_path / "profiles")]) == 1
     err = capsys.readouterr().err
     assert f"  skipped 1 study(ies): {SKIP_STARTED}" in err
@@ -701,7 +708,7 @@ def test_codes_priorities_and_text_are_written_safely(tmp_path, hospital):
         _cr(b)["procedureCode"] = []
 
     bundle = _alpha_with(change)
-    run = generate_from_synthea(_write(tmp_path / "in", "b.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "b.json", bundle), hospital, seed=42)
     cr, ct = (
         next(s for s in run.index["studies"] if s["imaging_study"] == r)
         for r in (CR_STUDY, CT_STUDY)
@@ -719,7 +726,7 @@ def test_codes_priorities_and_text_are_written_safely(tmp_path, hospital):
 
 
 def test_index_holds_no_names_or_birth_dates(hospital):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     text = run.files[INDEX_NAME].decode()
     for value in ("zzztest", "alpha", "qqfake", "charlie", "bravo", "1961", "19610412", ".json"):
         assert value not in text.lower()
@@ -727,16 +734,33 @@ def test_index_holds_no_names_or_birth_dates(hospital):
 
 
 def test_the_documented_error_lines(tmp_path, registry, capsys):
-    """The two from-synthea rows in docs/cli.md, word for word."""
+    """The three generate-radiology rows in docs/cli.md, word for word."""
     config = ["--config", str(tmp_path / "profiles")]
     (tmp_path / "msgs").mkdir()
     (tmp_path / "msgs" / "old.hl7").write_text("x", encoding="utf-8")
-    args = ["from-synthea", str(FIXTURES), "--hospital", "SYNLAB", "--out", str(tmp_path / "msgs")]
+    args = [
+        "generate-radiology",
+        str(FIXTURES),
+        "--hospital",
+        "SYNLAB",
+        "--out",
+        str(tmp_path / "msgs"),
+    ]
     assert cli.main([*args, *config]) == 2
-    expected = "error: --out is not empty; from-synthea never mixes two runs. Pick a new folder."
+    expected = (
+        "error: --out is not empty; generate-radiology never mixes two runs. Pick a new folder."
+    )
+    assert expected in capsys.readouterr().err
+    (tmp_path / "empty").mkdir()
+    args[-1] = str(tmp_path / "empty")
+    assert cli.main([*args, *config]) == 2
+    expected = (
+        "error: --out already exists; generate-radiology writes a new folder, so a failed run"
+        " leaves nothing in it. Pick a name that does not exist yet."
+    )
     assert expected in capsys.readouterr().err
     path = _write(tmp_path / "in", "a.json", {"resourceType": "Patient"})
-    args = ["from-synthea", str(path), "--hospital", "SYNLAB", "--out", str(tmp_path / "new")]
+    args = ["generate-radiology", str(path), "--hospital", "SYNLAB", "--out", str(tmp_path / "new")]
     assert cli.main([*args, *config]) == 2
     assert (
         "error: file 1 is not a FHIR Bundle. Point PATH at output/fhir." in capsys.readouterr().err
@@ -786,11 +810,11 @@ def test_a_repeated_local_hour_is_skipped_only_without_offsets(tmp_path):
     _resource(bundle, "ImagingStudy")["started"] = "2026-11-01T05:50:00+00:00"  # 01:50 EDT
     path = _write(tmp_path / "in", "c.json", bundle)
     plain = _registry(tmp_path / "a", offset=False).by_id["SYNLAB"]
-    assert [k.reason for k in generate_from_synthea(path, plain, seed=42).skipped] == [
+    assert [k.reason for k in generate_radiology(path, plain, seed=42).skipped] == [
         SKIP_REPEATED_HOUR
     ]
     with_offset = _registry(tmp_path / "b").by_id["SYNLAB"]
-    assert generate_from_synthea(path, with_offset, seed=42).skipped == []
+    assert generate_radiology(path, with_offset, seed=42).skipped == []
 
 
 def test_a_visits_adt_comes_before_every_order_in_it(tmp_path, hospital):
@@ -804,7 +828,7 @@ def test_a_visits_adt_comes_before_every_order_in_it(tmp_path, hospital):
     order["authoredOn"] = "2026-07-19T22:10:00-04:00"
     later["basedOn"] = [{"reference": f"ServiceRequest/{order['id']}"}]
     bundle["entry"] += [{"resource": later}, {"resource": order}]
-    run = generate_from_synthea(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
     emer = [s for s in run.index["studies"] if s["imaging_study"] != CR_STUDY]
     assert len(emer) == 2 and emer[0]["adt_file"] == emer[1]["adt_file"]
     for study in emer:
@@ -830,7 +854,7 @@ def test_a_profile_that_refuses_t_or_holds_a_separator_is_refused(tmp_path):
 
 def test_a_message_over_the_cap_skips_its_study(monkeypatch, hospital):
     monkeypatch.setattr(synthea, "MAX_MESSAGE_BYTES", 600)
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     assert {k.reason for k in run.skipped} == {SKIP_TOO_LARGE} and len(run.skipped) == 4
     assert not run.counts and json.loads(run.files[INDEX_NAME])["studies"] == []
 
@@ -841,7 +865,7 @@ def test_a_skipped_copy_does_not_make_the_good_copy_a_duplicate(tmp_path, hospit
     _resource(bad, "ImagingStudy")["started"] = "2026-09-01"
     _write(folder, "a.json", bad)
     _write(folder, "b.json", _load("qqfake_charlie.json"))
-    run = generate_from_synthea(folder, hospital, seed=42)
+    run = generate_radiology(folder, hospital, seed=42)
     assert [(k.source, k.reason) for k in run.skipped] == [("file 1", SKIP_STARTED)]
     assert run.counts["ORM^O01"] == 1
 
@@ -850,7 +874,7 @@ def test_out_inside_path_is_refused(tmp_path, registry):
     folder = _bundles(tmp_path, "qqfake_charlie.json")
     with pytest.raises(UsageError, match="is inside"):
         synthea.check_out(folder, folder / "out")
-    args = ["from-synthea", str(folder), "--hospital", "SYNLAB", "--out", str(folder / "o")]
+    args = ["generate-radiology", str(folder), "--hospital", "SYNLAB", "--out", str(folder / "o")]
     assert cli.main([*args, "--config", str(tmp_path / "profiles")]) == 2
     assert not (folder / "o").exists()
 
@@ -863,10 +887,10 @@ def test_only_lower_case_json_files_are_read_on_every_os(tmp_path, hospital):
 
 
 def test_a_changed_message_gets_a_new_control_id(tmp_path, hospital):
-    before = generate_from_synthea(FIXTURES / "qqfake_charlie.json", hospital, seed=42)
+    before = generate_radiology(FIXTURES / "qqfake_charlie.json", hospital, seed=42)
     bundle = _load("qqfake_charlie.json")
     _resource(bundle, "Patient")["name"][0]["family"] = "QQOTHER"
-    after = generate_from_synthea(_write(tmp_path / "in", "c.json", bundle), hospital, seed=42)
+    after = generate_radiology(_write(tmp_path / "in", "c.json", bundle), hospital, seed=42)
     ids = [{get_field(parse_hl7(t), "MSH-10") for _, t in _messages(r)} for r in (before, after)]
     assert not ids[0] & ids[1]
     assert before.index["studies"][0]["accession"] == after.index["studies"][0]["accession"]
@@ -936,7 +960,7 @@ def test_a_linked_resource_of_another_patient_is_never_used(tmp_path, hospital, 
     else:
         target = _resource(bundle, "ServiceRequest")
     target["subject"] = {"reference": f"urn:uuid:{OTHER}"}
-    run = generate_from_synthea(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
     assert CT_STUDY not in {s["imaging_study"] for s in run.index["studies"]}
     assert [(k.imaging_study, k.reason) for k in run.skipped] == [
         (CT_STUDY, synthea.SKIP_OTHER_PATIENT)
@@ -946,7 +970,7 @@ def test_a_linked_resource_of_another_patient_is_never_used(tmp_path, hospital, 
 def test_a_linked_resource_naming_the_same_patient_another_way_is_used(tmp_path, hospital):
     bundle = _load("zzztest_alpha.json")
     _resource(bundle, "ServiceRequest")["subject"] = {"reference": f"Patient/{ALPHA}"}
-    run = generate_from_synthea(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
     assert run.skipped == [] and len(run.index["studies"]) == 2
 
 
@@ -959,7 +983,7 @@ def test_the_same_mrn_under_two_systems_is_two_patients(tmp_path):
     folder = tmp_path / "in"
     _write(folder, "a.json", first)
     _write(folder, "b.json", second)
-    run = generate_from_synthea(folder, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(folder, registry.by_id["SYNLAB"], seed=42)
     assert run.skipped == []
     a, b = run.index["studies"]
     assert a["mrn"] == b["mrn"] and a["mrn_system"] != b["mrn_system"]
@@ -986,18 +1010,20 @@ def test_no_error_or_status_line_names_a_path(tmp_path, registry, capsys, monkey
         [str(FIXTURES), "--out", str(empty)],  # --out an existing empty folder
     ]
     for args in refused:
-        assert cli.main(["from-synthea", *args, *config]) == 2, args
+        assert cli.main(["generate-radiology", *args, *config]) == 2, args
     shutil.copy(FIXTURES / "hospitalInformation1700000000000.json", folder / f"{SECRET}.json")
     for args in (
         [str(folder), "--out", str(tmp_path / f"o3{SECRET}")],  # no ImagingStudy
         [str(folder), "--out", str(folder / "out")],  # --out inside PATH
     ):
-        assert cli.main(["from-synthea", *args, *config]) == 2, args
+        assert cli.main(["generate-radiology", *args, *config]) == 2, args
     monkeypatch.setattr(synthea, "MAX_FILES", 0)
-    assert cli.main(["from-synthea", str(folder), "--out", str(tmp_path / "o4"), *config]) == 2
+    assert (
+        cli.main(["generate-radiology", str(folder), "--out", str(tmp_path / "o4"), *config]) == 2
+    )
     monkeypatch.setattr(synthea, "MAX_FILES", 20_000)
     good = [str(FIXTURES / "qqfake_charlie.json"), "--out", str(tmp_path / f"good{SECRET}")]
-    assert cli.main(["from-synthea", *good, *config]) == 0
+    assert cli.main(["generate-radiology", *good, *config]) == 0
     captured = capsys.readouterr()
     assert captured.err.count("error: ") == 8
     assert SECRET not in captured.out + captured.err
@@ -1013,7 +1039,7 @@ def test_the_index_names_no_full_url_or_free_text_id(tmp_path, hospital):
     bad["id"] = f"{SECRET}-bad"
     bad["started"] = "2026-01-01"
     bundle["entry"].append({"resource": bad})
-    run = generate_from_synthea(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
     assert len(run.index["studies"]) == 2 and len(run.index["skipped"]) == 1
     assert SECRET not in run.files[INDEX_NAME].decode()
     labels = [s["imaging_study"] for s in run.index["studies"]]
@@ -1024,7 +1050,7 @@ def test_the_index_names_no_full_url_or_free_text_id(tmp_path, hospital):
 @pytest.mark.parametrize("field", ALLOWED_ACCESSION_FIELDS)
 def test_orc_and_obr_carry_the_same_placer_and_filler_numbers(tmp_path, field):
     registry = _registry(tmp_path, accession_field=field)
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     for study in run.index["studies"]:
         for kind in ("order_file", "report_file"):
             msg = parse_hl7(run.files[study[kind]].decode())
@@ -1036,7 +1062,7 @@ def test_orc_and_obr_carry_the_same_placer_and_filler_numbers(tmp_path, field):
 @pytest.mark.parametrize("field", ALLOWED_ACCESSION_FIELDS)
 def test_every_accession_field_gets_aa_from_the_direct_listener(tmp_path, field):
     registry = _registry(tmp_path, accession_field=field)
-    run = generate_from_synthea(FIXTURES, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(FIXTURES, registry.by_id["SYNLAB"], seed=42)
     names = ("zzztest_alpha.json", "zzzsample_bravo.json", "qqfake_charlie.json")
     server, acks = _direct(tmp_path, registry, run, [_resource(_load(n), "Patient") for n in names])
     assert {code for _, code in acks} == {"AA"}
@@ -1049,7 +1075,7 @@ def test_a_copy_too_large_to_write_does_not_block_a_good_copy(tmp_path, hospital
     _resource(big, "Patient")["name"][0]["family"] = "QQ" + "X" * (70 * 1024)
     _write(folder, "a.json", big)
     _write(folder, "b.json", _load("qqfake_charlie.json"))
-    run = generate_from_synthea(folder, hospital, seed=42)
+    run = generate_radiology(folder, hospital, seed=42)
     assert run.counts["ORM^O01"] == 1
     assert [(k.source, k.reason) for k in run.skipped] == [("file 1", SKIP_TOO_LARGE)]
 
@@ -1061,7 +1087,7 @@ def test_a_copy_in_a_repeated_hour_does_not_block_a_good_copy(tmp_path):
     _resource(early, "ImagingStudy")["started"] = "2026-11-01T05:50:00+00:00"  # 01:50 EDT
     _write(folder, "a.json", early)
     _write(folder, "b.json", _load("qqfake_charlie.json"))
-    run = generate_from_synthea(folder, plain, seed=42)
+    run = generate_radiology(folder, plain, seed=42)
     assert run.counts["ORM^O01"] == 1
     assert [(k.source, k.reason) for k in run.skipped] == [("file 1", SKIP_REPEATED_HOUR)]
 
@@ -1089,16 +1115,14 @@ def test_a_copy_in_a_repeated_hour_does_not_block_a_good_copy(tmp_path):
 def test_the_study_uid_comes_only_from_a_dicom_uid_identifier(tmp_path, hospital, identifiers, uid):
     bundle = _load("qqfake_charlie.json")
     _resource(bundle, "ImagingStudy")["identifier"] = identifiers
-    run = generate_from_synthea(_write(tmp_path / "in", "c.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "c.json", bundle), hospital, seed=42)
     assert run.index["studies"][0]["study_uid"] == uid
 
 
 @pytest.mark.parametrize("change", [{"facility": "OTHERLAB"}, {"version": "2.4"}])
 def test_msh10_changes_with_msh4_and_msh12(tmp_path, change):
-    a = generate_from_synthea(FIXTURES, _registry(tmp_path / "a").by_id["SYNLAB"], seed=42)
-    b = generate_from_synthea(
-        FIXTURES, _registry(tmp_path / "b", **change).by_id["SYNLAB"], seed=42
-    )
+    a = generate_radiology(FIXTURES, _registry(tmp_path / "a").by_id["SYNLAB"], seed=42)
+    b = generate_radiology(FIXTURES, _registry(tmp_path / "b", **change).by_id["SYNLAB"], seed=42)
     ids = [{get_field(parse_hl7(t), "MSH-10") for _, t in _messages(r)} for r in (a, b)]
     assert not ids[0] & ids[1]
 
@@ -1126,9 +1150,9 @@ def test_an_mrn_authority_the_direct_listener_cannot_read_back_is_refused(
     path = _write(tmp_path / "in", "c.json", bundle)
     if refused:
         with pytest.raises(UsageError, match="mrn_by_authority"):
-            generate_from_synthea(path, registry.by_id["SYNLAB"], seed=42)
+            generate_radiology(path, registry.by_id["SYNLAB"], seed=42)
         return
-    run = generate_from_synthea(path, registry.by_id["SYNLAB"], seed=42)
+    run = generate_radiology(path, registry.by_id["SYNLAB"], seed=42)
     _, acks = _direct(tmp_path, registry, run, [patient])
     assert {code for _, code in acks} == {"AA"}, acks
 
@@ -1137,7 +1161,7 @@ def test_an_mrn_authority_the_direct_listener_cannot_read_back_is_refused(
 def test_the_report_line_cap_counts_the_synthetic_footer(tmp_path, hospital, lines, written):
     bundle = _load("zzztest_alpha.json")
     bundle["entry"].append({"resource": _linked_report(conclusion="x\n" * lines)})
-    run = generate_from_synthea(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
+    run = generate_radiology(_write(tmp_path / "in", "a.json", bundle), hospital, seed=42)
     study = next((s for s in run.index["studies"] if s["imaging_study"] == CT_STUDY), None)
     if study is not None:
         oru = run.files[study["report_file"]].decode().split("\r")
@@ -1155,7 +1179,7 @@ def test_a_local_offset_with_seconds_is_never_written_shifted(tmp_path):
     for n, offset in enumerate((True, False)):
         paris = _registry(tmp_path / str(n), timezone="Europe/Paris", offset=offset)
         hospital = paris.by_id["SYNLAB"]
-        run = generate_from_synthea(path, hospital, seed=42)
+        run = generate_radiology(path, hospital, seed=42)
         for study in run.index["studies"]:
             oru = parse_hl7(run.files[study["report_file"]].decode())
             exam = parse_hl7_ts(get_field(oru, "OBR-7"), default_tz=hospital.tzinfo)
@@ -1165,7 +1189,7 @@ def test_a_local_offset_with_seconds_is_never_written_shifted(tmp_path):
 
 
 def test_a_failed_write_leaves_no_output_behind(tmp_path, hospital, monkeypatch):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     real_write = OwnedFiles.write_bytes
     calls = []
 
@@ -1177,13 +1201,52 @@ def test_a_failed_write_leaves_no_output_behind(tmp_path, hospital, monkeypatch)
 
     monkeypatch.setattr(OwnedFiles, "write_bytes", failing_write)
     parent = tmp_path / "parent"
-    with pytest.raises(OSError):
+    with pytest.raises(UsageError) as caught:
         write_run(run, parent / "out")
+    assert str(caught.value) == (
+        "cannot write the run beside --out (No space left on device); nothing was written."
+    )
     assert list(parent.iterdir()) == []  # no --out, no staged folder
 
 
+def test_a_failed_rename_is_a_usage_error_naming_no_path(tmp_path, registry, monkeypatch, capsys):
+    out = tmp_path / SECRET / "out"
+
+    def refuse(src, dst):
+        raise PermissionError(13, "Permission denied", str(src), None, str(dst))
+
+    monkeypatch.setattr(synthea.os, "rename", refuse)
+    config = ["--hospital", "SYNLAB", "--config", str(tmp_path / "profiles")]
+    assert cli.main(["generate-radiology", str(FIXTURES), "--out", str(out), *config]) == 2
+    err = capsys.readouterr().err
+    assert "error: cannot write the run beside --out (Permission denied)" in err
+    assert SECRET not in err
+    assert list(out.parent.iterdir()) == []  # the staged run was removed
+
+
+def test_a_stage_that_cannot_be_removed_is_named_in_the_error(tmp_path, hospital, monkeypatch):
+    run = generate_radiology(FIXTURES, hospital, seed=42)
+
+    def fail(self, path, data, **kwargs):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(OwnedFiles, "write_bytes", fail)
+    monkeypatch.setattr(synthea, "remove_owned", lambda owned: demofiles.RemovalResult())
+    with pytest.raises(UsageError) as caught:
+        write_run(run, tmp_path / "out")
+    assert str(caught.value).endswith(
+        " Its staging folder (.generate-radiology-*) could not be removed and is left beside --out."
+    )
+
+
+def test_the_index_names_the_command(hospital):
+    run = generate_radiology(FIXTURES, hospital, seed=42)
+    assert json.loads(run.files[INDEX_NAME])["generator"] == "hl7bridge generate-radiology"
+    assert synthea.STAGE_PREFIX == ".generate-radiology-"
+
+
 def test_an_out_created_by_another_writer_meanwhile_is_left_alone(tmp_path, hospital, monkeypatch):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     out = tmp_path / "out"
     real_write = OwnedFiles.write_bytes
 
@@ -1208,9 +1271,10 @@ def test_an_existing_empty_out_is_refused_before_any_bundle_is_read(tmp_path, re
     out = tmp_path / "out"
     out.mkdir()
     config = ["--hospital", "SYNLAB", "--config", str(tmp_path / "profiles")]
-    assert cli.main(["from-synthea", str(folder), "--out", str(out), *config]) == 2
+    assert cli.main(["generate-radiology", str(folder), "--out", str(out), *config]) == 2
     assert (
-        "error: --out already exists; from-synthea writes a new folder" in capsys.readouterr().err
+        "error: --out already exists; generate-radiology writes a new folder"
+        in capsys.readouterr().err
     )
     assert list(out.iterdir()) == []
 
@@ -1219,7 +1283,7 @@ def test_an_existing_empty_out_is_refused_before_any_bundle_is_read(tmp_path, re
 def test_a_folder_that_cannot_be_staged_is_a_usage_error_naming_no_path(
     tmp_path, hospital, monkeypatch, where
 ):
-    run = generate_from_synthea(FIXTURES, hospital, seed=42)
+    run = generate_radiology(FIXTURES, hospital, seed=42)
     out = tmp_path / SECRET / "out"
     if where == "mkdtemp":
 
@@ -1246,7 +1310,7 @@ def test_the_output_gets_the_umask_modes_not_mkdtemps(tmp_path, hospital):
     out = tmp_path / "out"
     previous = os.umask(0o022)
     try:
-        write_run(generate_from_synthea(FIXTURES, hospital, seed=42), out)
+        write_run(generate_radiology(FIXTURES, hospital, seed=42), out)
     finally:
         os.umask(previous)
     assert out.stat().st_mode & 0o777 == 0o755
@@ -1260,7 +1324,7 @@ def test_a_link_at_out_is_refused(tmp_path, registry, capsys):
     except OSError:
         pytest.skip("this account cannot make symbolic links")
     config = ["--hospital", "SYNLAB", "--config", str(tmp_path / "profiles")]
-    assert cli.main(["from-synthea", str(FIXTURES), "--out", str(link), *config]) == 2
+    assert cli.main(["generate-radiology", str(FIXTURES), "--out", str(link), *config]) == 2
     assert "error: --out is a link" in capsys.readouterr().err
     assert not (tmp_path / "missing").exists()
 
@@ -1269,7 +1333,10 @@ def test_a_junction_or_link_to_an_empty_folder_at_out_is_refused(tmp_path, regis
     (tmp_path / "target").mkdir()
     _dir_link(tmp_path / "via", tmp_path / "target")
     config = ["--hospital", "SYNLAB", "--config", str(tmp_path / "profiles")]
-    assert cli.main(["from-synthea", str(FIXTURES), "--out", str(tmp_path / "via"), *config]) == 2
+    assert (
+        cli.main(["generate-radiology", str(FIXTURES), "--out", str(tmp_path / "via"), *config])
+        == 2
+    )
     assert "error: --out is a link" in capsys.readouterr().err
     assert list((tmp_path / "target").iterdir()) == []
 
@@ -1282,7 +1349,7 @@ def test_a_full_out_is_refused_before_any_bundle_is_read(tmp_path, registry, cap
     out.mkdir()
     (out / "old.hl7").write_text("x", encoding="utf-8")
     config = ["--hospital", "SYNLAB", "--config", str(tmp_path / "profiles")]
-    assert cli.main(["from-synthea", str(folder), "--out", str(out), *config]) == 2
+    assert cli.main(["generate-radiology", str(folder), "--out", str(out), *config]) == 2
     assert "error: --out is not empty" in capsys.readouterr().err
 
 
@@ -1292,10 +1359,10 @@ def test_a_linked_folder_inside_path_is_not_read(tmp_path, hospital):
     outside.mkdir()
     shutil.copy(FIXTURES / "zzztest_alpha.json", outside / "a.json")
     _dir_link(folder / "linked", outside)
-    run = generate_from_synthea(folder, hospital, seed=42)
+    run = generate_radiology(folder, hospital, seed=42)
     assert run.bundles == 1
     write_run(run, outside / "out")  # check_out passes: outside is not inside PATH
-    assert generate_from_synthea(folder, hospital, seed=42).bundles == 1
+    assert generate_radiology(folder, hospital, seed=42).bundles == 1
 
 
 def test_out_through_a_link_into_path_or_at_path_is_refused(tmp_path):

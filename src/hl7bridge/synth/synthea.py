@@ -1,6 +1,6 @@
 """Radiology HL7 v2 messages from Synthea FHIR R4 Bundles, offline.
 
-``hl7bridge from-synthea PATH --hospital ID --out DIR`` reads Synthea
+``hl7bridge generate-radiology PATH --hospital ID --out DIR`` reads Synthea
 output (one Bundle file, or a folder of them) and writes, for every
 ImagingStudy, the feed a radiology system would send: an ADT^A04 (A01 for
 an inpatient encounter) once per visit, an ORM^O01 new order and an
@@ -63,7 +63,7 @@ MAX_REPORT_TEXT_BYTES = 32 * 1024
 MAX_REPORT_LINES = 500
 MAX_MESSAGE_BYTES = 64 * 1024  # far under the listener's frame limit
 INDEX_NAME = "index.json"
-GENERATOR = "hl7bridge from-synthea"
+GENERATOR = "hl7bridge generate-radiology"
 PROCESSING_ID = "T"
 NEEDED_TYPES = ("ADT^A04", "ORM^O01", "ORU^R01")
 INPATIENT_EVENT = "ADT^A01"
@@ -995,7 +995,7 @@ def check_profile(hospital: HospitalConfig) -> None:
     if PROCESSING_ID not in hospital.fhir.allowed_processing_ids:
         raise UsageError(
             f"profile {hospital.hospital_id} does not allow processing id {PROCESSING_ID};"
-            " from-synthea writes MSH-11 T and the direct listener would refuse it.",
+            " generate-radiology writes MSH-11 T and the direct listener would refuse it.",
             hint="Add T to fhir.allowed_processing_ids, or pick another --hospital.",
         )
     if not (_plain(hospital.facility_codes[0]) and _plain(hospital.hl7_version)):
@@ -1015,7 +1015,7 @@ def check_profile(hospital: HospitalConfig) -> None:
 def _refuse_link(out: Path) -> None:
     if _is_link(out):
         raise UsageError(
-            "--out is a link; from-synthea writes only a new real folder.",
+            "--out is a link; generate-radiology writes only a new real folder.",
             hint="Pick a new folder.",
         )
 
@@ -1029,11 +1029,12 @@ def _check_out_folder(out: Path) -> None:
         raise UsageError("--out exists and is not a folder.", hint="Pick a new folder.")
     if out.is_dir() and any(out.iterdir()):
         raise UsageError(
-            "--out is not empty; from-synthea never mixes two runs.", hint="Pick a new folder."
+            "--out is not empty; generate-radiology never mixes two runs.",
+            hint="Pick a new folder.",
         )
     if out.is_dir():
         raise UsageError(
-            "--out already exists; from-synthea writes a new folder, so a failed run"
+            "--out already exists; generate-radiology writes a new folder, so a failed run"
             " leaves nothing in it.",
             hint="Pick a name that does not exist yet.",
         )
@@ -1055,7 +1056,7 @@ def check_out(path: Path, out: Path) -> None:
     _check_out_folder(out)
 
 
-def generate_from_synthea(path: Path, hospital: HospitalConfig, *, seed: int) -> SyntheaRun:
+def generate_radiology(path: Path, hospital: HospitalConfig, *, seed: int) -> SyntheaRun:
     """Read every Bundle under ``path`` and render the run. Writes nothing."""
     check_profile(hospital)
     files = bundle_files(path)
@@ -1072,7 +1073,10 @@ def generate_from_synthea(path: Path, hospital: HospitalConfig, *, seed: int) ->
     return run
 
 
-STAGE_PREFIX = ".from-synthea-"
+STAGE_PREFIX = ".generate-radiology-"
+LEFT_BEHIND = (
+    f" Its staging folder ({STAGE_PREFIX}*) could not be removed and is left beside --out."
+)
 
 
 def _default_modes(folder: Path, names: list[str]) -> None:
@@ -1096,7 +1100,8 @@ def write_run(run: SyntheaRun, out: Path) -> None:
     ``tempfile.mkdtemp`` makes beside ``out``; when all are written that
     folder is renamed to ``out`` in one step. A failure before the rename
     removes the staged files and folder through ``demofiles.remove_owned``
-    (the one deleting code in hl7bridge), so nothing is left in ``out``. A
+    (the one deleting code in hl7bridge), so nothing is left in ``out``,
+    and an OSError becomes a UsageError that names no path. A
     folder another writer makes at ``out`` meanwhile is never written into:
     the rename fails (or, on Linux and macOS, replaces it only if it is
     still empty)."""
@@ -1115,27 +1120,38 @@ def write_run(run: SyntheaRun, out: Path) -> None:
     except (OSError, DemoDirError):
         # The empty stage cannot be removed without its identity; it stays.
         raise UsageError(
-            "cannot use the new folder made beside --out; nothing was written.",
+            f"cannot use the new folder made beside --out; nothing was written.{LEFT_BEHIND}",
             hint="Check that the folder that holds --out can be written to.",
         ) from None
-    published = False
     try:
         for name, data in run.files.items():
             owned.write_bytes(owned.root / name, data, stamp=False)
         _default_modes(owned.root, list(run.files))
-        try:
-            os.rename(owned.root, out)
-        except OSError:
-            if os.path.lexists(out):
-                raise UsageError(
-                    "--out was created while writing; nothing was written.",
-                    hint="Pick a new folder.",
-                ) from None
-            raise
-        published = True
-    finally:
-        if not published:
-            remove_owned(owned)
+        os.rename(owned.root, out)
+    except OSError as exc:
+        # Only the OS message: the exception's file names can hold --out.
+        reason = exc.strerror or type(exc).__name__
+        left = _clean_up(owned)
+        if os.path.lexists(out):
+            raise UsageError(
+                f"--out was created while writing; nothing was written.{left}",
+                hint="Pick a new folder.",
+            ) from None
+        raise UsageError(
+            f"cannot write the run beside --out ({reason}); nothing was written.{left}",
+            hint="Check the free space and that the folder that holds --out can be written to.",
+        ) from None
+    except BaseException:
+        _clean_up(owned)
+        raise
+
+
+def _clean_up(owned: OwnedFiles) -> str:
+    """Remove the staged run. Returns a sentence for the error when its
+    folder could not be removed, else an empty string."""
+    if remove_owned(owned).root_removed:
+        return ""
+    return LEFT_BEHIND
 
 
 __all__ = [
@@ -1151,7 +1167,7 @@ __all__ = [
     "bundle_files",
     "check_out",
     "check_profile",
-    "generate_from_synthea",
+    "generate_radiology",
     "load_bundle",
     "source_name",
     "write_run",

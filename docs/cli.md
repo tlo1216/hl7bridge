@@ -15,7 +15,7 @@
 | Messages | `send [PATH]` | Send a file, a folder or stdin (`-`) over MLLP, one frame per message, and show the ACKs; `--repeat N`, `--rate PER_SECOND`, `--expect CODE` |
 | Messages | `replay` | Resend quarantined (default) or stored (`--from store`) messages, oldest first, byte for byte and each distinct one once; reads a version 2 or 3 store; `--only-reason`, `--since`, `--hospital`, `--limit`, `--dry-run` |
 | Messages | `synth --out DIR` | Generate a synthetic day with a defect manifest |
-| Messages | `from-synthea PATH --hospital ID --out DIR` | Write radiology ADT, ORM and ORU messages for every ImagingStudy in Synthea FHIR Bundles, offline, plus `index.json`; `--seed N` |
+| Messages | `generate-radiology PATH --hospital ID --out DIR` | Write radiology ADT, ORM and ORU messages for every ImagingStudy in Synthea FHIR Bundles, offline, plus `index.json`; `--seed N` |
 | Listener | `listen` | Run the MLLP listener into the store (`--tls-cert`, `--tls-key`, `--tls-ca` for TLS); `--target fhir` writes each message to a FHIR server as one transaction and ACKs after the commit (see below) |
 | Reports | `reconcile` | Orders versus imaging studies |
 | Reports | `ack-report` | Delivery status of outbound reports |
@@ -246,9 +246,9 @@ are never overwritten.
 `--report 456` writes one ORU^R01 for a DiagnosticReport and its
 Observations instead.
 
-## Radiology messages from Synthea: `from-synthea`
+## Radiology messages from Synthea: `generate-radiology`
 
-`hl7bridge from-synthea synthea/output/fhir --hospital WINTEHR --out msgs`
+`hl7bridge generate-radiology synthea/output/fhir --hospital WINTEHR --out msgs`
 reads Synthea FHIR R4 Bundles (one file, or every `*.json` under a folder)
 and writes the feed a radiology system would send for each ImagingStudy:
 an `ADT^A04` once per encounter (`ADT^A01` for an inpatient encounter,
@@ -299,12 +299,13 @@ the same Bundles, `--seed` and profile give the same bytes.
   parent folder must be writable, since the run is staged there: in Docker,
   mount the parent of `--out`, not `--out` itself. Everything is rendered
   and checked before the first file is written. The files go into a new
-  hidden `.from-synthea-*` folder beside `--out` that is renamed to `--out`
-  in one step when all are written, so a failed write leaves no partial
-  output in `--out`. On Linux and macOS the output gets the usual umask
-  modes; on Windows it keeps the owner-only access that Python gives a new
-  temporary folder. A study
-  whose messages the listener would not accept is skipped and listed (no
+  `.generate-radiology-*` folder beside `--out` that is renamed to `--out`
+  in one step when all are written, so a failed write (a full disk, say)
+  leaves no partial output in `--out` and is an `error:` line that names no
+  path. On Linux and macOS the output gets the usual umask modes; on
+  Windows it keeps the owner-only access that Python gives a new temporary
+  folder. A study whose messages the listener would not accept is skipped
+  and listed (no
   modality, a time with no UTC offset or outside 1900 to 2100, times out of
   order, a partial or null `birthDate`, a padded MRN, a report status with
   no ORU result status P, F or C, a Patient not in FHIR shape, a time in a
@@ -319,10 +320,11 @@ the same Bundles, `--seed` and profile give the same bytes.
   replaced by the run (a folder with anything in it is refused). On
   Windows a virus scanner that still holds a new file can make the rename
   fail; nothing is written and a rerun works. If cleanup after a failure
-  cannot remove a staged file (one held open), a hidden `.from-synthea-*`
-  folder stays beside `--out`. On a case-insensitive macOS volume the
-  inside-PATH check compares names case-sensitively. A file linked into
-  PATH is read; only linked folders are skipped.
+  cannot remove a staged file (one held open), the
+  `.generate-radiology-*` folder stays beside `--out` and the error says
+  so. On a case-insensitive volume (macOS, or a Windows drive under WSL)
+  the inside-PATH check compares names case-sensitively. A file linked
+  into PATH is read; only linked folders are skipped.
 
 For a teaching lab, run it on the lab's own Synthea export with the lab
 profile, then `hl7bridge send msgs` to `listen --target fhir`: the patients
@@ -477,11 +479,12 @@ could do that print only their class name.
 | `to-fhir --post` with no server | `error: to-fhir --post writes to a FHIR server, so it needs one named. Pass --fhir-base URL or set HL7BRIDGE_FHIR_BASE.` |
 | Bundle not fully committed | `error: FHIR server returned 200 for /fhir: entry 4 was not committed` (also for an answer that is not a `transaction-response`, or has the wrong number of entries; exit 1, and later Bundles are not sent) |
 | Replay filter | `error: --only-reason applies to --from quarantine only.` and `error: --only-reason takes one of hl7bridge's quarantine reason codes. Known: ...` |
-| `from-synthea --out` not empty | `error: --out is not empty; from-synthea never mixes two runs. Pick a new folder.` (PATH and `--out` are named by option, never by path) |
-| `from-synthea`, a file that is not a Bundle | `error: file 1 is not a FHIR Bundle. Point PATH at output/fhir.` |
+| `generate-radiology --out` not empty | `error: --out is not empty; generate-radiology never mixes two runs. Pick a new folder.` (PATH and `--out` are named by option, never by path) |
+| `generate-radiology --out` an existing empty folder | `error: --out already exists; generate-radiology writes a new folder, so a failed run leaves nothing in it. Pick a name that does not exist yet.` |
+| `generate-radiology`, a file that is not a Bundle | `error: file 1 is not a FHIR Bundle. Point PATH at output/fhir.` |
 | File system error | `error: FileNotFoundError: No such file or directory. Check the paths you passed.` (exit 2; the file name is not printed, since it can be a name read from a folder) |
 
 Each row has a test on its text in `tests/unit/test_cli.py`,
 `tests/unit/test_cli_messages.py`, `tests/unit/test_fhir_sync_mapping.py`,
-`tests/unit/test_from_synthea.py`,
+`tests/unit/test_generate_radiology.py`,
 `tests/unit/test_config.py` or `tests/unit/test_demo.py`.
