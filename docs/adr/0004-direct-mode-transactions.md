@@ -34,8 +34,11 @@ server, all of it.
    `Bundle.total` and the entries, a `next` link meaning more than one);
    one active Patient that no other replaced is the only match. The MRN
    system comes from `mrn_by_authority` by PID-3.4, or `mrn` when PID-3.4
-   is empty; a valued authority the profile does not map is AE
-   `unknown_assigning_authority`, never the default system. A key whose
+   has no namespace and no universal id; a namespace the profile does not map is AE
+   `unknown_assigning_authority`, never the default system. With no
+   namespace, an ISO OID is its own system (`urn:oid:<OID>`, unless the
+   profile maps that key) and any other universal id alone is AE
+   `unknown_assigning_authority`. A key whose
    resource has another Patient as subject is AE `patient_mismatch`. A08
    would change a Patient that no run owns, so it is refused rather than
    half applied.

@@ -108,6 +108,162 @@ def test_untyped_repeats_keep_the_first_repetition_as_the_mrn(registry):
     assert "type" not in patient["identifier"][1]
 
 
+# -- PID-3.4 escapes ----------------------------------------------------------------
+#
+# python-hl7 splits a field on the message's own separators and only then
+# unescapes each leaf, so a separator a sender escaped inside the namespace
+# (HD.1) is part of it. Splitting the unescaped value again cut it short.
+
+_ESCAPED = [
+    ("ST\\T\\MARY", "ST&MARY"),
+    ("ST\\X26\\MARY", "ST&MARY"),
+    ("ST\\S\\MARY", "ST^MARY"),
+    ("ST\\R\\MARY", "ST~MARY"),
+    ("ST\\E\\MARY", "ST\\MARY"),
+    ("ST\\F\\MARY", "ST|MARY"),
+    ("A\\T\\B\\S\\C\\R\\D\\E\\E\\F\\F", "A&B^C~D\\E|F"),
+    ("ST\\E\\T\\E\\MARY", "ST\\T\\MARY"),  # decoded once, never twice
+]
+
+
+def _authority(text: str, registry: HospitalRegistry) -> str | None:
+    return message_to_bundle(text, registry).mrn_authority
+
+
+@pytest.mark.parametrize(("sent", "authority"), _ESCAPED)
+def test_an_escaped_separator_stays_in_the_mrn_authority(sent, authority, registry):
+    assert _authority(_adt(f"SC9001^^^{sent}^MR"), registry) == authority
+    hd = f"SC9001^^^{sent}&2.16.840.1.113883.3.999&ISO^MR"
+    assert _authority(_adt(hd), registry) == authority
+
+
+def test_the_mrn_authority_is_the_namespace_of_a_full_hd(registry):
+    assert _authority(_adt("SC9001^^^HOSPC&1.2.3.4&ISO^MR"), registry) == "HOSPC"
+    assert _authority(_adt("SC9001^^^^MR"), registry) == ""
+
+
+# -- PID-3.4 with no namespace, only a universal id ---------------------------------
+#
+# With no namespace (HD.1), an ISO OID in HD.2 is the authority, urn:oid:<OID>
+# as the IG's CX to Identifier map makes the system. Any other universal id
+# names an authority hl7bridge cannot key: None, so direct mode answers AE.
+
+_OID_ONLY = [
+    ("SC9001^^^&1.2.3.4&ISO^MR", "urn:oid:1.2.3.4"),
+    ("SC9001^^^&2.16.840.1.113883.19.5&ISO^MR", "urn:oid:2.16.840.1.113883.19.5"),
+    ("SC9001^^^&1.2\\X2E\\3.4&ISO^MR", "urn:oid:1.2.3.4"),  # a hex escape, decoded once
+    ("X1^^^ST^PI~SC9001^^^&1.2.3.4&ISO^MR", "urn:oid:1.2.3.4"),  # the MR repetition
+    ("SC9001^^^&1.2.3.4&DNS^MR", None),
+    ("SC9001^^^&1.2.3.4&^MR", None),
+    ("SC9001^^^&1.2.3.4^MR", None),
+    ("SC9001^^^&1.2.3.4&iso^MR", None),
+    ("SC9001^^^&1.2.3.4&IS\\T\\O^MR", None),
+    ("SC9001^^^&8f14e45f-ceea-467a-9575-0c3c2a5a1d5e&UUID^MR", None),
+    ("SC9001^^^&https://example.org/mrn&URI^MR", None),
+    ("SC9001^^^&HOSPC&ISO^MR", None),  # not an OID
+    ("SC9001^^^&1.2.3\\T\\4&ISO^MR", None),  # never split again: 1.2.3&4 is not an OID
+    ("SC9001^^^&1.2.3\\S\\4&ISO^MR", None),
+    # Digits and dots that are not an OID.
+    ("SC9001^^^&1&ISO^MR", None),
+    ("SC9001^^^&1.2.&ISO^MR", None),
+    ("SC9001^^^&01.2.3&ISO^MR", None),
+    ("SC9001^^^&1.02.3&ISO^MR", None),
+    ("SC9001^^^&1..2&ISO^MR", None),
+    ("SC9001^^^&3.2.3.4&ISO^MR", None),
+    ("SC9001^^^& 1.2.3.4 &ISO^MR", "urn:oid:1.2.3.4"),  # trimmed, as every value is
+    # No namespace and no universal id: unchanged, the profile's own system.
+    ("SC9001^^^&&ISO^MR", ""),
+    ("SC9001^^^&&^MR", ""),
+    ('SC9001^^^&""&ISO^MR', ""),
+    # An HL7 null in HD.1 stays a namespace named "" (as before this change).
+    ('SC9001^^^""&1.2.3.4&ISO^MR', '""'),
+]
+
+
+@pytest.mark.parametrize(("pid3", "authority"), _OID_ONLY)
+def test_an_hd_with_only_a_universal_id(pid3, authority, registry):
+    mapped = message_to_bundle(_adt(pid3), registry)
+    assert mapped.mrn_authority == authority
+    assert mapped.mrn_authority_is_oid is (authority or "").startswith("urn:oid:")
+    # The FHIR mapping of the MRN repetition does not change: the profile's
+    # MRN system and type MR, the key of conditional updates.
+    mrn = _patient(_adt(pid3), registry)["identifier"][0]
+    assert mrn["system"] == MRN_SYSTEM and mrn["value"] == "SC9001"
+    assert mrn["type"]["coding"][0]["code"] == "MR" and "assigner" not in mrn
+
+
+def test_a_namespace_is_never_an_oid_key(registry):
+    """A namespace keys by its text, even one that reads like an OID system."""
+    for pid3 in ("SC9001^^^urn:oid:1.2.3.4^MR", "SC9001^^^urn:oid:1.2.3.4&1.2.3.4&ISO^MR"):
+        mapped = message_to_bundle(_adt(pid3), registry)
+        assert mapped.mrn_authority == "urn:oid:1.2.3.4"
+        assert mapped.mrn_authority_is_oid is False
+
+
+# Separators that are not the defaults: & is plain data in this message.
+_OTHER_SEPS = str.maketrans({"|": "!", "^": "$", "~": "*", "\\": "@", "&": "%"})
+
+
+@pytest.mark.parametrize(
+    ("pid3", "authority"),
+    [
+        ("SC9001$$$%1.2.3.4%ISO$MR", "urn:oid:1.2.3.4"),
+        ("SC9001$$$%1.2.3&4%ISO$MR", None),
+        ("SC9001$$$%1.2.3@T@4%ISO$MR", None),
+    ],
+)
+def test_an_oid_only_hd_under_the_message_own_separators(pid3, authority, registry):
+    text = _adt("PLACEHOLDER").translate(_OTHER_SEPS).replace("PLACEHOLDER", pid3)
+    assert text.startswith("MSH!$*@%!")
+    assert _authority(text, registry) == authority
+
+
+def test_escaped_separators_in_other_authorities_are_kept_whole(registry):
+    text = _adt(
+        "SC9001^^^HOSPC^MR~A1^^^ALT\\T\\X&1.2.3.5&ISO^PI~B1^^^OTHER\\T\\SITE\\S\\2^XX"
+        "~C1^^^\\T\\&&ISO^SS"
+    )
+    ids = _patient(text, registry)["identifier"]
+    assert [i["value"] for i in ids] == ["SC9001", "A1", "B1", "C1"]
+    assert ids[1]["system"] == "urn:oid:1.2.3.5" and "assigner" not in ids[1]
+    assert ids[2]["assigner"] == {"display": "OTHER&SITE^2"} and "system" not in ids[2]
+    assert ids[3]["assigner"] == {"display": "&"} and "system" not in ids[3]
+
+
+def test_repeated_pid3_takes_the_authority_of_the_mr_repetition(registry):
+    text = _adt(
+        "X1^^^OTHER\\T\\SITE^PI~SC9001^^^ST\\T\\MARY&1.2.3.4&ISO^MR~Y1^^^ST^SS"
+        "~Z1^^^ST\\T\\JOHN&1.2.3.6&ISO^MR"
+    )
+    assert _authority(text, registry) == "ST&MARY"
+    ids = _patient(text, registry)["identifier"]
+    assert [i["value"] for i in ids] == ["SC9001", "X1", "Y1", "Z1"]
+    assert ids[1]["assigner"] == {"display": "OTHER&SITE"}
+    assert ids[2]["assigner"] == {"display": "ST"}
+    assert ids[3]["system"] == "urn:oid:1.2.3.6"
+
+
+# Field, component, repetition, escape and subcomponent separators that are
+# not the defaults: none of | ^ ~ \ & is a separator in the message any more.
+_OTHER = str.maketrans({"|": "!", "^": "$", "~": "*", "\\": "@", "&": "%"})
+
+
+@pytest.mark.parametrize(
+    ("pid3", "authority"),
+    [
+        ("SC9001$$$A&B^C~D\\E|F$MR", "A&B^C~D\\E|F"),  # all plain data here
+        ("SC9001$$$ST&MARY%1.2.3.4%ISO$MR", "ST&MARY"),
+        ("SC9001$$$ST@T@MARY%1.2.3.4%ISO$MR", "ST%MARY"),
+        ("X1$$$ST$PI*SC9001$$$ST&JOHN%1.2.3.4%ISO$MR", "ST&JOHN"),
+    ],
+)
+def test_the_message_own_separators_split_pid3(pid3, authority, registry):
+    text = _adt("PLACEHOLDER").translate(_OTHER).replace("PLACEHOLDER", pid3)
+    assert text.startswith("MSH!$*@%!")
+    assert _authority(text, registry) == authority
+    assert _patient(text, registry)["identifier"][0]["value"] == "SC9001"
+
+
 # -- PID-5, PID-11, PID-13, PID-14 ------------------------------------------------
 
 

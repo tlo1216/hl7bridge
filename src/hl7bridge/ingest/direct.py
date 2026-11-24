@@ -25,7 +25,7 @@ ACK decision table (``ack_code_for``, tested row by row):
 | Same identity, content other than a committed or maybe committed one | AE | control_id_conflict |
 | Same identity and content, committed, keys still in the run | AA | (duplicate) |
 | The message does not map | AE | mapping_error |
-| PID-3.4 valued and not in ``mrn_by_authority`` | AE | unknown_assigning_authority |
+| PID-3.4 namespace unmapped, or a non-OID universal id alone | AE | unknown_assigning_authority |
 | No Patient with the MRN | AE | unknown_patient |
 | Several Patients with the MRN, counted over every page | AE | ambiguous_patient |
 | The one Patient is inactive, or replaced by another | AE | inactive_patient, replaced_patient |
@@ -749,7 +749,9 @@ class DirectHandler:
             return outcome_for_error(exc)
         patient_entry = (mapped.bundle.entry or [])[0].resource
         mrn = str(patient_entry.identifier[0].value)  # type: ignore[union-attr]
-        system = hospital.fhir.mrn_system(mapped.mrn_authority, hospital.systems.mrn)
+        system = hospital.fhir.mrn_system(
+            mapped.mrn_authority, hospital.systems.mrn, oid=mapped.mrn_authority_is_oid
+        )
         if system is None:
             return Outcome("unknown_assigning_authority", "PID-3.4")
         try:

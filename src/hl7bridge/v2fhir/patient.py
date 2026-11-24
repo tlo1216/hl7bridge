@@ -45,16 +45,46 @@ def mrn_value(ctx: MapContext) -> str:
     return check_key(mrn, "PID-3")
 
 
-def mrn_authority(ctx: MapContext) -> str:
-    """PID-3.4 (assigning authority, its first subcomponent) of the MRN
-    repetition, or ''. Direct mode picks the MRN system by it
-    (``fhir.identifier_systems.mrn_by_authority``)."""
+def authority_key(ctx: MapContext, ref: str, rep: int = 1) -> tuple[str | None, bool]:
+    """Component 4 (assigning authority, an HD) of one CX repetition as a
+    key, and whether the key is an OID. Direct mode picks the MRN system by
+    the key (``fhir.identifier_systems.mrn_by_authority``) and the A40
+    check compares MRG-1.4 with PID-3.4 by it:
+
+    - the namespace (HD.1) when there is one, as before: (namespace, False);
+    - no namespace, HD.3 ``ISO`` and HD.2 an OID: (``urn:oid:<HD.2>``,
+      True), the system the IG's CX to Identifier map gives an ISO OID;
+    - no namespace and no universal id: ('', False);
+    - no namespace and any other universal id (another type, no type, not
+      an OID): (None, False), an authority hl7bridge cannot key.
+
+    The reader splits the field on the message's own separators (MSH-1 and
+    MSH-2) and unescapes each piece after, so a separator the sender
+    escaped stays part of its subcomponent. Nothing here splits a value
+    again."""
+    r = ctx.reader
+    namespace = r.get(ref, rep=rep, comp=4, sub=1)
+    if namespace:
+        return namespace, False
+    uid, kind = (
+        p if p != '""' else "" for p in (r.get(ref, rep=rep, comp=4, sub=n) for n in (2, 3))
+    )
+    if not uid:
+        return "", False
+    if kind == "ISO" and _OID.fullmatch(uid):
+        return f"urn:oid:{uid}", True
+    return None, False
+
+
+def mrn_authority(ctx: MapContext) -> tuple[str | None, bool]:
+    """``authority_key`` of PID-3.4 in the MRN repetition, or ('', False)
+    when no repetition is the MRN."""
     r = ctx.reader
     reps = r.repetitions("PID-3")
     chosen = pick_mrn_repetition([r.get("PID-3", rep=n, comp=5) for n in range(1, reps + 1)])
     if not chosen:
-        return ""
-    return r.get("PID-3", rep=chosen, comp=4).split("&", 1)[0]
+        return "", False
+    return authority_key(ctx, "PID-3", chosen)
 
 
 def pid_to_patient(ctx: MapContext) -> Patient:
@@ -312,7 +342,10 @@ def cleared_elements(ctx: MapContext, patient: Patient) -> frozenset[str]:
 
 
 def merged_patient(
-    ctx: MapContext, survivor_ref: str, survivor_mrn: str, survivor_authority: str = ""
+    ctx: MapContext,
+    survivor_ref: str,
+    survivor_mrn: str,
+    survivor_authority: tuple[str | None, bool] = ("", False),
 ) -> Patient:
     """MRG-1 to the Patient that an ADT^A40 merged away: inactive, with a
     ``replaced-by`` link to the surviving Patient. Only the MRN is known,
@@ -337,9 +370,20 @@ def merged_patient(
     id_type = r.get("MRG-1", comp=5)
     if id_type and id_type != "MR":
         raise MappingError("MRG-1", "identifier type (MRG-1.5) is not MR")
-    authority = r.get("MRG-1", comp=4).split("&", 1)[0]
-    if authority and survivor_authority and authority != survivor_authority:
-        raise MappingError("MRG-1", "assigning authority (MRG-1.4) differs from PID-3.4")
+    # Keyed as mrn_authority keys PID-3.4, and compared only when both are
+    # valued. The OID flag is part of the key: a namespace that reads
+    # urn:oid:<OID> is not the OID-only HD with that OID.
+    authority = authority_key(ctx, "MRG-1")
+    if authority[0] != "" and survivor_authority[0] != "":
+        for key, field in ((authority[0], "MRG-1"), (survivor_authority[0], "PID-3")):
+            if key is None:
+                raise MappingError(
+                    field,
+                    "assigning authority (MRG-1.4 or PID-3.4) is a universal id that is not an"
+                    " ISO OID",
+                )
+        if authority != survivor_authority:
+            raise MappingError("MRG-1", "assigning authority (MRG-1.4) differs from PID-3.4")
     if check_key(mrn, "MRG-1") == survivor_mrn:
         raise MappingError("MRG-1", "is the same patient identifier as PID-3")
     return Patient(
