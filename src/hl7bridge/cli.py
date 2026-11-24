@@ -92,6 +92,7 @@ from .scaffold import DEFAULT_FOLDER, init_folder
 from .store import connect, message_counts, quarantine_summary, utc_iso
 from .store.db import inspect_db, schema_mismatch_message
 from .synth import generate, verify_manifest
+from .synth.synthea import INDEX_NAME, check_out, generate_from_synthea, write_run
 from .tat import render_tat_text, tat_report
 from .v2fhir import MappedMessage, bundle_json, hooks, json_text, message_to_bundle
 
@@ -1030,6 +1031,32 @@ def cmd_synth(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_from_synthea(args: argparse.Namespace) -> int:
+    registry = _registry(args)
+    hospital = registry.by_id.get(args.hospital)
+    if hospital is None:
+        raise UsageError(
+            "--hospital names no loaded profile.",
+            hint=f"Known: {', '.join(sorted(registry.by_id))}.",
+        )
+    out = Path(args.out)
+    # Checked before any Bundle is read. PATH and --out are never printed:
+    # Synthea names files after patients, and a folder can be named so too.
+    check_out(Path(args.path), out)
+    run = generate_from_synthea(Path(args.path), hospital, seed=args.seed)
+    write_run(run, out)
+    written = sum(run.counts.values())
+    counts = ", ".join(f"{kind} {n}" for kind, n in sorted(run.counts.items()))
+    print(f"read {run.bundles} Bundle file(s), {run.studies} imaging study(ies), seed {args.seed}")
+    print(f"wrote {written} message(s) to --out ({counts or 'none'}) and {INDEX_NAME}")
+    if run.skipped:
+        for reason, n in sorted(Counter(k.reason for k in run.skipped).items()):
+            print(f"  skipped {n} study(ies): {reason}", file=sys.stderr)
+        print(f"  {INDEX_NAME} lists each skipped study.", file=sys.stderr)
+        return EXIT_FINDINGS
+    return EXIT_OK
+
+
 # -- Listener --------------------------------------------------------------------------
 
 
@@ -1686,6 +1713,16 @@ COMMANDS: tuple[Command, ...] = (
         ("hl7bridge synth --out data/synth", "hl7bridge synth --out data/synth --seed 7"),
     ),
     Command(
+        "from-synthea",
+        "Messages",
+        "write radiology ADT, ORM and ORU messages from Synthea FHIR Bundles",
+        cmd_from_synthea,
+        (
+            "hl7bridge from-synthea synthea/output/fhir --hospital WINTEHR --out msgs",
+            "hl7bridge from-synthea patient.json --hospital HOSPA --out msgs --seed 7",
+        ),
+    ),
+    Command(
         "listen",
         "Listener",
         "run the MLLP listener",
@@ -2092,6 +2129,20 @@ def _configure_command(name: str, p: argparse.ArgumentParser) -> None:
         p.add_argument("--out", required=True, metavar="DIR", help="output folder")
         _add_config(p)
         p.add_argument("--seed", type=int, default=42, help="generator seed (default: 42)")
+    elif name == "from-synthea":
+        p.add_argument(
+            "path",
+            metavar="PATH",
+            help="a Synthea FHIR R4 Bundle file, or a folder of them (Synthea's output/fhir)",
+        )
+        _add_config(p)
+        p.add_argument("--hospital", required=True, metavar="ID", help="the profile to write for")
+        p.add_argument(
+            "--out", required=True, metavar="DIR", help="new or empty folder for the .hl7 files"
+        )
+        p.add_argument(
+            "--seed", type=int, default=42, help="seed for times and report text (default: 42)"
+        )
     elif name == "listen":
         p.add_argument(
             "--db",

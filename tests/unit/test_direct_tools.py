@@ -10,7 +10,7 @@ import pytest
 
 from hl7bridge import cli
 from hl7bridge.config import HospitalRegistry, load_hospital_config
-from hl7bridge.errors import ConfigError, MappingError
+from hl7bridge.errors import ConfigError, MappingError, UsageError
 from hl7bridge.fhir.client import HapiClient
 from hl7bridge.fhir.reset import execute_reset, plan_reset
 from hl7bridge.fhir.runscope import RunScope
@@ -385,3 +385,20 @@ def test_reset_refuses_a_search_result_without_the_run_tag(registry, tmp_path):
     ):
         plan_reset(client, RunScope("run-a", LAB_TAG))
     assert {k: set(v) for k, v in server.data.items()} == before
+
+
+@pytest.mark.parametrize("born", [None, 0, False, 19900105, []])
+def test_a_null_or_non_string_birth_date_is_refused_not_written(registry, born):
+    """JSON null (and other non-strings) used to reach PID-7 as None, 0 or False."""
+    patient = _patient()
+    patient["birthDate"] = born
+    r = Renderer(registry.by_id["LAB"], NOW)
+    with pytest.raises(UsageError, match="birthDate is not a FHIR date"):
+        r.adt("A04", patient, pick_mrn(patient), "V1")
+
+
+def test_an_absent_birth_date_leaves_pid7_empty(registry):
+    patient = _patient()
+    patient.pop("birthDate", None)
+    pid = Renderer(registry.by_id["LAB"], NOW).pid(patient, pick_mrn(patient))
+    assert pid.split("|")[7] == ""

@@ -5,6 +5,24 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+
+- `from-synthea PATH --hospital ID --out DIR` writes radiology HL7 v2 traffic
+  from Synthea FHIR R4 Bundles, offline: per ImagingStudy an ADT^A04 (A01 for
+  an inpatient encounter) once per encounter, an ORM^O01 and an ORU^R01, with
+  the order and report from a linked ServiceRequest or DiagnosticReport when
+  there is one, plus `index.json` mapping each study to its MRN, accession and
+  files. Same input and `--seed` give the same bytes. Only message types
+  hl7bridge already accepts are written.
+
+### Fixed
+
+- `from-fhir`: a Patient whose `birthDate` is JSON null (or 0, false or a
+  list) is refused like any other `birthDate` that is not a FHIR date. It
+  used to be written into PID-7 as `None`, which the listener rejects.
+
 ## [0.6.0] - 2026-11-21
 
 ### Fixed

@@ -20,6 +20,7 @@ environment.
 | `test_pipeline.py` | Every row of the ACK decision table, against a real store |
 | `test_store.py` | Store invariants: duplicates, report status ranking, UTC-only timestamps |
 | `test_synth.py` | Generator determinism, parseable output, no OS newline translation |
+| `test_from_synthea.py` | `from-synthea` on hand-written Synthea-style Bundles (`tests/fixtures/synthea`): every message parses, lints clean, maps to FHIR and gets AA from the store listener and the direct listener (patients untouched); same bytes for the same seed, keys that never move with the seed, no other patient's messages changed by adding one; no socket opened; each usage error and each skip reason |
 | `test_manifest_verifier.py` | The manifest matches the generated files, plus tamper tests |
 | `test_loaders.py` | DICOM and outbound-log loaders fail loudly on bad input |
 | `test_reconcile.py` | Reconciliation, including the clean-fixture zero-flag guard |
