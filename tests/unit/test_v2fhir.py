@@ -982,6 +982,51 @@ def test_a40_with_one_authority_missing_is_not_refused(registry):
 
 
 @pytest.mark.parametrize(
+    ("pid_authority", "mrg_authority"),
+    [
+        ("ST\\T\\MARY", "ST\\T\\JOHN"),
+        ("ST", "ST\\T\\MARY"),
+        ("ST\\T\\MARY&1.2.3.4&ISO", "ST"),
+        ("ST\\X26\\MARY", "ST\\X26\\JOHN"),
+    ],
+)
+def test_a40_compares_whole_escaped_authorities(pid_authority, mrg_authority, registry):
+    """MRG-1.4 and PID-3.4 are compared by their whole namespace, with a
+    separator the sender escaped kept in it."""
+    pid = f"PID|1||SC1001^^^{pid_authority}^MR||ZZZSAMPLE^THREE"
+    with pytest.raises(MappingError) as info:
+        message_to_bundle(_a40(f"MRG|SC1002^^^{mrg_authority}^MR", pid), registry)
+    assert str(info.value) == "MRG-1: assigning authority (MRG-1.4) differs from PID-3.4"
+
+
+def test_a40_accepts_the_same_escaped_authority(registry):
+    pid = "PID|1||SC1001^^^ST\\T\\MARY&1.2.3.4&ISO^MR||ZZZSAMPLE^THREE"
+    mrg = "MRG|SC1002^^^ST\\T\\MARY&1.2.3.4&ISO^MR"
+    assert message_to_bundle(_a40(mrg, pid), registry).message_type == "ADT^A40"
+
+
+# Separators that are not the defaults: & is plain data in this message.
+_OTHER = str.maketrans({"|": "!", "^": "$", "~": "*", "\\": "@", "&": "%"})
+
+
+@pytest.mark.parametrize(("mrg_authority", "refused"), [("ST&JOHN", True), ("ST&MARY", False)])
+def test_a40_splits_authorities_by_the_message_own_separators(mrg_authority, refused, registry):
+    text = (
+        _a40("MRG|SC1002^^^MRGAUTH%1.2.3.4%ISO^MR", "PID|1||SC1001^^^PIDAUTH^MR||ZZZSAMPLE^THREE")
+        .translate(_OTHER)
+        .replace("PIDAUTH", "ST&MARY")
+        .replace("MRGAUTH", mrg_authority)
+    )
+    assert text.startswith("MSH!$*@%!")
+    if refused:
+        with pytest.raises(MappingError) as info:
+            message_to_bundle(text, registry)
+        assert str(info.value) == "MRG-1: assigning authority (MRG-1.4) differs from PID-3.4"
+    else:
+        assert message_to_bundle(text, registry).message_type == "ADT^A40"
+
+
+@pytest.mark.parametrize(
     "extra",
     [
         "MRG|SC1003^^^HOSPC^MR\r",

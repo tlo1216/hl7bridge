@@ -48,13 +48,18 @@ def mrn_value(ctx: MapContext) -> str:
 def mrn_authority(ctx: MapContext) -> str:
     """PID-3.4 (assigning authority, its first subcomponent) of the MRN
     repetition, or ''. Direct mode picks the MRN system by it
-    (``fhir.identifier_systems.mrn_by_authority``)."""
+    (``fhir.identifier_systems.mrn_by_authority``).
+
+    The reader splits the field on the message's own separators (MSH-1 and
+    MSH-2) and unescapes each piece after, so a separator the sender
+    escaped stays part of the namespace. The value it returns is never split
+    again."""
     r = ctx.reader
     reps = r.repetitions("PID-3")
     chosen = pick_mrn_repetition([r.get("PID-3", rep=n, comp=5) for n in range(1, reps + 1)])
     if not chosen:
         return ""
-    return r.get("PID-3", rep=chosen, comp=4).split("&", 1)[0]
+    return r.get("PID-3", rep=chosen, comp=4, sub=1)
 
 
 def pid_to_patient(ctx: MapContext) -> Patient:
@@ -337,7 +342,7 @@ def merged_patient(
     id_type = r.get("MRG-1", comp=5)
     if id_type and id_type != "MR":
         raise MappingError("MRG-1", "identifier type (MRG-1.5) is not MR")
-    authority = r.get("MRG-1", comp=4).split("&", 1)[0]
+    authority = r.get("MRG-1", comp=4, sub=1)  # as mrn_authority reads PID-3.4
     if authority and survivor_authority and authority != survivor_authority:
         raise MappingError("MRG-1", "assigning authority (MRG-1.4) differs from PID-3.4")
     if check_key(mrn, "MRG-1") == survivor_mrn:

@@ -18,7 +18,7 @@ from hl7bridge.errors import FhirPostError, StoreError
 from hl7bridge.fhir.client import HapiClient
 from hl7bridge.fhir.match import resolve_patient
 from hl7bridge.fhir.runscope import RunScope, check_run_id
-from hl7bridge.fromfhir import Renderer, pick_mrn
+from hl7bridge.fromfhir import Renderer, escape, pick_mrn
 from hl7bridge.ingest.direct import (
     AE_REASONS,
     AR_REASONS,
@@ -357,6 +357,116 @@ def test_the_mrn_system_follows_the_assigning_authority(tmp_path, server):
     assert lab.send(lab.oru()) == ("AA", "")
     other = lab.oru().replace("^^^LAB^MR", "^^^ELSEWHERE^MR").replace("FF2026", "FG2026")
     assert lab.send(other) == ("AE", "unknown_assigning_authority: PID-3.4")
+
+
+def _authority_lab(tmp_path: Path, server: FakeFhir, by_authority: str) -> Lab:
+    folder = tmp_path / "p"
+    folder.mkdir()
+    text = PROFILE.replace(
+        f"    mrn: {MRN_SYSTEM}\n",
+        f"    mrn: urn:test:other\n    mrn_by_authority: {by_authority}\n",
+    )
+    (folder / "lab.yaml").write_text(text, encoding="utf-8")
+    return Lab(HospitalRegistry.load_dir(folder), server, tmp_path)
+
+
+def _third_party_oru(pid3: str) -> str:
+    """An ORU as another vendor's system might send it: its own application
+    name, a full HD in PID-3.4 and hex escapes, nothing hl7bridge wrote."""
+    return (
+        "\r".join(
+            [
+                "MSH|^~\\&|OTHERLIS|LAB|HUB|HUB|20261120095500-0500||ORU^R01^ORU_R01|Q77|T|2.5.1",
+                f"PID|1||{pid3}||ZZZTEST^ALPHA||19800101|F",
+                "ORC|RE|PL9|",
+                "OBR|1|PL9|ACC9|LAB1^Panel^99HUB|R||20261120090000"
+                + "|" * 15
+                + "20261120095000|||F",
+                "OBX|1|NM|NUM1^Measure^99HUB|1|5.4|mmol/L|3.5-5.5|N|||F|||20261120094500",
+            ]
+        )
+        + "\r"
+    )
+
+
+_OID = "2.16.840.1.113883.3.999"
+
+
+@pytest.mark.parametrize(
+    ("pid3", "authority", "other"),
+    [
+        ("MRN001^^^ST\\T\\MARY^MR", "ST&MARY", "MRN001^^^ST\\T\\JOHN^MR"),
+        (
+            f"MRN001^^^ST\\T\\MARY&{_OID}&ISO^MR",
+            "ST&MARY",
+            f"MRN001^^^ST\\T\\JOHN&{_OID}&ISO^MR",
+        ),
+        (
+            f"MRN001^^^ST\\X26\\MARY&{_OID}&ISO^MR",
+            "ST&MARY",
+            f"MRN001^^^ST\\X26\\JOHN&{_OID}&ISO^MR",
+        ),
+        (
+            f"X1^^^ST^PI~MRN001^^^ST\\T\\MARY&{_OID}&ISO^MR",
+            "ST&MARY",
+            "X1^^^ST\\T\\MARY^PI~MRN001^^^ST\\T\\JOHN^MR",
+        ),
+        ("MRN001^^^ST\\S\\MARY^MR", "ST^MARY", "MRN001^^^ST\\S\\JOHN^MR"),
+        ("MRN001^^^ST\\R\\MARY^MR", "ST~MARY", "MRN001^^^ST\\R\\JOHN^MR"),
+        ("MRN001^^^ST\\E\\MARY^MR", "ST\\MARY", "MRN001^^^ST\\E\\JOHN^MR"),
+        ("MRN001^^^ST\\F\\MARY^MR", "ST|MARY", "MRN001^^^ST\\F\\JOHN^MR"),
+    ],
+)
+@pytest.mark.parametrize("shorter_mapped", [False, True], ids=["st-unmapped", "st-mapped"])
+def test_an_escaped_authority_from_any_sender_picks_its_mrn_system(
+    tmp_path, server, pid3, authority, other, shorter_mapped
+):
+    """PID-3.4 with an escaped separator names the whole authority, not the
+    text before it: never AE, and never the MRN system of a shorter one."""
+    extra = ", ST: urn:test:st" if shorter_mapped else ""
+    lab = _authority_lab(tmp_path, server, f"{{'{authority}': urn:test:mrn{extra}}}")
+    assert lab.send(_third_party_oru(pid3)) == ("AA", "")
+    unmapped = _third_party_oru(other).replace("Q77", "Q78")
+    assert lab.send(unmapped) == ("AE", "unknown_assigning_authority: PID-3.4")
+    shorter = _third_party_oru("MRN001^^^ST^MR").replace("Q77", "Q79")
+    assert lab.send(shorter) == (
+        ("AE", "unknown_patient: PID-3")
+        if shorter_mapped
+        else ("AE", "unknown_assigning_authority: PID-3.4")
+    )
+
+
+@pytest.mark.parametrize(
+    "authority", ["ST&MARY", "ST^MARY", "ST~MARY", "ST\\MARY", "ST|MARY", "A&B^C~D\\E|F"]
+)
+def test_from_fhir_output_with_any_separator_in_the_authority_round_trips(
+    tmp_path, server, authority
+):
+    lab = _authority_lab(tmp_path, server, f"{{'{authority}': urn:test:mrn}}")
+    text = lab.oru()
+    assert f"^^^{escape(authority)}^MR" in text
+    assert lab.send(text) == ("AA", "")
+    assert lab.send(lab.a04()) == ("AA", "")
+
+
+# Field, component, repetition, escape and subcomponent separators that are
+# not the defaults: none of | ^ ~ \ & is a separator in the message any more.
+_OTHER = str.maketrans({"|": "!", "^": "$", "~": "*", "\\": "@", "&": "%"})
+
+
+@pytest.mark.parametrize(
+    ("pid3", "by_authority"),
+    [
+        ("MRN001$$$ST&MARY%1.2.3.4%ISO$MR", "{'ST&MARY': urn:test:mrn, ST: urn:test:st}"),
+        ("MRN001$$$ST@T@MARY%1.2.3.4%ISO$MR", "{'ST%MARY': urn:test:mrn, ST: urn:test:st}"),
+        ("MRN001$$$A&B^C~D\\E|F$MR", "{'A&B^C~D\\E|F': urn:test:mrn, A: urn:test:st}"),
+    ],
+)
+def test_the_listener_splits_by_the_message_own_separators(tmp_path, server, pid3, by_authority):
+    lab = _authority_lab(tmp_path, server, by_authority)
+    text = _third_party_oru("PLACEHOLDER").translate(_OTHER).replace("PLACEHOLDER", pid3)
+    assert text.startswith("MSH!$*@%!")
+    assert lab.send(text) == ("AA", "")
 
 
 # -- run ownership -------------------------------------------------------------------------

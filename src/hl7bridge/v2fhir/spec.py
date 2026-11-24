@@ -119,7 +119,9 @@ ROWS: tuple[SpecRow, ...] = (
         " assigner.display. Two other repetitions with the same value and no system differ by"
         " type or assigning authority and are both kept. Check digit and effective dates are not"
         " read. The IG takes every system from the authority; hl7bridge reads one MRN system"
-        " per hospital.",
+        " per hospital. Component 4 is split into its subcomponents on the message's own"
+        " separators before escapes are decoded, so a separator the sender escaped stays in"
+        " the namespace.",
     ),
     SpecRow(
         "pid_to_patient",

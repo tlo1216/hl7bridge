@@ -5,6 +5,24 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
+## [Unreleased]
+
+### Fixed
+
+- The assigning authority in PID-3.4 and MRG-1.4 keeps a separator the
+  sender escaped. Before, a namespace holding an escaped subcomponent
+  separator was cut short at it, from any sender and from-fhir output too:
+  the message could get AE `unknown_assigning_authority`, its MRN could take
+  the system of a shorter authority, or an A40 could take two different
+  authorities in MRG-1.4 and PID-3.4 as the same. The namespace is now the
+  first subcomponent as python-hl7 splits it on the message's own
+  separators, decoded once. Two kinds of message read differently: one
+  with `&` escaped in that namespace, and one whose MSH-2 names another
+  subcomponent separator and carries a plain `&` there (it is data, not a
+  separator). Every other message maps exactly as before. A profile whose
+  `mrn_by_authority` key was set to the text before the `&` needs the full
+  namespace as its key now (`ST&MARY`, not `ST`).
+
 ## [0.6.0] - 2026-11-21
 
 ### Fixed
