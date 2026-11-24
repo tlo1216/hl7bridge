@@ -113,6 +113,45 @@ def pick_mrn(patient: dict[str, Any], systems: Collection[str] | None = None) ->
     return Mrn(str(first["value"]), str(first.get("system", "")), False)
 
 
+def mrn_authority(hospital: HospitalConfig, mrn: Mrn) -> str:
+    """PID-3.4: the authority mapped to the MRN's system, or empty for
+    the profile's own MRN system. Any other system is refused: no
+    authority would lead the listener to the same Patient."""
+    for authority, system in hospital.fhir.mrn_by_authority:
+        if system == mrn.system:
+            return authority
+    if mrn.system == hospital.systems.mrn:
+        return ""
+    raise UsageError(
+        "the MRN's system is neither the profile's MRN system nor mapped by"
+        " mrn_by_authority; refusing to label it with another authority."
+    )
+
+
+def pid_segment(hospital: HospitalConfig, patient: dict[str, Any], mrn: Mrn) -> str:
+    """PID with the MRN, name, birth date and sex of a FHIR Patient, every
+    value escaped. A ``birthDate`` that is not a FHIR date (JSON null
+    included) is refused."""
+    name = (patient.get("name") or [{}])[0]
+    given = name.get("given") or []
+    xpn = "^".join(
+        [
+            escape(name.get("family", "")),
+            escape(given[0] if given else ""),
+            escape(given[1] if len(given) > 1 else ""),
+        ]
+    ).rstrip("^")
+    raw_born = patient.get("birthDate", "")
+    # Absent or "" leaves PID-7 empty. JSON null, 0, false or a list is not
+    # a FHIR date either, so it is refused, never written as "None".
+    if raw_born != "" and not (isinstance(raw_born, str) and _FHIR_DATE.fullmatch(raw_born)):
+        raise UsageError("the Patient's birthDate is not a FHIR date; nothing was written.")
+    born = raw_born.replace("-", "")
+    sex = _GENDER.get(str(patient.get("gender", "")), "")
+    cx = f"{escape(mrn.value)}^^^{escape(mrn_authority(hospital, mrn))}^MR"
+    return "|".join(["PID", "1", "", cx, "", xpn, "", born, sex])
+
+
 class Renderer:
     """Builds messages for one hospital profile at one time."""
 
@@ -149,37 +188,8 @@ class Renderer:
             ]
         )
 
-    def _authority(self, mrn: Mrn) -> str:
-        """PID-3.4: the authority mapped to the MRN's system, or empty for
-        the profile's own MRN system. Any other system is refused: no
-        authority would lead the listener to the same Patient."""
-        for authority, system in self.hospital.fhir.mrn_by_authority:
-            if system == mrn.system:
-                return authority
-        if mrn.system == self.hospital.systems.mrn:
-            return ""
-        raise UsageError(
-            "the MRN's system is neither the profile's MRN system nor mapped by"
-            " mrn_by_authority; refusing to label it with another authority."
-        )
-
     def pid(self, patient: dict[str, Any], mrn: Mrn) -> str:
-        name = (patient.get("name") or [{}])[0]
-        given = name.get("given") or []
-        xpn = "^".join(
-            [
-                escape(name.get("family", "")),
-                escape(given[0] if given else ""),
-                escape(given[1] if len(given) > 1 else ""),
-            ]
-        ).rstrip("^")
-        raw_born = patient.get("birthDate", "")
-        if raw_born and not (isinstance(raw_born, str) and _FHIR_DATE.fullmatch(raw_born)):
-            raise UsageError("the Patient's birthDate is not a FHIR date; nothing was written.")
-        born = str(raw_born).replace("-", "")
-        sex = _GENDER.get(str(patient.get("gender", "")), "")
-        cx = f"{escape(mrn.value)}^^^{escape(self._authority(mrn))}^MR"
-        return "|".join(["PID", "1", "", cx, "", xpn, "", born, sex])
+        return pid_segment(self.hospital, patient, mrn)
 
     def _order_fields(self, accession: str, placer: str) -> tuple[str, str]:
         """(ORC segment, OBR-2 and OBR-3) with the accession where the
@@ -360,8 +370,10 @@ __all__ = [
     "Mrn",
     "Renderer",
     "escape",
+    "mrn_authority",
     "mrn_systems",
     "patient_messages",
     "pick_mrn",
+    "pid_segment",
     "report_message",
 ]

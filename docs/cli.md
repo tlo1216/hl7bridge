@@ -15,6 +15,7 @@
 | Messages | `send [PATH]` | Send a file, a folder or stdin (`-`) over MLLP, one frame per message, and show the ACKs; `--repeat N`, `--rate PER_SECOND`, `--expect CODE` |
 | Messages | `replay` | Resend quarantined (default) or stored (`--from store`) messages, oldest first, byte for byte and each distinct one once; reads a version 2 or 3 store; `--only-reason`, `--since`, `--hospital`, `--limit`, `--dry-run` |
 | Messages | `synth --out DIR` | Generate a synthetic day with a defect manifest |
+| Messages | `generate-radiology PATH --hospital ID --out DIR` | Write radiology ADT, ORM and ORU messages for every ImagingStudy in Synthea FHIR Bundles, offline, plus `index.json`; `--seed N` |
 | Listener | `listen` | Run the MLLP listener into the store (`--tls-cert`, `--tls-key`, `--tls-ca` for TLS); `--target fhir` writes each message to a FHIR server as one transaction and ACKs after the commit (see below) |
 | Reports | `reconcile` | Orders versus imaging studies |
 | Reports | `ack-report` | Delivery status of outbound reports |
@@ -245,6 +246,91 @@ are never overwritten.
 `--report 456` writes one ORU^R01 for a DiagnosticReport and its
 Observations instead.
 
+## Radiology messages from Synthea: `generate-radiology`
+
+`hl7bridge generate-radiology synthea/output/fhir --hospital WINTEHR --out msgs`
+reads Synthea FHIR R4 Bundles (one file, or every `*.json` under a folder)
+and writes the feed a radiology system would send for each ImagingStudy:
+an `ADT^A04` once per encounter (`ADT^A01` for an inpatient encounter,
+when the profile expects it), an `ORM^O01` new order and an `ORU^R01`
+report. It reads nothing over the network and never looks at the clock:
+the same Bundles, `--seed` and profile give the same bytes.
+
+- PID follows the `from-fhir` rules: the MRN only from an identifier under
+  the profile's `mrn` system or one `mrn_by_authority` maps (Synthea's MR
+  identifier uses `http://hospital.smarthealthit.org`). A Patient with
+  neither stops the run. Input files are named by their position in sorted
+  path order (`file 3`), never by name, since Synthea names each file after
+  its patient; errors and the status lines say `PATH` and `--out`, never the
+  paths. A folder linked into PATH (a symlink, or a junction on Windows) is
+  not entered; a linked file is read.
+- The profile must expect `ADT^A04`, `ORM^O01` and `ORU^R01`, allow MSH-11
+  `T`, have no HL7 separator in its first facility code or `hl7_version`,
+  and have no `mrn_by_authority` authority holding `&`, a control character
+  or edge spaces (the direct listener could not read it back from PID-3.4).
+- The order code, priority and order time come from a ServiceRequest the
+  study's `basedOn` names, else the study's `procedureCode`. The report text
+  and status come from a DiagnosticReport whose `imagingStudy` names the
+  study (or whose `basedOn` names its ServiceRequest); without one the
+  report is a short normal-study text ending in a line that says it is
+  synthetic. Synthea's clinical-note reports are never used. A linked
+  Encounter, ServiceRequest or DiagnosticReport whose `subject` is another
+  Patient skips the study.
+- Accession, placer and visit numbers are 16-character hashes of the MRN
+  (its system and value) and the source resource; the seed changes only
+  times, report lines and MSH-10 (which also changes whenever any part of a
+  message, MSH included, does). ORC and OBR carry the same placer and filler
+  numbers: the accession is the placer number in both when the profile reads
+  it from ORC-2 or OBR-2, the filler number in both for ORC-3 or OBR-3. A study
+  with no Encounter is its own outpatient visit. A procedure with no code
+  gets a local one (`IMGCT^CT imaging study^99HUB`).
+- Files are numbered in feed order (`00001_adt_a04.hl7`, ...), so
+  `hl7bridge send msgs` replays them in order. `index.json` lists each
+  study's source file, ImagingStudy (its UUID id, else its position such
+  as `file 3 entry 7`, never a fullUrl), study UID (only from a
+  `urn:dicom:uid` identifier or Synthea's `urn:oid:` one), MRN and its
+  system, accession, visit and files, and each skipped study with its
+  reason; it holds no names or birth dates. A copy of a study already
+  written (the same MRN and ImagingStudy) is skipped as a duplicate; a copy
+  skipped for its own reason never blocks a later good one.
+- `--out` must not exist yet (an existing folder, even an empty one, a
+  link or a junction is refused) and may not be inside PATH (links and
+  junctions resolved); both are checked before any Bundle is read. Its
+  parent folder must be writable, since the run is staged there: in Docker,
+  mount the parent of `--out`, not `--out` itself. Everything is rendered
+  and checked before the first file is written. The files go into a new
+  `.generate-radiology-*` folder beside `--out` that is renamed to `--out`
+  in one step when all are written, so a failed write (a full disk, say)
+  leaves no partial output in `--out` and is an `error:` line that names no
+  path. On Linux and macOS the output gets the usual umask modes; on
+  Windows it keeps the owner-only access that Python gives a new temporary
+  folder. A study whose messages the listener would not accept is skipped
+  and listed (no
+  modality, a time with no UTC offset or outside 1900 to 2100, times out of
+  order, a partial or null `birthDate`, a padded MRN, a report status with
+  no ORU result status P, F or C, a Patient not in FHIR shape, a time in a
+  repeated local hour when the profile writes no offset, a local UTC offset
+  with seconds (local mean time, before about 1972) when it writes one,
+  and so on); the rest is written and the command exits 1.
+- Limits: 64 MiB per Bundle file, 20,000 files and 10,000 studies per run,
+  32 KiB and 499 lines of report text per study (500 OBX with the synthetic
+  line), 64 KiB per message.
+- Known limits: on Linux and macOS, an empty folder another program makes
+  at `--out` in the instant between the last write and the rename is
+  replaced by the run (a folder with anything in it is refused). On
+  Windows a virus scanner that still holds a new file can make the rename
+  fail; nothing is written and a rerun works. If cleanup after a failure
+  cannot remove a staged file (one held open), the
+  `.generate-radiology-*` folder stays beside `--out` and the error says
+  so. On a case-insensitive volume (macOS, or a Windows drive under WSL)
+  the inside-PATH check compares names case-sensitively. A file linked
+  into PATH is read; only linked folders are skipped.
+
+For a teaching lab, run it on the lab's own Synthea export with the lab
+profile, then `hl7bridge send msgs` to `listen --target fhir`: the patients
+already exist on the server, so each study becomes an Encounter,
+ServiceRequest and DiagnosticReport under the run tag.
+
 ## Mapping hooks
 
 `--mapping-module FILE` (on `listen --target fhir` and `to-fhir`) loads a
@@ -393,8 +479,12 @@ could do that print only their class name.
 | `to-fhir --post` with no server | `error: to-fhir --post writes to a FHIR server, so it needs one named. Pass --fhir-base URL or set HL7BRIDGE_FHIR_BASE.` |
 | Bundle not fully committed | `error: FHIR server returned 200 for /fhir: entry 4 was not committed` (also for an answer that is not a `transaction-response`, or has the wrong number of entries; exit 1, and later Bundles are not sent) |
 | Replay filter | `error: --only-reason applies to --from quarantine only.` and `error: --only-reason takes one of hl7bridge's quarantine reason codes. Known: ...` |
+| `generate-radiology --out` not empty | `error: --out is not empty; generate-radiology never mixes two runs. Pick a new folder.` (PATH and `--out` are named by option, never by path) |
+| `generate-radiology --out` an existing empty folder | `error: --out already exists; generate-radiology writes a new folder, so a failed run leaves nothing in it. Pick a name that does not exist yet.` |
+| `generate-radiology`, a file that is not a Bundle | `error: file 1 is not a FHIR Bundle. Point PATH at output/fhir.` |
 | File system error | `error: FileNotFoundError: No such file or directory. Check the paths you passed.` (exit 2; the file name is not printed, since it can be a name read from a folder) |
 
 Each row has a test on its text in `tests/unit/test_cli.py`,
 `tests/unit/test_cli_messages.py`, `tests/unit/test_fhir_sync_mapping.py`,
+`tests/unit/test_generate_radiology.py`,
 `tests/unit/test_config.py` or `tests/unit/test_demo.py`.

@@ -1,0 +1,44 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:00000000-5e1d-4a00-8000-000000000051",
+      "resource": {
+        "resourceType": "Organization",
+        "id": "00000000-5e1d-4a00-8000-000000000051",
+        "identifier": [
+          {
+            "system": "https://github.com/synthetichealth/synthea",
+            "value": "ZZZ-ORG-1"
+          }
+        ],
+        "active": true,
+        "name": "SYNTHETIC GENERAL HOSPITAL"
+      },
+      "request": {
+        "method": "POST",
+        "url": "Organization"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:00000000-5e1d-4a00-8000-000000000052",
+      "resource": {
+        "resourceType": "Location",
+        "id": "00000000-5e1d-4a00-8000-000000000052",
+        "identifier": [
+          {
+            "system": "https://github.com/synthetichealth/synthea",
+            "value": "ZZZ-LOC-1"
+          }
+        ],
+        "status": "active",
+        "name": "SYNTHETIC IMAGING CENTER"
+      },
+      "request": {
+        "method": "POST",
+        "url": "Location"
+      }
+    }
+  ]
+}
