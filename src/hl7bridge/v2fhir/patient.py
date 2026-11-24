@@ -14,6 +14,8 @@ from fhir.resources.R4B.address import Address
 from fhir.resources.R4B.codeableconcept import CodeableConcept
 from fhir.resources.R4B.coding import Coding
 from fhir.resources.R4B.contactpoint import ContactPoint
+from fhir.resources.R4B.extension import Extension
+from fhir.resources.R4B.fhirprimitiveextension import FHIRPrimitiveExtension
 from fhir.resources.R4B.humanname import HumanName
 from fhir.resources.R4B.identifier import Identifier
 from fhir.resources.R4B.patient import Patient, PatientLink
@@ -24,6 +26,10 @@ from ..ingest.parser import pick_mrn_repetition
 from . import hooks
 from .common import MapContext, birth_date, check_key, typed_identifier
 from .tables import SEX, V2_0203
+
+# IG ConceptMap-segment-pid-to-patient: PID-7 beyond a date goes to this
+# extension on Patient.birthDate (``_birthDate`` in JSON).
+BIRTH_TIME = "http://hl7.org/fhir/StructureDefinition/patient-birthTime"
 
 
 def mrn_value(ctx: MapContext) -> str:
@@ -73,7 +79,13 @@ def pid_to_patient(ctx: MapContext) -> Patient:
 
     born = birth_date(ctx, "PID-7")
     if born:
-        kwargs["birthDate"] = born
+        kwargs["birthDate"] = born.date
+        if born.time:
+            kwargs["birthDate__ext"] = FHIRPrimitiveExtension(
+                extension=[
+                    Extension.model_validate({"url": BIRTH_TIME, "valueDateTime": born.time})
+                ]
+            )
 
     addresses = _addresses(ctx)
     if addresses:

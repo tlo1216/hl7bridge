@@ -5,6 +5,36 @@ All notable changes are listed here. The format follows
 uses [Semantic Versioning](https://semver.org/). Until 1.0.0 the CLI and the
 profile format may still change between minor versions.
 
+## [Unreleased]
+
+### Added
+
+- PID-7 birth time. A PID-7 with minutes or finer now adds the IG's
+  patient-birthTime extension on `Patient.birthDate` (`_birthDate`) with the
+  full dateTime: the wall time as sent, in PID-7's own offset, else the
+  message's zone (MSH-7's offset, else the hospital's), not moved to UTC, so
+  its date is always birthDate's. birthDate stays the date. A date alone, or
+  an hour with no minutes, gives no extension. A post replaces the time
+  together with birthDate, so an A08 with a date-only PID-7 leaves no stale
+  time; a message with no PID-7 keeps both, and other extensions on birthDate
+  stay. `from-fhir` writes the time back into PID-7 with its offset. Six
+  conformance rows move from GAP to MATCH (GAP 31, GAP rejected 3, LOCAL 5,
+  MATCH 87).
+
+### Changed
+
+- PID-7 may be a year (`1980`) or a year and month (`198005`): birthDate keeps
+  that precision on every path, where it was refused before. PID-7 is now
+  refused when a fraction of a second has no seconds (`198001020304.5`) or,
+  with a time, when its offset is outside what FHIR allows (beyond 14 hours)
+  or, with no offset, the zone's offset on the birth date is not whole minutes
+  (local mean time, before standard time), and when it has digits that are not
+  ASCII; the date used to be kept and the rest dropped. A stored message with
+  such a PID-7 is skipped by `fhir sync`, where it was synced before.
+- `from-fhir` refuses a Patient whose birthTime extension is not on the day of
+  its birthDate (a time stored in UTC, say), or has more than four digits of a
+  second, where it used to write a date-only PID-7.
+
 ## [0.6.0] - 2026-11-21
 
 ### Fixed

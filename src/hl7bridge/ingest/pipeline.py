@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from ..config import HospitalConfig, HospitalRegistry
 from ..errors import HL7ParseError, MessageValidationError, TimestampError
-from ..hl7time import message_tz, parse_hl7_ts
+from ..hl7time import message_tz, parse_birth, parse_hl7_ts
 from ..store import utc_iso
 from ..store.repo import (
     AckInRow,
@@ -448,13 +448,15 @@ class IngestPipeline:
         birth_raw = get_field(message, "PID-7")
         birth_date: str | None = None
         if birth_raw:
+            # Read as the FHIR mapping reads it (``hl7time.parse_birth``), so
+            # both paths take and refuse the same values; only the date is kept.
             try:
-                parsed = parse_hl7_ts(birth_raw, default_tz=hospital.tzinfo)
+                born = parse_birth(birth_raw, default_tz=self._message_tz or hospital.tzinfo)
             except TimestampError as exc:
                 raise MessageValidationError(
                     ackmod.REASON_BAD_TIMESTAMP, f"PID-7: {exc}", field="PID-7"
                 ) from None
-            birth_date = parsed.date().isoformat()
+            birth_date = born.date
         return PatientRow(
             hospital_id=hospital.hospital_id,
             mrn=mrn,

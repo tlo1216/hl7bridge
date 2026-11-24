@@ -294,7 +294,7 @@ def test_the_store_picks_the_same_mrn(registry):
             "PID-8: code not in table 0001 (administrative sex); refusing to guess",
         ),
         (
-            _text(SAMPLES_DIR / "01_hospa_adt_a04.hl7").replace("19800101", "1980"),
+            _text(SAMPLES_DIR / "01_hospa_adt_a04.hl7").replace("19800101", "19801"),
             "PID-7: not a valid HL7 date",
         ),
         (
