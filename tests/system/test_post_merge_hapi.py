@@ -305,6 +305,56 @@ def test_sync_keeps_the_patient_a_direct_post_keeps(client, run, tmp_path: Path)
     assert final["status"] == "final"
 
 
+BIRTH_TIME = "http://hl7.org/fhir/StructureDefinition/patient-birthTime"
+
+
+def _birth_adt(event: str, pid7: str) -> str:
+    return (
+        f"MSH|^~\\&|ADT|HOSPC|HL7BRIDGE|HUB|20261007080000-0400||ADT^{event}|B{event}{pid7}|T|2.5\r"
+        f"EVN|{event}|20261007080000-0400\r"
+        f"PID|1||SC1009^^^HOSPC^MR||ZZZSAMPLE^BIRTH||{pid7}|F\rPV1|1|O\r"
+    )
+
+
+def _birth_times(patient: dict) -> list:
+    return [
+        x["valueDateTime"]
+        for x in patient.get("_birthDate", {}).get("extension", [])
+        if x["url"] == BIRTH_TIME
+    ]
+
+
+def test_the_birth_time_round_trips_and_a_date_only_a08_clears_it(client, run, tmp_path: Path):
+    registry, root = run
+    _post(client, registry, _birth_adt("A04", "19900620030405"))
+    patient = _patient(client, root, "SC1009")
+    assert patient["birthDate"] == "1990-06-20"
+    assert _birth_times(patient) == ["1990-06-20T03:04:05-04:00"]
+    _post(client, registry, _birth_adt("A08", ""))  # PID-7 left out: both kept
+    assert _birth_times(_patient(client, root, "SC1009")) == ["1990-06-20T03:04:05-04:00"]
+    _post(client, registry, _birth_adt("A08", "19900620"))
+    patient = _patient(client, root, "SC1009")
+    assert patient["birthDate"] == "1990-06-20"
+    assert "_birthDate" not in patient
+
+    # A sync of the same messages into fresh systems leaves the same Patient.
+    texts = [_birth_adt("A04", "19900620030405"), _birth_adt("A08", "199006200304")]
+    _post(client, registry, *texts)
+    want = _patient(client, root, "SC1009")
+    assert _birth_times(want) == ["1990-06-20T03:04:00-04:00"]
+    other_registry, other_root = _fresh_registry(tmp_path / "other")
+    conn = connect(tmp_path / "birth.db")
+    pipeline = IngestPipeline(other_registry, conn)
+    for text in texts:
+        pipeline.handle_bytes(text.encode())
+    report = sync_to_fhir(conn, other_registry, client)
+    conn.close()
+    assert report.skipped == []
+    got = _patient(client, other_root, "SC1009")
+    for element in ("birthDate", "_birthDate"):
+        assert got.get(element) == want.get(element), element
+
+
 # -- ADT^A40 ---------------------------------------------------------------------------
 
 

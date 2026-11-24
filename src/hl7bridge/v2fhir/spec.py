@@ -137,7 +137,19 @@ ROWS: tuple[SpecRow, ...] = (
         "PID-7",
         "Patient.birthDate",
         PID,
-        "Date part only. The IG adds a birthTime extension for a longer value; not written.",
+        "The date at the precision sent (year, year and month, or day); an offset never"
+        " moves it. With minutes or finer, the IG's patient-birthTime extension on birthDate"
+        " (`_birthDate`) holds the full dateTime: the wall time as sent, in PID-7's offset,"
+        " else the message's zone (MSH-7's offset, else the hospital's), not moved to UTC, so"
+        " its date is birthDate. MSH-7's offset applies as HL7 makes it the message default,"
+        " even when daylight time on the birth date differed. Seconds are zero-filled when"
+        " absent (FHIR needs them), and a time of all zeros is written as midnight. An hour"
+        " alone gives no extension (the IG's condition is any value longer than 8; FHIR has"
+        " no hour precision and the minutes would be invented). With a time and no offset of its"
+        " own, a PID-7 in a zone whose offset on the birth date is not whole minutes (local"
+        " mean time) is refused; a date alone is kept. A post replaces the time"
+        " with birthDate, so a date-only PID-7 clears a stored time; other extensions on"
+        " birthDate stay.",
     ),
     SpecRow("pid_to_patient", "PID-8", "Patient.gender", PID, "Through table 0001."),
     SpecRow(

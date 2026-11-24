@@ -13,7 +13,7 @@ from fhir.resources.R4B.identifier import Identifier
 
 from ..config import HospitalConfig
 from ..errors import MappingError, TimestampError
-from ..hl7time import is_date_only, parse_hl7_ts
+from ..hl7time import BirthValue, is_date_only, parse_birth, parse_hl7_ts
 from ..store.db import utc_iso
 from .fields import FieldReader
 from .tables import CODING_SYSTEMS, V2_0203
@@ -145,11 +145,13 @@ def timestamp(ctx: MapContext, ref: str, *, seg: int = 1, instant: bool = False)
         raise MappingError(ref, "not a valid HL7 timestamp", segment=seg) from None
 
 
-def birth_date(ctx: MapContext, ref: str) -> str | None:
+def birth_date(ctx: MapContext, ref: str) -> BirthValue | None:
+    """A date of birth as a FHIR date and, with minutes or finer, the
+    birth time (``hl7time.parse_birth``), or None when empty."""
     value = ctx.reader.get(ref)
     if not value:
         return None
     try:
-        return parse_hl7_ts(value, default_tz=ctx.tz).date().isoformat()
+        return parse_birth(value, default_tz=ctx.tz)
     except (TimestampError, OverflowError, ValueError):
         raise MappingError(ref, "not a valid HL7 date") from None

@@ -238,7 +238,10 @@ identifier under the profile's `mrn` system or one `mrn_by_authority`
 maps (the one typed MR among those, else the first; the command says
 which), and PID-3.4 is that authority, or empty for `mrn`; a Patient
 with neither is refused. A `birthDate` that is not a FHIR date is
-refused, and every value loses its control characters. MSH-10, the
+refused, and every value loses its control characters. A
+patient-birthTime extension on `birthDate` goes into PID-7 with its offset;
+one that is not a dateTime with a time and offset on the day of
+`birthDate`, or has more than four digits of a second, is refused. MSH-10, the
 accession and the visit number carry a short hash of the Patient id, so
 two patients rendered in one second do not collide. MSH-11 is T. Files
 are never overwritten.

@@ -15,7 +15,8 @@ or empty for the profile's own MRN system, so the listener looks the MRN
 up under the system it came from and never under another. Every value
 from the server is HL7-escaped and loses its control characters, so a
 ``|``, ``^`` or CR in a name cannot shift a field or start a segment, and
-``birthDate`` must be a FHIR date. MSH-10, the accession and the visit
+``birthDate`` must be a FHIR date. A patient-birthTime extension on it
+goes into PID-7 with its offset (``birth_time_pid7``). MSH-10, the accession and the visit
 number carry a short hash of the resource id, so two patients rendered in
 the same second do not share them. MSH-11 is T (training): the direct
 listener refuses P. Codes in the sample order and result are local
@@ -36,10 +37,16 @@ from .config import HospitalConfig
 from .errors import FhirPostError, UsageError
 from .fhir.client import HapiClient
 from .hl7time import format_hl7_ts
+from .v2fhir.patient import BIRTH_TIME
 from .v2fhir.tables import V2_0203
 
 PROCESSING_ID = "T"
 _FHIR_DATE = re.compile(r"[0-9]{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12][0-9]|3[01]))?)?")
+# A FHIR dateTime with a time; FHIR requires the offset once there is a time.
+_FHIR_TIME = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?"
+    r"(Z|[+-](?:0[0-9]|1[0-3]):[0-5][0-9]|[+-]14:00)"
+)
 _ESCAPES = (("\\", "\\E\\"), ("|", "\\F\\"), ("^", "\\S\\"), ("&", "\\T\\"), ("~", "\\R\\"))
 _GENDER = {"male": "M", "female": "F", "other": "O", "unknown": "U"}
 _REPORT_STATUS = {
@@ -71,6 +78,52 @@ def escape(value: object) -> str:
     for raw, escaped in _ESCAPES:
         text = text.replace(raw, escaped)
     return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text).strip()
+
+
+def birth_time_pid7(patient: dict[str, Any]) -> str | None:
+    """PID-7 from the Patient's patient-birthTime extension (on
+    ``_birthDate``), or None when it has none. The wall time and offset are
+    written as the extension has them, the offset always (the time means
+    nothing without it), and the fraction of a second without trailing
+    zeros. Refused, so nothing is written: more than one birthTime, a value
+    that is not a FHIR dateTime with a time and offset, more than four
+    digits of a second (HL7 v2 holds four), or a date that is not the
+    Patient's birthDate."""
+    element = patient.get("_birthDate")
+    if element is None:
+        return None
+    extensions = element.get("extension", []) if isinstance(element, dict) else None
+    if not isinstance(extensions, list):
+        raise UsageError("the Patient's _birthDate is not a FHIR element; nothing was written.")
+    times = [x for x in extensions if isinstance(x, dict) and x.get("url") == BIRTH_TIME]
+    if not times:
+        return None
+    if len(times) > 1:
+        raise UsageError("the Patient has more than one birthTime extension; nothing was written.")
+    value = times[0].get("valueDateTime")
+    m = _FHIR_TIME.fullmatch(value) if isinstance(value, str) else None
+    try:
+        if m is None:
+            raise ValueError
+        datetime.fromisoformat(m.group(0).replace("Z", "+00:00"))  # month 13, hour 24
+    except ValueError:
+        raise UsageError(
+            "the Patient's birthTime is not a FHIR dateTime with a time and an offset;"
+            " nothing was written."
+        ) from None
+    year, month, day, hour, minute, second, fraction, zone = m.groups()
+    if patient.get("birthDate") != f"{year}-{month}-{day}":
+        raise UsageError(
+            "the Patient's birthTime is not on the day of its birthDate; nothing was written."
+        )
+    digits = (fraction or "").rstrip("0")
+    if len(digits) > 4:
+        raise UsageError(
+            "the Patient's birthTime has more than four digits of a second, more than HL7 v2"
+            " holds; nothing was written."
+        )
+    offset = "+0000" if zone == "Z" else zone.replace(":", "")
+    return f"{year}{month}{day}{hour}{minute}{second}{'.' + digits if digits else ''}{offset}"
 
 
 def mrn_systems(hospital: HospitalConfig) -> frozenset[str]:
@@ -176,7 +229,7 @@ class Renderer:
         raw_born = patient.get("birthDate", "")
         if raw_born and not (isinstance(raw_born, str) and _FHIR_DATE.fullmatch(raw_born)):
             raise UsageError("the Patient's birthDate is not a FHIR date; nothing was written.")
-        born = str(raw_born).replace("-", "")
+        born = birth_time_pid7(patient) or str(raw_born).replace("-", "")
         sex = _GENDER.get(str(patient.get("gender", "")), "")
         cx = f"{escape(mrn.value)}^^^{escape(self._authority(mrn))}^MR"
         return "|".join(["PID", "1", "", cx, "", xpn, "", born, sex])

@@ -59,14 +59,23 @@ from typing import Any
 from ..errors import EXIT_FINDINGS, BridgeError, ConfigError, FhirPostError
 from ..v2fhir.bundle import MERGE, MERGE_EVENT, MappedMessage, bundle_json, full_url, search_query
 from ..v2fhir.observation import KEY_JOIN, SET_ID_PART, SUB_ID_PART
+from ..v2fhir.patient import BIRTH_TIME
 from .client import EntryResult, HapiClient
 
 # The elements each mapper writes and so owns in a merge. Everything else
-# on the current resource (meta, tags, other identifiers, extensions) stays.
+# on the current resource (meta, tags, other identifiers, extensions other
+# than those OWNED_EXTENSIONS names) stays.
 OWNED: dict[str, tuple[str, ...]] = {
     "Patient": ("name", "gender", "birthDate", "address", "telecom", "active", "link"),
     "Encounter": ("status", "class", "subject", "period"),
     "ServiceRequest": ("status", "intent", "code", "authoredOn", "subject"),
+}
+# Extensions on a primitive element (``_<element>`` in FHIR JSON) that the
+# mapper owns with the element: a message that has the element replaces
+# them, so an A08 with a date-only PID-7 leaves no stale birth time. Other
+# extensions there stay, and with no element in the message all stay.
+OWNED_EXTENSIONS: dict[tuple[str, str], frozenset[str]] = {
+    ("Patient", "birthDate"): frozenset({BIRTH_TIME}),
 }
 # Elements kept whole and added to: Patient.link entries on the server
 # stay, and the message's are added when not already there. Names, addresses
@@ -219,7 +228,9 @@ def merge_resource(
     message's that are not there yet. ``resolved`` maps a ``urn:uuid`` full
     URL of this transaction to its ``Patient/<id>``, for comparing links.
     ``clear`` names owned elements the message explicitly nulled (the HL7
-    null): removed from the result when the message gives no value for them."""
+    null): removed from the result when the message gives no value for them.
+    The extensions ``OWNED_EXTENSIONS`` names on a primitive element (the
+    birth time on ``_birthDate``) go with that element."""
     kind = new["resourceType"]
     merged = copy.deepcopy(current)
     ids = resolved or {}
@@ -227,7 +238,9 @@ def merge_resource(
         if element not in new:
             if element in clear and (kind, element) not in ADDITIVE:
                 merged.pop(element, None)
+                _merge_extensions(merged, new, kind, element)
             continue
+        _merge_extensions(merged, new, kind, element)
         if (kind, element) in ADDITIVE:
             have_links = {_link_key(x, ids) for x in merged.get(element, [])}
             for item in new[element]:
@@ -252,6 +265,37 @@ def merge_resource(
         # on the server stays one when a later A08 leaves PV1-45 empty.
         merged["status"] = "finished"
     return merged
+
+
+def _merge_extensions(merged: dict[str, Any], new: dict[str, Any], kind: str, element: str) -> None:
+    """Replace the extensions ``OWNED_EXTENSIONS`` names on ``_<element>``
+    with the message's, keeping every other extension (and the id) there.
+    An ``_<element>`` left empty is removed."""
+    urls = OWNED_EXTENSIONS.get((kind, element))
+    if not urls:
+        return
+    key = f"_{element}"
+    current = merged.get(key)
+    kept: dict[str, Any] = dict(current) if isinstance(current, dict) else {}
+    have = kept.get("extension")
+    extensions = [
+        x
+        for x in (have if isinstance(have, list) else [])
+        if not (isinstance(x, dict) and x.get("url") in urls)
+    ]
+    sent = new.get(key)
+    sent_extensions = sent.get("extension") if isinstance(sent, dict) else None
+    for x in sent_extensions if isinstance(sent_extensions, list) else []:
+        if isinstance(x, dict) and x.get("url") in urls:
+            extensions.append(copy.deepcopy(x))
+    if extensions:
+        kept["extension"] = extensions
+    else:
+        kept.pop("extension", None)
+    if kept:
+        merged[key] = kept
+    else:
+        merged.pop(key, None)
 
 
 def _version_tag(resource: dict[str, Any], kind: str) -> str:
@@ -556,6 +600,7 @@ def check_run_order(items: Sequence[tuple[str, MappedMessage]]) -> None:
 
 __all__ = [
     "OWNED",
+    "OWNED_EXTENSIONS",
     "Committed",
     "ConcurrentWriteError",
     "MergeRefusedError",
