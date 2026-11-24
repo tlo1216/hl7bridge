@@ -1026,6 +1026,68 @@ def test_a40_splits_authorities_by_the_message_own_separators(mrg_authority, ref
         assert message_to_bundle(text, registry).message_type == "ADT^A40"
 
 
+# An HD with no namespace and an ISO OID is that OID's authority (urn:oid:<OID>), so
+# two OID-only authorities compare by the OID. A namespace and an OID-only HD are not
+# shown to be one authority, even when the namespace's own HD carries the same OID.
+_DIFFERS = "MRG-1: assigning authority (MRG-1.4) differs from PID-3.4"
+_UNKEYED = (
+    "MRG-1: assigning authority (MRG-1.4 or PID-3.4) is a universal id that is not an ISO OID"
+)
+
+
+def _a40_authorities(pid_authority: str, mrg_authority: str) -> str:
+    return _a40(
+        f"MRG|SC1002^^^{mrg_authority}^MR", f"PID|1||SC1001^^^{pid_authority}^MR||ZZZSAMPLE^THREE"
+    )
+
+
+@pytest.mark.parametrize(
+    ("pid_authority", "mrg_authority", "reason"),
+    [
+        ("&1.2.3.4&ISO", "&1.2.3.5&ISO", _DIFFERS),
+        ("&1.2.3.4&ISO", "&1.2.3.4.1&ISO", _DIFFERS),
+        ("&1.2.3.4&ISO", "HOSPC", _DIFFERS),
+        ("HOSPC", "&1.2.3.4&ISO", _DIFFERS),
+        ("HOSPC&1.2.3.4&ISO", "&1.2.3.4&ISO", _DIFFERS),
+        ("urn:oid:1.2.3.4", "&1.2.3.4&ISO", _DIFFERS),  # a namespace with that text
+        ("&1.2.3.4&ISO", "urn:oid:1.2.3.4", _DIFFERS),
+        ("HOSPC", "&1.2.3.4&DNS", _UNKEYED),
+        ("HOSPC", "&1.2.3.4", _UNKEYED),
+        ("HOSPC", "&1.2.3.4&IS\\T\\O", _UNKEYED),
+        ("&1.2.3.4&DNS", "HOSPC", _UNKEYED.replace("MRG-1:", "PID-3:")),
+        ("&1.2.3.4&DNS", "&1.2.3.4&DNS", _UNKEYED),
+        ("&1.2.3.4&ISO", "&1.2.3\\T\\4&ISO", _UNKEYED),
+        ("&1.2.3\\T\\4&ISO", "&1.2.3\\T\\4&ISO", _UNKEYED),
+        ("&1.2.3\\T\\4&ISO", "HOSPC", _UNKEYED.replace("MRG-1:", "PID-3:")),
+    ],
+)
+def test_a40_compares_oid_only_authorities_by_the_oid(
+    pid_authority, mrg_authority, reason, registry
+):
+    with pytest.raises(MappingError) as info:
+        message_to_bundle(_a40_authorities(pid_authority, mrg_authority), registry)
+    assert str(info.value) == reason
+
+
+@pytest.mark.parametrize(
+    ("pid_authority", "mrg_authority"),
+    [
+        ("&1.2.3.4&ISO", "&1.2.3.4&ISO"),
+        ("&1.2.3.4&ISO", "&1.2\\X2E\\3.4&ISO"),  # the same OID once decoded
+        ("urn:oid:1.2.3.4", "urn:oid:1.2.3.4"),  # the same namespace
+        ("&1.2.3.4&ISO", ""),  # one authority missing, as before
+        ("", "&1.2.3.4&ISO"),
+        ("&1.2.3.4&DNS", ""),
+        ("", "&1.2.3.4&DNS"),
+        ("&&ISO", "&&ISO"),  # no namespace and no universal id: unchanged
+        ("HOSPC", "&&ISO"),
+    ],
+)
+def test_a40_accepts_the_same_oid_or_one_missing_authority(pid_authority, mrg_authority, registry):
+    mapped = message_to_bundle(_a40_authorities(pid_authority, mrg_authority), registry)
+    assert mapped.message_type == "ADT^A40"
+
+
 @pytest.mark.parametrize(
     "extra",
     [

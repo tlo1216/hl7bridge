@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from hl7bridge.config import HospitalRegistry
+from hl7bridge.config import FhirSettings, HospitalRegistry
 from hl7bridge.errors import FhirPostError, StoreError
 from hl7bridge.fhir.client import HapiClient
 from hl7bridge.fhir.match import resolve_patient
@@ -467,6 +467,143 @@ def test_the_listener_splits_by_the_message_own_separators(tmp_path, server, pid
     text = _third_party_oru("PLACEHOLDER").translate(_OTHER).replace("PLACEHOLDER", pid3)
     assert text.startswith("MSH!$*@%!")
     assert lab.send(text) == ("AA", "")
+
+
+# -- PID-3.4 with no namespace, only a universal id --------------------------------------
+#
+# An ISO OID alone keys the MRN on the OID: the system is urn:oid:<OID> (the IG's HD
+# to Identifier.system), or what mrn_by_authority maps that urn:oid key to. Any other
+# universal id alone is AE unknown_assigning_authority, never a fallback.
+
+_SITE_OID = "2.16.840.1.113883.19.5"
+_SITE_SYSTEM = f"urn:oid:{_SITE_OID}"
+_HEX_OID = "2\\X2E\\16.840.1.113883.19.5"  # the same OID, its first dot hex-escaped
+
+
+def _patient_under(server: FakeFhir, server_id: str, system: str) -> None:
+    patient = _patient()
+    patient["identifier"][0]["system"] = system
+    server._write("Patient", server_id, patient)
+
+
+@pytest.mark.parametrize(
+    "pid3",
+    [
+        f"MRN001^^^&{_SITE_OID}&ISO^MR",
+        f"MRN001^^^&{_HEX_OID}&ISO^MR",
+        f"X1^^^ST^PI~MRN001^^^&{_SITE_OID}&ISO^MR",
+    ],
+)
+def test_an_oid_only_authority_keys_the_mrn_on_the_oid(tmp_path, server, pid3):
+    lab = _authority_lab(tmp_path, server, "{ST: urn:test:st}")
+    assert lab.send(_third_party_oru(pid3)) == ("AE", "unknown_patient: PID-3")
+    _patient_under(server, "p1", _SITE_SYSTEM)
+    assert lab.send(_third_party_oru(pid3).replace("Q77", "Q78")) == ("AA", "")
+
+
+def test_an_oid_only_authority_never_takes_the_default_system(tmp_path, server):
+    lab = _authority_lab(tmp_path, server, "{ST: urn:test:st}")
+    _patient_under(server, "p1", "urn:test:other")  # the profile's own MRN system
+    assert lab.send(_third_party_oru("MRN001^^^^MR")) == ("AA", "")
+    oid_only = _third_party_oru(f"MRN001^^^&{_SITE_OID}&ISO^MR").replace("Q77", "Q78")
+    assert lab.send(oid_only) == ("AE", "unknown_patient: PID-3")
+
+
+def test_a_profile_can_map_an_oid_key_to_its_mrn_system(tmp_path, server):
+    lab = _authority_lab(tmp_path, server, f"{{'{_SITE_SYSTEM}': urn:test:mrn}}")
+    assert lab.send(_third_party_oru(f"MRN001^^^&{_SITE_OID}&ISO^MR")) == ("AA", "")
+    # Another OID keys on its own system, not the mapped one or the default.
+    other = _third_party_oru("MRN001^^^&2.16.840.1.113883.19.6&ISO^MR").replace("Q77", "Q78")
+    assert lab.send(other) == ("AE", "unknown_patient: PID-3")
+    # from-fhir writes the key as the namespace, and it reads back the same way.
+    text = lab.oru()
+    assert f"^^^{_SITE_SYSTEM}^MR" in text
+    assert lab.send(text) == ("AA", "")
+
+
+def test_a_mapped_oid_key_wins_over_the_oid_system(tmp_path, server):
+    lab = _authority_lab(tmp_path, server, f"{{'{_SITE_SYSTEM}': urn:test:mrn}}")
+    _patient_under(server, "p2", _SITE_SYSTEM)  # would match only without the mapping
+    assert lab.send(_third_party_oru(f"MRN001^^^&{_SITE_OID}&ISO^MR")) == ("AA", "")
+    report = next(iter(server.data["DiagnosticReport"].values()))
+    assert report["subject"]["reference"] == "Patient/p1"
+
+
+def test_a_namespace_that_reads_like_an_oid_system_is_still_a_namespace(tmp_path, server):
+    """Only an OID in HD.2 is its own system: the same text in HD.1 is a
+    namespace, AE when the profile does not map it."""
+    lab = _authority_lab(tmp_path, server, "{ST: urn:test:st}")
+    _patient_under(server, "p1", _SITE_SYSTEM)
+    sent = _third_party_oru(f"MRN001^^^{_SITE_SYSTEM}^MR")
+    assert lab.send(sent) == ("AE", "unknown_assigning_authority: PID-3.4")
+
+
+@pytest.mark.parametrize(
+    ("authority", "oid", "system"),
+    [
+        (None, False, None),
+        ("", False, "urn:test:default"),
+        ("ST", False, "urn:test:st"),
+        ("OTHER", False, None),
+        (_SITE_SYSTEM, True, _SITE_SYSTEM),
+        ("urn:oid:1.2.3.4", True, "urn:test:mapped"),
+        ("urn:oid:1.2.3.4", False, "urn:test:mapped"),  # a namespace with that text
+        ("urn:oid:1.2.3.5", False, None),
+    ],
+)
+def test_mrn_system_by_authority_key(authority, oid, system):
+    settings = FhirSettings(
+        mrn_by_authority=(("ST", "urn:test:st"), ("urn:oid:1.2.3.4", "urn:test:mapped"))
+    )
+    assert settings.mrn_system(authority, "urn:test:default", oid=oid) == system
+
+
+@pytest.mark.parametrize(
+    "pid3",
+    [
+        f"MRN001^^^&{_SITE_OID}&DNS^MR",
+        f"MRN001^^^&{_SITE_OID}&^MR",
+        f"MRN001^^^&{_SITE_OID}^MR",
+        f"MRN001^^^&{_SITE_OID}&iso^MR",
+        f"MRN001^^^&{_SITE_OID}&IS\\T\\O^MR",
+        "MRN001^^^&8f14e45f-ceea-467a-9575-0c3c2a5a1d5e&UUID^MR",
+        "MRN001^^^&https://example.org/mrn&URI^MR",
+        "MRN001^^^&LAB&ISO^MR",
+        f"MRN001^^^&{_SITE_OID}\\T\\7&ISO^MR",
+        f"MRN001^^^&{_SITE_OID}\\S\\7&ISO^MR",
+    ],
+)
+def test_any_other_universal_id_alone_is_ae(tmp_path, server, pid3):
+    """Every fallback would find a Patient here (the default system, the OID's
+    system, a mapped key), so only an explicit AE passes."""
+    keys = f"{{'{_SITE_SYSTEM}': urn:test:mrn, '{_SITE_OID}': urn:test:mrn, LAB: urn:test:mrn}}"
+    lab = _authority_lab(tmp_path, server, keys)
+    _patient_under(server, "p2", "urn:test:other")
+    _patient_under(server, "p3", _SITE_SYSTEM)
+    assert lab.send(_third_party_oru(pid3)) == ("AE", "unknown_assigning_authority: PID-3.4")
+    assert "DiagnosticReport" not in server.data
+
+
+@pytest.mark.parametrize(
+    "pid3", ["MRN001^^^^MR", "MRN001^^^&&ISO^MR", "MRN001^^^&&^MR", 'MRN001^^^&""&ISO^MR']
+)
+def test_no_namespace_and_no_universal_id_keeps_the_default_system(lab, pid3):
+    assert lab.send(_third_party_oru(pid3)) == ("AA", "")
+
+
+@pytest.mark.parametrize(
+    ("pid3", "answer"),
+    [
+        (f"MRN001$$$%{_SITE_OID}%ISO$MR", ("AA", "")),
+        (f"MRN001$$$%{_SITE_OID}&7%ISO$MR", ("AE", "unknown_assigning_authority: PID-3.4")),
+    ],
+)
+def test_an_oid_only_authority_under_the_message_own_separators(tmp_path, server, pid3, answer):
+    lab = _authority_lab(tmp_path, server, "{ST: urn:test:st}")
+    _patient_under(server, "p1", _SITE_SYSTEM)
+    text = _third_party_oru("PLACEHOLDER").translate(_OTHER).replace("PLACEHOLDER", pid3)
+    assert text.startswith("MSH!$*@%!")
+    assert lab.send(text) == answer
 
 
 # -- run ownership -------------------------------------------------------------------------

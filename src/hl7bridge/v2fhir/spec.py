@@ -121,7 +121,10 @@ ROWS: tuple[SpecRow, ...] = (
         " read. The IG takes every system from the authority; hl7bridge reads one MRN system"
         " per hospital. Component 4 is split into its subcomponents on the message's own"
         " separators before escapes are decoded, so a separator the sender escaped stays in"
-        " the namespace.",
+        " the namespace. Direct mode picks the MRN system by the MRN repetition's component 4:"
+        " the namespace through mrn_by_authority; with no namespace, an ISO OID is the key"
+        " urn:oid:<OID>, and the system too unless mrn_by_authority maps that key; any other"
+        " universal id alone is AE unknown_assigning_authority.",
     ),
     SpecRow(
         "pid_to_patient",
@@ -184,10 +187,12 @@ ROWS: tuple[SpecRow, ...] = (
         "",
         "ADT^A40 only. Component 1 is the prior MRN, with the profile's MRN system"
         " (component 5, when valued, must be MR; component 4, when valued on both MRG-1 and"
-        " PID-3, must match). One PID, one MRG and one repetition; the same MRN as PID-3, an"
-        " empty or HL7-null MRN are refused. The Patient is set inactive and linked"
-        " replaced-by to the survivor (PID). The IG (1.0.0) has no MRG-to-Patient map and no"
-        " ADT_A40 message map; its only MRG map, segment-mrg-to-account"
+        " PID-3, must match: the same namespace, or with no namespace the same ISO OID; a"
+        " universal id alone that is not an ISO OID is refused when the other side has an"
+        " authority). One PID, one MRG and one"
+        " repetition; the same MRN as PID-3, an empty or HL7-null MRN are refused. The Patient"
+        " is set inactive and linked replaced-by to the survivor (PID). The IG (1.0.0) has no"
+        " MRG-to-Patient map and no ADT_A40 message map; its only MRG map, segment-mrg-to-account"
         " (https://hl7.org/fhir/uv/v2mappings/ConceptMap-segment-mrg-to-account.html), maps"
         " MRG-3 to Account.identifier and leaves MRG-1 unmapped. A post merges this into the"
         " current Patient (existing links stay, a contradicting or reversed merge is refused), or"

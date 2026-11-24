@@ -81,8 +81,12 @@ class MappedMessage:
     # system, which a post needs to find the results a correction dropped.
     accession: str = ""
     observation_system: str = ""
-    # PID-3.4 of the MRN repetition, for direct mode's MRN system choice.
-    mrn_authority: str = ""
+    # PID-3.4 of the MRN repetition as a key (patient.authority_key), for
+    # direct mode's MRN system choice: the namespace, urn:oid:<OID> for an
+    # HD with only an ISO OID (mrn_authority_is_oid), '' for none, and None
+    # for any other universal id alone.
+    mrn_authority: str | None = ""
+    mrn_authority_is_oid: bool = False
     # The profile's fhir.patient_policy. The batch post refuses match_only.
     patient_policy: str = "create"
     # Per entry (full URL): owned elements the message explicitly nulls, so
@@ -175,7 +179,7 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
     with _mapping(reader, "pid_to_patient", "PID"):
         patient = pid_to_patient(ctx)
         cleared = cleared_elements(ctx, patient)
-        authority = mrn_authority(ctx)
+        authority, authority_is_oid = mrn_authority(ctx)
         survivor_mrn = mrn_value(ctx)
     patient_ref = _full_url(patient)
     is_adt = msg_type in ADT_EVENTS or msg_type == MERGE_EVENT
@@ -183,7 +187,9 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
 
     if msg_type == MERGE_EVENT:
         with _mapping(reader, "mrg_to_patient", "MRG"):
-            planned.append((merged_patient(ctx, patient_ref, survivor_mrn, authority), MERGE))
+            survivor_authority = (authority, authority_is_oid)
+            merged = merged_patient(ctx, patient_ref, survivor_mrn, survivor_authority)
+            planned.append((merged, MERGE))
     elif is_adt:
         with _mapping(reader, "pv1_to_encounter", "PV1"):
             encounter = pv1_to_encounter(ctx, patient_ref)
@@ -220,6 +226,7 @@ def message_to_bundle(text: str, registry: HospitalRegistry) -> MappedMessage:
         accession=report.identifier[0].value if report is not None else "",  # type: ignore[attr-defined]
         observation_system=hospital.systems.observation if report is not None else "",
         mrn_authority=authority,
+        mrn_authority_is_oid=authority_is_oid,
         patient_policy=hospital.fhir.patient_policy,
         clears={patient_ref: cleared} if cleared and is_adt else {},
     )

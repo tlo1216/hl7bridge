@@ -164,9 +164,12 @@ full ACK table is in `src/hl7bridge/ingest/direct.py` and ADR-0004.
 - **Patients are read only.** Every loaded profile must say
   `fhir.patient_policy: match_only`. The listener finds the Patient by
   MRN (PID-3, its system from `mrn_by_authority` by PID-3.4, or `mrn`
-  when PID-3.4 is empty; a PID-3.4 the profile does not map is AE
-  `unknown_assigning_authority`). None, several (counted over every
-  result page), an inactive one or one replaced by another is AE. A key
+  when PID-3.4 has no namespace and no universal id; a namespace the profile does not map is AE
+  `unknown_assigning_authority`; with no namespace, an ISO OID gives
+  `urn:oid:<OID>` and any other universal id alone is AE
+  `unknown_assigning_authority`; details in `docs/profiles.md`). None,
+  several (counted over every result page), an inactive one or one
+  replaced by another is AE. A key
   that already belongs to another Patient is AE `patient_mismatch`: a
   report never moves between patients. ADT^A08 and ADT^A40 get AR
   `patient_read_only`. Supported: ADT^A01, ADT^A04 (an Encounter), ORM^O01

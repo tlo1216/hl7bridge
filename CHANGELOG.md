@@ -19,9 +19,25 @@ profile format may still change between minor versions.
   separators, decoded once. Two kinds of message read differently: one
   with `&` escaped in that namespace, and one whose MSH-2 names another
   subcomponent separator and carries a plain `&` there (it is data, not a
-  separator). Every other message maps exactly as before. A profile whose
-  `mrn_by_authority` key was set to the text before the `&` needs the full
-  namespace as its key now (`ST&MARY`, not `ST`).
+  separator). Apart from the next item, every other message maps exactly
+  as before. A profile whose `mrn_by_authority` key was set to the text
+  before the `&` needs the full namespace as its key now (`ST&MARY`, not
+  `ST`).
+- A PID-3.4 or MRG-1.4 with no namespace but a universal id is no longer
+  read as no authority. Before, direct mode looked such an MRN up under
+  the profile's default MRN system, and an A40 took any two of them as the
+  same authority. Now, with no namespace, an ISO OID
+  (`&2.16.840.1.113883.19.5&ISO`) is the authority: direct mode looks the
+  MRN up under `urn:oid:<OID>`, or under the system `mrn_by_authority` maps
+  that `urn:oid:` key to, and an A40 compares the two OIDs (a namespace on
+  one side and an OID alone on the other are refused as different). Any
+  other universal id alone (another type, no type, or a value that is not
+  an OID) is AE `unknown_assigning_authority` in direct mode, and refuses
+  an A40 when the other side has an authority. A PID-3.4 with no namespace
+  and no universal id still takes the default system. A site whose
+  OID-only sender matched Patients under the default system now gets AE
+  `unknown_patient`; to keep that lookup, map `'urn:oid:<OID>'` to the
+  profile's `mrn` system in `mrn_by_authority`.
 
 ## [0.6.0] - 2026-11-21
 
